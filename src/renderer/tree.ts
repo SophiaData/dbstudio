@@ -27,6 +27,22 @@
  */
 
 import type { ObjectRef } from '../core/model'
+import {
+  buildRootEntries,
+  defaultStore,
+  deleteGroup,
+  getConnColor,
+  getConnGroup,
+  getGroups,
+  groupToObjectRef,
+  colorCss,
+  isConnGroupRef,
+  renameGroup,
+  setConnColor,
+  setConnGroup,
+  PRESET_COLORS,
+  type KVStore
+} from './conn-organize'
 import type { DbStudioApi } from '../core/api'
 import {
   asDdlApi,
@@ -127,6 +143,16 @@ export class MetadataTree {
   readonly #rowsEl: HTMLElement
   readonly #listChildren: (nodeId: string | null) => Promise<ObjectRef[]>
   readonly #cb: TreeCallbacks
+  /**
+   * 颜色/分组偏好存储。
+   *
+   * 为什么走 localStorage 而不是连接配置：颜色/分组是纯本地 UI 偏好，
+   * 而改连接配置要调 `updateConnection`，那会**断开重连**——用户只想改个颜色，
+   * 结果连接被踢掉，不可接受。详见 conn-organize.ts 文件头。
+   */
+  readonly #store: KVStore
+  /** 分组节点的展开态（按组名记，与连接 id 无关，所以组改名后需迁移）。 */
+  readonly #groupExpanded = new Map<string, boolean>()
 
   #roots: NodeState[] = []
   /**
@@ -153,13 +179,16 @@ export class MetadataTree {
     spacer: HTMLElement,
     rowsEl: HTMLElement,
     listChildren: (nodeId: string | null) => Promise<ObjectRef[]>,
-    callbacks: TreeCallbacks
+    callbacks: TreeCallbacks,
+    // 颜色/分组的本地存储（默认 localStorage；测试或禁用时可注入 MemoryStore）。
+    store: KVStore = defaultStore()
   ) {
     this.#viewport = viewport
     this.#spacer = spacer
     this.#rowsEl = rowsEl
     this.#listChildren = listChildren
     this.#cb = callbacks
+    this.#store = store
 
     // 滚动只做「重算切片 + 重绘可见行」，不重建整棵树。
     this.#viewport.addEventListener('scroll', () => this.#scheduleRender(), { passive: true })
@@ -250,15 +279,19 @@ export class MetadataTree {
     this.#cb.onStatus('正在加载连接…')
     try {
       const refs = await this.#listChildren(null)
-      this.#roots = refs.map((ref) => this.#makeNode(ref, 0))
+      // 「拉完 → 构建节点」之间插入本地分组逻辑（分组是纯本地偏好，
+      // 服务端返回的是扁平连接列表，只能在这一步重新组织成两层）。
+      this.#roots = this.#buildRootsWithGroups(refs)
       this.#rebuildRows()
       const connected = refs.filter((r) => r.meta?.['connected'] === true).length
       // 摘要里区分「已保存」与「已连接」——加入持久化后这两个不是一回事：
       // 启动时只载入配置不建会话，所以「2 个连接 · 0 个已连接」是正常状态。
+      const groupCount = getGroups(this.#store).length
       this.#cb.onSummary(
         refs.length === 0
           ? '未连接'
-          : `${refs.length} 个连接 · ${connected} 个已连接`
+          : `${refs.length} 个连接 · ${connected} 个已连接` +
+              (groupCount > 0 ? ` · ${groupCount} 个分组` : '')
       )
       this.#cb.onStatus(`共 ${refs.length} 个连接`)
       if (refs.length === 0) {
@@ -270,6 +303,130 @@ export class MetadataTree {
       this.#cb.onStatus(`加载连接失败：${errText(e)}`)
     }
   }
+
+  /**
+   * 把扁平的连接列表按本地分组偏好组织成根层节点。
+   *
+   * 分组节点是**真的父节点**（children 就是连接节点），因此树的展开/折叠、
+   * 搜索过滤、键盘导航对它自动生效，不需要任何特判。
+   * 展开态额外记在 #groupExpanded（组名→布尔）：NodeState 每次 loadRoots 都会
+   * 重建，不能依赖对象身份保存展开状态。
+   */
+  #buildRootsWithGroups(refs: readonly ObjectRef[]): NodeState[] {
+    const groups = getGroups(this.#store)
+    const entries = buildRootEntries(refs, groups, (id) => getConnGroup(this.#store, id))
+    const roots: NodeState[] = []
+    for (const entry of entries) {
+      if (entry.kind === 'connection') {
+        roots.push(this.#makeNode(entry.ref, 0))
+        continue
+      }
+      // 分组节点 depth 0，组内连接 depth 1。
+      const groupNode = this.#makeNode(groupToObjectRef(entry.name), 0)
+      groupNode.children = entry.connections.map((c) => this.#makeNode(c, 1))
+      // 新建的组默认展开（用户刚分完组，应立刻看到结果）；之后沿用记住的展开态。
+      groupNode.expanded = this.#groupExpanded.get(entry.name) ?? true
+      this.#groupExpanded.set(entry.name, groupNode.expanded)
+      roots.push(groupNode)
+    }
+    return roots
+  }
+
+  /** 设置某连接的颜色（null = 清除）。只影响渲染，不重取数据。 */
+  #applyConnColor(node: NodeState, colorId: string | null): void {
+    setConnColor(this.#store, stripConnPrefix(node.ref.id), colorId)
+    this.#lastRenderKey = ''
+    this.render()
+    this.#cb.onStatus(
+      colorId === null
+        ? `已清除「${node.ref.name}」的颜色`
+        : `已把「${node.ref.name}」标为${
+            PRESET_COLORS.find((c) => c.id === colorId)?.label ?? colorId
+          }`
+    )
+  }
+
+  /** 把连接移入组（null → 移回顶层）。 */
+  #moveToGroup(node: NodeState, groupName: string | null): void {
+    setConnGroup(this.#store, stripConnPrefix(node.ref.id), groupName)
+    this.#rebuildRootsFromCache()
+    this.#cb.onStatus(
+      groupName === null
+        ? `「${node.ref.name}」已移出分组`
+        : `「${node.ref.name}」已移入「${groupName}」`
+    )
+  }
+
+  /** 重命名组。 */
+  #renameConnGroup(groupName: string, newName: string): boolean {
+    const ok = renameGroup(this.#store, groupName, newName)
+    if (!ok) {
+      this.#cb.onStatus(`重命名失败：「${newName}」已存在或原分组「${groupName}」不存在`, true)
+      return false
+    }
+    // 展开态跟着组名迁移，否则改名后组突然折叠，看起来像"内容没了"。
+    const wasExpanded = this.#groupExpanded.get(groupName)
+    this.#groupExpanded.delete(groupName)
+    if (wasExpanded !== undefined) this.#groupExpanded.set(newName, wasExpanded)
+    this.#rebuildRootsFromCache()
+    this.#cb.onStatus(`分组「${groupName}」已重命名为「${newName}」`)
+    return true
+  }
+
+  /**
+   * 删除组：**组内连接回到顶层，连接本身完好**。
+   *
+   * 这是本功能最关键的不变量。deleteGroup 只删「分组归属」记录与组列表项，
+   * 绝不触碰连接配置或连接对象——所以删组永远删不掉连接。
+   */
+  #deleteConnGroup(groupName: string): void {
+    const memberCount = this.#countGroupMembers(groupName)
+    if (!deleteGroup(this.#store, groupName)) {
+      this.#cb.onStatus(`删除分组失败：「${groupName}」不存在`, true)
+      return
+    }
+    this.#groupExpanded.delete(groupName)
+    this.#rebuildRootsFromCache()
+    this.#cb.onStatus(
+      `已删除分组「${groupName}」，其中 ${memberCount} 个连接已回到顶层（连接本身未被删除）`
+    )
+  }
+
+  /** 当前缓存里属于某组的连接数（给删除提示用）。 */
+  #countGroupMembers(groupName: string): number {
+    let n = 0
+    for (const node of this.#roots) {
+      if (!isConnGroupRef(node.ref)) continue
+      if (node.ref.name !== groupName) continue
+      n += node.children?.length ?? 0
+    }
+    return n
+  }
+
+  /**
+   * 用「上次从服务端拿到的连接 refs」重新按本地偏好构建根节点。
+   *
+   * 为什么不直接 loadRoots()：分组/颜色是纯本地变化，再问一次服务端既慢，
+   * 又会把所有已加载的子节点缓存丢掉（用户展开的 schema 会全部收起）。
+   */
+  #rebuildRootsFromCache(): void {
+    const connections: ObjectRef[] = []
+    for (const node of this.#roots) {
+      if (isConnGroupRef(node.ref)) {
+        for (const child of node.children ?? []) connections.push(child.ref)
+      } else {
+        connections.push(node.ref)
+      }
+    }
+    this.#roots = this.#buildRootsWithGroups(connections)
+    this.#rebuildRows()
+  }
+
+  /** 已有分组名（供菜单选择）。 */
+  #existingGroups(): string[] {
+    return getGroups(this.#store)
+  }
+
 
   #makeNode(ref: ObjectRef, depth: number): NodeState {
     return { ref, depth, expanded: false, loading: false, error: null, children: null }
@@ -527,6 +684,23 @@ export class MetadataTree {
     }
     el.style.paddingLeft = `${6 + node.depth * INDENT}px`
 
+    // ---- 连接颜色标记 ----
+    // 只对**连接节点**上色（分组/表/列不需要颜色语义）。
+    // 做法克制：左侧 3px 色条 + 名字前小圆点，避免整行染色造成视觉噪音。
+    // 颜色是纯本地偏好（localStorage），不进连接配置（见 conn-organize.ts）。
+    if (node.ref.kind === 'connection') {
+      const colorId = getConnColor(this.#store, stripConnPrefix(node.ref.id))
+      const css = colorCss(colorId)
+      if (css) {
+        el.classList.add('has-conn-color')
+        // 色条用 box-shadow inset 而不是 border，避免改变行高/宽度导致虚拟滚动错位。
+        el.style.boxShadow = `inset 3px 0 0 0 ${css}`
+        el.setAttribute('data-conn-color', colorId ?? '')
+      }
+    }
+    // 分组节点加个类，便于样式区分（图标与折叠行为复用 folder 那套）。
+    if (isConnGroupRef(node.ref)) el.classList.add('is-conn-group')
+
     // 只有「确实可能有子节点」的才画箭头，避免用户展开出空节点。
     const twisty = document.createElement('span')
     twisty.className = 'twisty'
@@ -542,6 +716,18 @@ export class MetadataTree {
     icon.textContent = iconFor(node.ref.kind)
     icon.setAttribute('aria-hidden', 'true')
     el.appendChild(icon)
+
+    // 颜色圆点（在名字之前）。只在连接节点且设了色时出现。
+    if (node.ref.kind === 'connection') {
+      const dotCss = colorCss(getConnColor(this.#store, stripConnPrefix(node.ref.id)))
+      if (dotCss) {
+        const dot = document.createElement('span')
+        dot.className = 'conn-color-dot'
+        dot.setAttribute('aria-hidden', 'true')
+        dot.style.background = dotCss
+        el.appendChild(dot)
+      }
+    }
 
     const label = document.createElement('span')
     label.className = 'row-label'
@@ -997,6 +1183,35 @@ export class MetadataTree {
           this.#cb.onViewErDiagram(node.ref)
         }
       })
+
+      // ---- 颜色标记（E2-B）----
+      //
+      // 为什么不做成「子菜单」而是一个可展开的调色板：预设色只有 7 个 + 清除，
+      // 平铺比两级菜单更快。用文字符号（●）着色，不依赖额外图标资源。
+      const currentColor = getConnColor(this.#store, stripConnPrefix(node.ref.id))
+      items.push({
+        label: `标记颜色…${currentColor ? '（已设置）' : ''}`,
+        run: () => this.#openColorPicker(node)
+      })
+
+      // ---- 分组（E2-B）----
+      items.push({
+        label: '移动到分组…',
+        run: () => this.#openMoveToGroup(node)
+      })
+    }
+
+    // ---- 连接分组的操作（重命名 / 删除组）----
+    if (isConnGroupRef(node.ref)) {
+      items.push({
+        label: '重命名分组…',
+        run: () => this.#openRenameGroup(node.ref.name)
+      })
+      items.push({
+        label: '删除分组（连接回到顶层）',
+        danger: true,
+        run: () => this.#openDeleteGroup(node.ref.name)
+      })
     }
 
     // ---- DDL 入口 ----
@@ -1317,6 +1532,218 @@ export class MetadataTree {
     return null
   }
 
+  // ===========================================================================
+  // 颜色 / 分组的对话框
+  // ===========================================================================
+  //
+  // 全部用**内联样式 + CSS 变量**手写，不依赖 index.html 也不引入组件库
+  // （index.html / 其它渲染模块不在本任务写入范围）。三个对话框结构都很小，
+  // 为此抽一个通用 Modal 反而是过度设计。
+
+  /**
+   * 颜色选择：平铺 7 个预设色 + 清除。
+   *
+   * 为什么是**预设色板**而不是取色器：固定颜色的价值在于语义化
+   * （红=生产 / 绿=本地），自由取色会让同一含义出现十几种红，反而失去辨识度。
+   */
+  #openColorPicker(node: NodeState): void {
+    const connId = stripConnPrefix(node.ref.id)
+    const current = getConnColor(this.#store, connId)
+
+    const { overlay, panel } = buildOverlay(`设置颜色 · ${node.ref.name}`)
+    const grid = document.createElement('div')
+    grid.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;'
+
+    for (const preset of PRESET_COLORS) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.setAttribute('aria-label', preset.label)
+      btn.title = preset.label
+      const isCur = current === preset.id
+      btn.style.cssText =
+        'display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:6px;' +
+        `border:1px solid ${isCur ? 'var(--accent)' : 'var(--border)'};` +
+        'background:var(--bg);color:var(--fg);cursor:pointer;font:inherit;font-size:12px;'
+      const swatch = document.createElement('span')
+      swatch.style.cssText =
+        `width:12px;height:12px;border-radius:50%;background:${preset.css};flex:0 0 auto;`
+      const text = document.createElement('span')
+      text.textContent = preset.label
+      btn.appendChild(swatch)
+      btn.appendChild(text)
+      btn.addEventListener('click', () => {
+        overlay.remove()
+        this.#applyConnColor(node, preset.id)
+      })
+      grid.appendChild(btn)
+    }
+    panel.appendChild(grid)
+
+    const actions = document.createElement('div')
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:14px;'
+    const clearBtn = document.createElement('button')
+    clearBtn.type = 'button'
+    clearBtn.textContent = '清除颜色'
+    clearBtn.disabled = current === null
+    clearBtn.addEventListener('click', () => {
+      overlay.remove()
+      this.#applyConnColor(node, null)
+    })
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.textContent = '取消'
+    cancelBtn.addEventListener('click', () => overlay.remove())
+    actions.appendChild(clearBtn)
+    actions.appendChild(cancelBtn)
+    panel.appendChild(actions)
+  }
+
+  /**
+   * 移动到分组。
+   *
+   * 提供"已有组"快捷按钮 + "新建组"输入框 + "移出分组"。
+   * 注意：所有写入都只碰 localStorage，**绝不调用 updateConnection**
+   * （那会断开重连，用户只是整理分组而已）。
+   */
+  #openMoveToGroup(node: NodeState): void {
+    const existing = this.#existingGroups()
+    const currentGroup = getConnGroup(this.#store, stripConnPrefix(node.ref.id))
+
+    const { overlay, panel } = buildOverlay(`移动到分组 · ${node.ref.name}`)
+
+    if (existing.length > 0) {
+      const label = document.createElement('div')
+      label.textContent = '已有分组'
+      label.style.cssText = 'margin-bottom:6px;color:var(--fg-dim);font-size:12px;'
+      panel.appendChild(label)
+      const list = document.createElement('div')
+      list.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;'
+      for (const g of existing) {
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.textContent = g + (g === currentGroup ? '（当前）' : '')
+        btn.addEventListener('click', () => {
+          overlay.remove()
+          this.#moveToGroup(node, g)
+        })
+        list.appendChild(btn)
+      }
+      panel.appendChild(list)
+    }
+
+    const newLabel = document.createElement('div')
+    newLabel.textContent = '新建分组'
+    newLabel.style.cssText = 'margin-bottom:6px;color:var(--fg-dim);font-size:12px;'
+    panel.appendChild(newLabel)
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.placeholder = '例如：生产 / 测试 / 本地'
+    input.setAttribute('aria-label', '新分组名')
+    input.style.cssText =
+      'width:100%;box-sizing:border-box;font:inherit;font-size:12px;padding:5px 7px;' +
+      'border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);'
+    panel.appendChild(input)
+
+    const actions = document.createElement('div')
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:14px;'
+    const outBtn = document.createElement('button')
+    outBtn.type = 'button'
+    outBtn.textContent = '移出分组（回到顶层）'
+    outBtn.disabled = currentGroup === null
+    outBtn.addEventListener('click', () => {
+      overlay.remove()
+      this.#moveToGroup(node, null)
+    })
+    const okBtn = document.createElement('button')
+    okBtn.type = 'button'
+    okBtn.textContent = '确定'
+    const submit = (): void => {
+      const name = input.value.trim()
+      if (name === '') {
+        input.focus()
+        return
+      }
+      overlay.remove()
+      this.#moveToGroup(node, name)
+    }
+    okBtn.addEventListener('click', submit)
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit()
+    })
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.textContent = '取消'
+    cancelBtn.addEventListener('click', () => overlay.remove())
+    actions.appendChild(outBtn)
+    actions.appendChild(cancelBtn)
+    actions.appendChild(okBtn)
+    panel.appendChild(actions)
+    input.focus()
+  }
+
+  /** 重命名分组（单输入框）。 */
+  #openRenameGroup(groupName: string): void {
+    const { overlay, panel } = buildOverlay(`重命名分组 · ${groupName}`)
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.value = groupName
+    input.setAttribute('aria-label', '新分组名')
+    input.style.cssText =
+      'width:100%;box-sizing:border-box;font:inherit;font-size:12px;padding:5px 7px;' +
+      'border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);'
+    panel.appendChild(input)
+
+    const hint = document.createElement('p')
+    hint.setAttribute('role', 'alert')
+    hint.style.cssText = 'margin:8px 0 0;color:var(--danger);font-size:12px;min-height:1.2em;'
+    panel.appendChild(hint)
+
+    const actions = document.createElement('div')
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:10px;'
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.textContent = '取消'
+    cancelBtn.addEventListener('click', () => overlay.remove())
+    const okBtn = document.createElement('button')
+    okBtn.type = 'button'
+    okBtn.textContent = '确定'
+    const submit = (): void => {
+      const next = input.value.trim()
+      if (next === '' || next === groupName) {
+        hint.textContent = next === '' ? '分组名不能为空。' : '与原名相同。'
+        return
+      }
+      if (this.#renameConnGroup(groupName, next)) overlay.remove()
+      else hint.textContent = `「${next}」已存在，请换一个名字。`
+    }
+    okBtn.addEventListener('click', submit)
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit()
+    })
+    actions.appendChild(cancelBtn)
+    actions.appendChild(okBtn)
+    panel.appendChild(actions)
+    input.focus()
+    input.select()
+  }
+
+  /**
+   * 删除分组（二次确认）。
+   *
+   * 文案必须说清"连接不会被删"——否则用户会怕删组把连接一起删了，
+   * 或者反过来，以为安全而不知道组内连接会跑到顶层。
+   */
+  #openDeleteGroup(groupName: string): void {
+    const members = this.#countGroupMembers(groupName)
+    const message =
+      `确定删除分组「${groupName}」吗？\n\n` +
+      `组内 ${members} 个连接不会被删除，它们会回到顶层显示。`
+    // 二次确认用原生 confirm：阻塞、不可被后续消息冲掉，适合破坏性操作。
+    // eslint-disable-next-line no-alert -- 见上方注释
+    if (!window.confirm(message)) return
+    this.#deleteConnGroup(groupName)
+  }
+
   /** 资源清理：移除常驻监听（菜单是临时的，关闭时自清）。 */
   dispose(): void {
     this.#closeMenu()
@@ -1329,6 +1756,18 @@ export class MetadataTree {
 
 function keyOf(ref: ObjectRef): string {
   return `${ref.kind}::${ref.id}`
+}
+
+/**
+ * 从 `connection:c1` 取出裸连接 id（`c1`）。
+ *
+ * 为什么颜色/分组的 localStorage key 用**裸 id**：`connection:` 前缀是树的
+ * 节点 id 编码，属于展示层；本地偏好应当与"哪条连接"绑定，而不是与
+ * 某个 UI 前缀字符串绑定。这里只做确定性去前缀，**不做任何模糊匹配**。
+ */
+function stripConnPrefix(nodeId: string): string {
+  const PREFIX = 'connection:'
+  return nodeId.startsWith(PREFIX) ? nodeId.slice(PREFIX.length) : nodeId
 }
 
 function errText(e: unknown): string {
@@ -1379,4 +1818,54 @@ function inputStyleLocal(): string {
     'font:inherit;font-size:12px;padding:4px 6px;box-sizing:border-box;' +
     'border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg)'
   )
+}
+
+/**
+ * 造一个极简模态遮罩 + 面板。
+ *
+ * 为什么手写而不复用别处的弹窗：index.html 与其它渲染模块不在本任务写入范围，
+ * 且这三个对话框都只有「若干按钮 + 一个输入框」，抽通用 Modal 组件是过度设计。
+ * 内联样式 + CSS 变量即可跟随明暗主题。
+ *
+ * 关闭方式：Esc、点遮罩、或调用方 `overlay.remove()`。
+ */
+function buildOverlay(title: string): { overlay: HTMLElement; panel: HTMLElement } {
+  const overlay = document.createElement('div')
+  overlay.className = 'conn-organize-overlay'
+  overlay.setAttribute('role', 'dialog')
+  overlay.setAttribute('aria-modal', 'true')
+  overlay.setAttribute('aria-label', title)
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:10001;display:flex;align-items:center;' +
+    'justify-content:center;background:rgba(0,0,0,.45);'
+
+  const panel = document.createElement('div')
+  panel.style.cssText =
+    'width:420px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);' +
+    'overflow:auto;padding:14px;background:var(--bg);color:var(--fg);' +
+    'border:1px solid var(--border);border-radius:8px;' +
+    'box-shadow:0 12px 40px rgba(0,0,0,.35);font-size:13px;'
+
+  const head = document.createElement('h3')
+  head.textContent = title
+  head.style.cssText = 'margin:0 0 12px;font-size:14px;'
+  panel.appendChild(head)
+  overlay.appendChild(panel)
+  document.body.appendChild(overlay)
+
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      close()
+    }
+  }
+  const close = (): void => {
+    overlay.remove()
+    document.removeEventListener('keydown', onKey, true)
+  }
+  document.addEventListener('keydown', onKey, true)
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) close()
+  })
+  return { overlay, panel }
 }

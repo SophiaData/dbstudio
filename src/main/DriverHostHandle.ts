@@ -428,6 +428,16 @@ export class DriverHostHandle {
     return this.#requestWithTimeout<void>('dropView', { nodeId }, RESULT_SET_TIMEOUT_MS)
   }
 
+  /**
+   * 取消当前查询。
+   *
+   * 超时用较短的 10s：取消请求本身不该让用户再等 60s——
+   * 如果这么久都没有响应，说明后端有问题，宁可报超时。
+   */
+  cancelQuery(): Promise<boolean> {
+    return this.#requestWithTimeout<boolean>('cancelQuery', {}, 10_000)
+  }
+
   renameTable(nodeId: string, newName: string): Promise<void> {
     return this.#requestWithTimeout<void>(
       'renameTable',
@@ -502,6 +512,7 @@ export type RemoteAdapterShape = Pick<
   | 'createView'
   | 'dropView'
   | 'renameTable'
+  | 'cancelQuery'
 >
 
 export type { DialectInfo }

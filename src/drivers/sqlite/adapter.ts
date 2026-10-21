@@ -37,6 +37,7 @@ import type {
 } from '../../core/resultset'
 
 import { sqliteDialect } from './dialect'
+import { cancelSqliteQuery } from './query-cancel'
 import {
   buildUpdateParams,
   buildUpdateSql,
@@ -522,6 +523,19 @@ export class SqliteDriverAdapter implements DriverAdapter {
       columns,
       hasUniqueKey: columns.some((column) => column.primaryKeyOrdinal !== null)
     }
+  }
+
+  /**
+   * 取消当前查询 —— **本驱动不支持，如实返回 false**。
+   *
+   * 原因写在 `query-cancel.ts` 里（含实测的 API 面证据）：
+   * `node:sqlite` 没有 `interrupt()`，且同步 API 阻塞事件循环，
+   * 任何"定时器到点再中断"的方案都不成立。
+   * 这里刻意不做"假装取消"（比如清掉游标就说成功了）——
+   * 那会让 UI 显示"已取消"而查询其实还在跑。
+   */
+  async cancelQuery(): Promise<boolean> {
+    return cancelSqliteQuery()
   }
 
   /**

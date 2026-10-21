@@ -42,6 +42,7 @@ import type {
 
 import { postgresqlDialect } from './dialect'
 import { POSTGRESQL_INFO } from './info'
+import { cancelPostgresBackend, isCancelError } from './query-cancel'
 import { PostgresAdapterError, describeThrown, wrapPgError } from './errors'
 import {
   SCHEMAS_FOLDER_ID,
@@ -90,7 +91,7 @@ import type { TableCreateSpec } from '../../core/model'
  * 与 SQLite 的差异：
  *   - `hasSchema: true`（PG 有 schema 层；这是本方言与 SQLite 最直观的结构差异）
  *   - `hasCatalog: true`（PG 连接即一个 catalog/database，但 catalog 只做连接级，见 dialect.ts）
- *   - `supportsCancel: false`（本阶段未实现后端 cancel；pg 其实支持 `pg_cancel_backend`）
+ *   - `supportsCancel: true`（用独立连接执行 `pg_cancel_backend(pid)` 真取消，见 query-cancel.ts）
  *
  * `supportsInlineEdit: true` 说的是"方言具备在线编辑能力"，具体某表能不能改
  * 由 `describeTable().hasUniqueKey` 逐表决定（与 SQLite 同一分层）。
@@ -99,7 +100,7 @@ const POSTGRESQL_CAPABILITIES: DriverCapabilities = {
   hasCatalog: true,
   hasSchema: true,
   supportsServerPagination: true,
-  supportsCancel: false,
+  supportsCancel: true,
   supportsInlineEdit: true
 }
 
@@ -179,6 +180,13 @@ export class PostgresDriverAdapter implements DriverAdapter {
    * 权威来源是**我们发出的 BEGIN/COMMIT/ROLLBACK 语句**，而不是猜测。
    */
   #inTransaction = false
+  /**
+   * 本连接的后端 PID，用于取消查询（`pg_cancel_backend(pid)`）。
+   * 连接建立后立刻取；取不到时为 null，此时 cancelQuery 会如实返回 false。
+   */
+  #backendPid: number | null = null
+  /** 建连参数（取消时需要用它另开一条连接）。未连接时为 null。 */
+  #connectionInfo: PgConnectionInfo | null = null
 
   async connect(config: ConnectionConfig, secret: SecretValue): Promise<DriverCapabilities> {
     if (this.#client !== null) {
@@ -208,8 +216,20 @@ export class PostgresDriverAdapter implements DriverAdapter {
       throw wrapPgError(thrown, 'connection_failed', `无法连接到 PostgreSQL ${info.host}:${info.port}/${info.database}`)
     }
     this.#client = client
+    this.#connectionInfo = info
     this.#inTransaction = false
     this.#pendingAffected = 0
+    /**
+     * 记下后端 PID，供取消使用。
+     * 失败不致命（连接本身可用），只是 cancelQuery 会退化为返回 false。
+     */
+    try {
+      const pidResult = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+      const pid = pidResult.rows[0]?.pid
+      this.#backendPid = typeof pid === 'number' && Number.isInteger(pid) ? pid : null
+    } catch {
+      this.#backendPid = null
+    }
     return POSTGRESQL_CAPABILITIES
   }
 
@@ -223,6 +243,8 @@ export class PostgresDriverAdapter implements DriverAdapter {
     this.#cursors.clear()
     this.#pendingAffected = 0
     this.#inTransaction = false
+    this.#backendPid = null
+    this.#connectionInfo = null
     if (client === null) return
     try {
       if (this.#inTransaction) {
@@ -360,6 +382,22 @@ export class PostgresDriverAdapter implements DriverAdapter {
       columns,
       hasUniqueKey: columns.some((column) => column.primaryKeyOrdinal !== null)
     }
+  }
+
+  /**
+   * 取消当前正在执行的查询。
+   *
+   * 用**独立连接**执行 `pg_cancel_backend(pid)`——不能在主连接上发：
+   * 那条连接正忙着跑长查询，新语句只会排在它后面，等于没取消
+   * （机制详见 query-cancel.ts）。
+   *
+   * 返回 false 的情形：未连接、PID 未知、服务端拒绝取消（比如语句已结束）。
+   * 取消是尽力而为的动作，失败不抛错。
+   */
+  async cancelQuery(): Promise<boolean> {
+    const info = this.#connectionInfo
+    if (this.#client === null || info === null || this.#backendPid === null) return false
+    return cancelPostgresBackend({ ...info, backendPid: this.#backendPid })
   }
 
   async query(sql: string, options?: QueryOptions): Promise<QueryResultContract> {

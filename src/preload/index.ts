@@ -210,6 +210,16 @@ const api: DbStudioApi = {
     ipcRenderer.invoke(IPC.renameTable, nodeId, newName) as Promise<void>,
 
   /**
+   * 取消某个节点所属连接上正在执行的查询。
+   *
+   * `nodeId` 用于定位连接（UI 上可能同时有多个连接在跑查询）。
+   * 返回 true 表示后端确实中断了；false 表示该驱动不支持取消（SQLite）
+   * 或当时并没有在跑的查询。UI 应先看能力的 `supportsCancel`。
+   */
+  cancelQuery: (nodeId: string) =>
+    ipcRenderer.invoke(IPC.cancelQuery, nodeId) as Promise<boolean>,
+
+  /**
    * 编辑已保存连接。若当前已连接，主进程内部会断开重连，使新配置生效；
    * 原本断开的连接更新后仍保持断开（不自作主张连库）。
    */

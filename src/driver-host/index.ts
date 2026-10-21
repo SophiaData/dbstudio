@@ -773,6 +773,15 @@ class DriverHost {
         return null
       }
 
+      case 'cancelQuery': {
+        /**
+         * 刻意**不** requireConnected：取消是"尽力而为"的动作。
+         * 未连接时返回 false 比报 not_connected 更合适——
+         * 调用方（UI 的取消按钮）只关心"取消了没有"。
+         */
+        return await this.#adapter.cancelQuery()
+      }
+
       case 'renameTable': {
         this.#requireConnected(req.method)
         const nodeId = parseObjectId(params.nodeId, req.method, 'nodeId')

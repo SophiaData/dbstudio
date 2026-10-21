@@ -904,6 +904,20 @@ export class ConnectionManager {
     return conn.host.dropView(adapterId)
   }
 
+  /**
+   * 取消某个节点所属连接上正在执行的查询。
+   *
+   * 为什么按 nodeId 而不是 connectionId：UI 手上只有当前格子/标签对应的节点，
+   * 让 UI 自己去反查连接会多一层容易出错的状态。这里复用 `#resolveConnection`。
+   *
+   * `#resolveConnection` 对"连接节点本身"返回 adapterId=null —— 那种情况下
+   * 取消的是该连接上的查询，直接用 conn.host 即可（不需要 adapterId）。
+   */
+  async cancelQuery(nodeId: string): Promise<boolean> {
+    const { conn } = this.#resolveConnection(nodeId)
+    return conn.host.cancelQuery()
+  }
+
   async renameTable(tableNodeId: string, newName: string): Promise<void> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
     if (adapterId === null) throw new Error('连接节点不能重命名，请选择具体的表')

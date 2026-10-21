@@ -24,6 +24,14 @@
  */
 
 import type { DbStudioApi } from '../core/api'
+import {
+  clearLayoutPrefs,
+  loadLayoutPrefs,
+  saveLayoutPrefs,
+  tableNameFromNodeId,
+  type GridLayoutPrefs,
+  type StorageLike
+} from './layout-persist'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { CellValue, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
 import type { QuotingRules } from '../core/driver'
@@ -109,6 +117,23 @@ export class ResultGrid {
 
   // ---- 排序 ----
   #sort: SortState = { col: -1, dir: null }
+  /**
+   * 布局偏好的作用域（方言 + 连接）。null 表示当前环境拿不到，此时**不持久化**。
+   *
+   * 为什么要显式存：`ObjectRef` 只有 parentId（连接节点的 id），没有方言信息，
+   * 而 key 需要 `dialect` 才能区分"SQLite 的 users"与"PG 的 users"。
+   * 所以由外部在打开表之前告诉我们（见 `setLayoutScope`），
+   * 拿不到就退化为"不持久化"——功能降级，而不是崩掉或存到错的 key 上。
+   */
+  #layoutScope: { dialect: string; connectionId: string } | null = null
+  /** 「取消查询」按钮：需要按连接能力动态启用/禁用。 */
+  #cancelBtn: HTMLButtonElement | null = null
+  /** 当前连接是否支持取消（来自能力声明）。null 表示未知（尚未取到）。 */
+  #cancelSupported: boolean | null = null
+
+  /** 当前表是否可从偏好恢复（只有「表」来源才持久化，自由 SQL 不持久化）。 */
+  #layoutTableName: string | null = null
+
   /** 方言引号规则缓存。取不到时显示"无法排序"，绝不拼接未转义的列名。 */
   #quoting: QuotingRules | null = null
   #quotingTried = false
@@ -234,6 +259,113 @@ export class ResultGrid {
     this.#api = api as GridApi
   }
 
+  /**
+   * 设置布局偏好的作用域（方言 + 连接）。
+   *
+   * 必须在 `openTable` **之前**调用才生效。拿不到就传 null：网格会退化为
+   * "不持久化"，其余功能完全不受影响。
+   *
+   * 为什么不用 ObjectRef 自己推：ObjectRef 只有 parentId（连接节点 id），
+   * 没有 dialectId；而 key 必须按方言区分（同名表在不同方言里是不同东西）。
+   */
+  setLayoutScope(scope: { dialect: string; connectionId: string } | null): void {
+    this.#layoutScope = scope
+  }
+
+  /**
+   * 取 `localStorage`。
+   *
+   * 用 try 包住：某些环境（隐私模式、被禁用的渲染进程）访问 `localStorage`
+   * 会直接抛错。拿不到就返回 null，代表"这次不持久化"。
+   */
+  #storage(): StorageLike | null {
+    try {
+      const storage = globalThis.localStorage
+      return storage === undefined ? null : storage
+    } catch {
+      return null
+    }
+  }
+
+  /** 当前是否具备持久化条件：有作用域、当前来源是表、且有存储可用。 */
+  #canPersistLayout(): boolean {
+    return this.#layoutScope !== null && this.#layoutTableName !== null && this.#storage() !== null
+  }
+
+  /**
+   * 读取并应用已保存的布局偏好。
+   *
+   * 调用时机：`#openCursor` 之后（此时 `#columns` 已就绪，才能做列名校验）。
+   * 列名变了的条目会被 `sanitizeLayoutPrefs` 丢掉——表结构改动是常态，
+   * 为一条过期的偏好让表打不开是不可接受的。
+   */
+  #applyPersistedLayout(): void {
+    const storage = this.#storage()
+    const scope = this.#layoutScope
+    const tableName = this.#layoutTableName
+    if (storage === null || scope === null || tableName === null) return
+
+    const prefs = loadLayoutPrefs(
+      storage,
+      scope.dialect,
+      scope.connectionId,
+      tableName,
+      this.#columns.map((c) => c.name)
+    )
+
+    // 列宽：只覆盖用户手动调过的列，其余保持默认
+    for (const [name, width] of Object.entries(prefs.columnWidths)) {
+      const w = Number(width)
+      if (Number.isFinite(w)) this.#colWidths.set(name, Math.max(MIN_COL_WIDTH, w))
+    }
+
+    // 排序：只在列仍存在时恢复（sanitize 已保证）
+    if (prefs.sort !== null) {
+      const col = this.#columns.findIndex((c) => c.name === prefs.sort?.columnName)
+      if (col >= 0) this.#sort = { col, dir: prefs.sort.direction }
+    }
+  }
+
+  /** 把当前布局写回存储。用户改变排序/列宽时调用。 */
+  #persistLayout(): void {
+    if (!this.#canPersistLayout()) return
+    const storage = this.#storage()
+    const scope = this.#layoutScope
+    const tableName = this.#layoutTableName
+    if (storage === null || scope === null || tableName === null) return
+
+    const sortCol = this.#sort.col
+    const sortColumnName = sortCol >= 0 ? this.#columns[sortCol]?.name : undefined
+    const prefs: GridLayoutPrefs = {
+      sort:
+        sortColumnName !== undefined && this.#sort.dir !== null
+          ? { columnName: sortColumnName, direction: this.#sort.dir }
+          : null,
+      columnWidths: Object.fromEntries(this.#colWidths)
+    }
+    saveLayoutPrefs(storage, scope.dialect, scope.connectionId, tableName, prefs)
+  }
+
+  /**
+   * 「重置布局」：清掉这张表的持久化偏好，并立即把内存里的排序/列宽复位。
+   *
+   * 为什么同时复位内存：只清存储而不复位，用户会看到"点了没反应"
+   * （当前视图还是旧布局），下次打开才变——那很像 bug。
+   */
+  resetLayout(): void {
+    const storage = this.#storage()
+    const scope = this.#layoutScope
+    const tableName = this.#layoutTableName
+    if (storage !== null && scope !== null && tableName !== null) {
+      clearLayoutPrefs(storage, scope.dialect, scope.connectionId, tableName)
+    }
+    this.#colWidths.clear()
+    this.#sort = { col: -1, dir: null }
+    this.#renderHeader()
+    this.#render()
+    this.#cb.onStatus('已重置该表的布局（排序与列宽）')
+  }
+
   /** 网格顶部工具条（执行 SQL 用）。由外部构造好塞进来，避免这里耦合 UI 细节。 */
   setToolbar(node: HTMLElement): void {
     this.#toolbarEl.replaceChildren(node)
@@ -254,9 +386,35 @@ export class ResultGrid {
     // 用户（看起来排了，其实新表没排）。列宽同理，按列名区分、换了表就清空。
     this.#sort = { col: -1, dir: null }
     this.#colWidths.clear()
+    /**
+     * 记住"这张表叫什么"，并尝试恢复上次的排序/列宽。
+     *
+     * 只对**表**做持久化：自由 SQL 的列不固定（同一句 SQL 换个数就是另一组列），
+     * 存下来的偏好下次几乎必然失效，没有意义（见 `runSql` 里清空该字段）。
+     */
+    this.#layoutTableName = tableNameFromNodeId(ref.id)
     await this.#openCursor(() => api.previewTable(ref.id))
+    // 必须在 openCursor 之后：那时 #columns 才就绪，才能校验列名是否还存在
+    this.#applyPersistedLayout()
+    if (this.#sort.col >= 0) {
+      // 已恢复排序 → 数据要按该排序重查，否则箭头与实际顺序不一致
+      const colName = this.#columns[this.#sort.col]?.name
+      const dir = this.#sort.dir
+      const rules = await this.#ensureQuoting()
+      if (colName !== undefined && dir !== null && rules !== null) {
+        await this.#requerySorted({ col: this.#sort.col, dir, rules, colName })
+      } else {
+        // 拿不到引号规则就不假装排过序：复位并告知
+        this.#sort = { col: -1, dir: null }
+        this.#renderHeader()
+      }
+    } else {
+      this.#renderHeader()
+      this.#render()
+    }
     this.#applyEditability()
     await this.#refreshTransactionState()
+    await this.#refreshCancelCapability()
   }
 
   /** 执行自由 SQL（只读）。 */
@@ -267,9 +425,13 @@ export class ResultGrid {
     this.#desc = null
     this.#sort = { col: -1, dir: null }
     this.#colWidths.clear()
+    // 自由 SQL 不持久化：列不固定，存下来的偏好下次几乎必然失效
+    this.#layoutTableName = null
     await this.#openCursor(() => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }))
     this.#applyEditability()
     await this.#refreshTransactionState()
+    // 自由 SQL 同样可能跑很久，取消能力也要同步
+    await this.#refreshCancelCapability()
   }
 
   #requireApi(): GridApi {
@@ -348,6 +510,85 @@ export class ResultGrid {
   }
 
   /** 可编辑性：只有「表 + 有唯一键」才可编辑。 */
+  /**
+   * 取消当前查询。
+   *
+   * 三种结果，必须分别说清楚，否则用户不知道发生了什么：
+   *   - 能力不支持（SQLite）→ 按钮本就禁用，这里兜底提示原因
+   *   - 返回 true → 「已取消」
+   *   - 返回 false → 「没有正在执行的查询」，而不是"取消失败"——
+   *     后者会让人以为有 bug（其实是没有可取消的东西）
+   */
+  async #cancelQuery(): Promise<void> {
+    const api = this.#api
+    const src = this.#source
+    if (!api) return
+    if (this.#cancelSupported === false) {
+      this.#cb.onStatus('当前驱动不支持取消查询（SQLite 的同步驱动无法中断）', true)
+      return
+    }
+    // 需要 nodeId 定位连接：表视图用表节点，自由 SQL 用当时执行它的 nodeId
+    const nodeId = src === null ? null : src.kind === 'table' ? src.ref.id : src.nodeId
+    if (nodeId === null) {
+      this.#cb.onStatus('没有可取消的查询')
+      return
+    }
+    try {
+      const cancelled = await api.cancelQuery(nodeId)
+      // 两者都不是错误：取消成功、或本来就没有可取消的查询
+      this.#cb.onStatus(cancelled ? '已取消查询' : '没有正在执行的查询')
+    } catch (e) {
+      this.#cb.onStatus(`取消失败：${errText(e)}`, true)
+    }
+  }
+
+  /**
+   * 同步「取消」按钮的可用性。
+   *
+   * 依据是**连接的能力声明**（`supportsCancel`），而不是"当前有没有在跑查询"：
+   * 查询在宿主进程里同步执行，渲染进程拿不到可靠的"进行中"信号。
+   * 能力为 false 时按钮禁用 + tooltip 说明原因，比"点了没反应"好得多。
+   */
+  #syncCancelButton(): void {
+    const btn = this.#cancelBtn
+    if (btn === null) return
+    if (this.#cancelSupported === null) {
+      // 能力未知（还没取到连接信息）：保持可用，点下去由 adapter 如实返回
+      btn.disabled = false
+      btn.title = '取消当前正在执行的查询'
+      return
+    }
+    btn.disabled = !this.#cancelSupported
+    btn.title = this.#cancelSupported
+      ? '取消当前正在执行的查询'
+      : '当前驱动不支持取消查询：SQLite 的 node:sqlite 是同步 API，没有中断能力'
+  }
+
+  /**
+   * 从连接列表里读出当前连接是否支持取消。
+   *
+   * 为什么走 `listConnections` 而不是别的：能力声明挂在连接上（`capabilities`），
+   * 这是渲染进程唯一能拿到的能力来源。失败就保持"未知"（按钮可用），
+   * 不去猜——猜错要么禁用了一个能用的功能，要么让用户点了没反应。
+   */
+  async #refreshCancelCapability(): Promise<void> {
+    const api = this.#api
+    const nodeId = this.#layoutScope?.connectionId
+    if (!api || nodeId === undefined) {
+      this.#syncCancelButton()
+      return
+    }
+    try {
+      const connections = await api.listConnections()
+      const conn = connections.find((c) => c.id === nodeId)
+      const supported = conn?.capabilities?.supportsCancel
+      this.#cancelSupported = typeof supported === 'boolean' ? supported : null
+    } catch {
+      this.#cancelSupported = null
+    }
+    this.#syncCancelButton()
+  }
+
   #applyEditability(): void {
     const src = this.#source
     if (!src) return
@@ -440,10 +681,41 @@ export class ResultGrid {
       this.#toolbarEl.appendChild(reloadBtn)
     }
 
-    // ---- 本阶段新增：行数统计 / CSV 导出，统一右对齐 ----
+    // ---- 布局：取消查询 / 重置布局（统一右对齐） ----
     const spacer2 = document.createElement('span')
     spacer2.className = 'spacer'
     this.#toolbarEl.appendChild(spacer2)
+
+    /**
+     * 取消查询。
+     *
+     * 为什么按钮的可用性取决于能力而不是"有没有在查询"：
+     * 查询是同步发起的（宿主进程里 adapter 一开跑就阻塞），
+     * 渲染进程这边根本没有"正在查询"的可靠信号可以用来启用按钮。
+     * 所以策略是：**能力不支持就永久禁用并说明原因**（SQLite），
+     * 支持时按钮常备可用（PG），点了没在跑的查询就返回 false，静默忽略即可。
+     */
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.textContent = '取消查询'
+    cancelBtn.addEventListener('click', () => void this.#cancelQuery())
+    this.#cancelBtn = cancelBtn
+    this.#toolbarEl.appendChild(cancelBtn)
+
+    /**
+     * 重置布局：清掉这张表的排序/列宽偏好。
+     * 只在「表」来源下有意义（自由 SQL 不持久化，没有可重置的东西）。
+     */
+    const resetLayoutBtn = document.createElement('button')
+    resetLayoutBtn.type = 'button'
+    resetLayoutBtn.textContent = '重置布局'
+    resetLayoutBtn.disabled = this.#source?.kind !== 'table'
+    resetLayoutBtn.title =
+      this.#source?.kind === 'table'
+        ? '清除这张表保存的排序与列宽，恢复默认布局'
+        : '只有表视图才有可重置的布局偏好（自由 SQL 不保存布局）'
+    resetLayoutBtn.addEventListener('click', () => this.resetLayout())
+    this.#toolbarEl.appendChild(resetLayoutBtn)
 
     // 行数统计：只在「表」来源可用。
     // 自由 SQL 禁用原因：countRows(tableNodeId) 是按表名做全表 COUNT，而自由
@@ -534,6 +806,7 @@ export class ResultGrid {
     // 而箭头却显示未排序——状态与数据不一致，同样是静默错误。
     if (next.dir === null) {
       await this.#requerySorted(null)
+      this.#persistLayout()
       return
     }
     if (!wasSame && next.dir === 'asc') {
@@ -552,6 +825,8 @@ export class ResultGrid {
     const colName = this.#columns[col]?.name
     if (!colName) return
     await this.#requerySorted({ col, dir: next.dir, rules, colName })
+    // 排序已生效（数据也按新顺序重查过）才落盘，避免把失败的状态存进去
+    this.#persistLayout()
   }
 
   /**
@@ -651,6 +926,8 @@ export class ResultGrid {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
       this.#render() // 收尾整体重绘，清掉拖动中的临时状态
+      // 拖动过程中不落盘（每帧写一次 localStorage 会卡），松手时写一次
+      this.#persistLayout()
     }
 
     handle.addEventListener('mousedown', (e) => {
@@ -672,6 +949,7 @@ export class ResultGrid {
       headerCell.style.width = `${w}px`
       this.#applyColumnWidthToRows(col.name, w)
       this.#render()
+      this.#persistLayout()
     })
   }
 

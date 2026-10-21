@@ -149,6 +149,18 @@ export interface DbStudioApi {
   /** 回滚事务。幂等。 */
   rollbackTransaction(nodeId: string): Promise<TransactionState>
 
+  /**
+   * 取消某个节点所属连接上正在执行的查询。
+   *
+   * 为什么需要 `nodeId`：UI 上可能有多个连接同时开着查询，
+   * "取消"必须指明是**哪一个连接**的查询——主进程没法凭空猜。
+   * 节点 id 同时能定位连接与 adapterId，与其它方法保持同一套寻址方式。
+   *
+   * 返回 true 表示后端确实中断了查询；false 表示无法取消（比如 SQLite 驱动）
+   * 或当时并没有在跑的查询。UI 应先看能力的 `supportsCancel`，再据返回值提示。
+   */
+  cancelQuery(nodeId: string): Promise<boolean>
+
   /** 查询当前事务状态，用于 UI 决定按钮可用性与「有未提交改动」提示。 */
   transactionState(nodeId: string): Promise<TransactionState>
 
@@ -256,6 +268,7 @@ export const IPC = {
   createView: 'dbstudio:createView',
   dropView: 'dbstudio:dropView',
   renameTable: 'dbstudio:renameTable',
+  cancelQuery: 'dbstudio:cancelQuery',
   updateConnection: 'dbstudio:updateConnection'
 } as const
 

@@ -13,6 +13,15 @@
   --warn-bg: #fff7e6;
   --warn-border: #f0b429;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* 连接颜色标记的预设色（语义化：红=生产 / 橙=预发 / 绿=本地）。
+     放在变量里而不是硬编码，是为了明暗主题各自调色，见 @media 块。 */
+  --conn-red: #d92d20;
+  --conn-orange: #f2810c;
+  --conn-yellow: #d4a017;
+  --conn-green: #12805c;
+  --conn-blue: #2563eb;
+  --conn-purple: #7a3fd4;
+  --conn-gray: #8b93a1;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,6 +35,14 @@
     --danger: #ff7a70;
     --warn-bg: #2b2416;
     --warn-border: #a87a1d;
+    /* 深色背景下把连接色提亮一档，否则红色/紫色几乎与背景糊在一起。 */
+    --conn-red: #ff6b5e;
+    --conn-orange: #ffa23d;
+    --conn-yellow: #e8c14b;
+    --conn-green: #34c08a;
+    --conn-blue: #6ea8ff;
+    --conn-purple: #b18cff;
+    --conn-gray: #9aa3ad;
   }
 }
 
@@ -1214,4 +1231,49 @@ dialog::backdrop {
 .sql-editor-explain-empty {
   color: var(--fg-dim);
   font-size: 12px;
+}
+
+/* ==========================================================================
+   E2-B 追加：连接颜色标记 + 连接分组。
+   全部为追加，不改动上方既有规则。
+   ========================================================================== */
+
+/*
+ * 连接颜色标记：左侧 3px 色条由 JS 用 box-shadow inset 写入（不是 border），
+ * 原因：border 会占用行宽、且在虚拟滚动里改变盒模型高度，导致行位置错位。
+ * 这里只补一点左边距，让色条不压住内容。
+ */
+.tree-row.has-conn-color {
+  /* box-shadow 不参与布局，所以只需保证内容不贴边。 */
+  padding-left: calc(var(--row-h) * 0.24);
+}
+
+/* 名字前的小圆点：比整行染色克制，且不干扰选中态的高亮。 */
+.conn-color-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+/* 选中行里色条保留（颜色是"身份"信息，不应该被选中态盖掉）。 */
+.tree-row[aria-selected='true'].has-conn-color {
+  /* 选中背景由既有规则负责；这里只确保色条仍有对比度。 */
+  filter: none;
+}
+
+/* 连接分组节点：加粗一点，与数据库里的 folder（表/视图分组）区分开。 */
+.tree-row.is-conn-group .row-label {
+  font-weight: 600;
+}
+/* 分组图标用文件夹符号，颜色略暗，避免与连接图标抢注意力。 */
+.tree-row.is-conn-group .row-icon {
+  opacity: 0.7;
+}
+
+/* 颜色/分组对话框遮罩（JS 已内联基础样式，这里只保证层级与光标一致）。 */
+.conn-organize-overlay {
+  cursor: default;
 }

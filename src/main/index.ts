@@ -406,6 +406,8 @@ function registerIpc(): void {
     dropView: async (nodeId: string) => getManager().dropView(nodeId),
     renameTable: async (nodeId: string, newName: string) =>
       getManager().renameTable(nodeId, newName),
+    // 取消：按节点找到所属连接，交给宿主进程的 adapter（PG 真取消，SQLite 返回 false）
+    cancelQuery: async (nodeId: string) => getManager().cancelQuery(nodeId),
     updateConnection: async (
       connectionId: string,
       config: Partial<ConnectionConfig>,
@@ -493,6 +495,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.renameTable, (_e, nodeId: string, newName: string) =>
     api.renameTable(nodeId, newName)
   )
+  ipcMain.handle(IPC.cancelQuery, (_e, nodeId: string) => api.cancelQuery(nodeId))
   ipcMain.handle(
     IPC.updateConnection,
     (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: string) =>

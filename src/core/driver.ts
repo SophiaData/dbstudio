@@ -91,6 +91,20 @@ export interface DriverAdapter {
   describeTable(id: string): Promise<TableDescription>
 
   /**
+   * 取消当前正在执行的查询。返回是否**真的**取消了。
+   *
+   * ===== 为什么返回值是 boolean 而不是 void =====
+   *
+   * 有的驱动**无法**取消（SQLite 的 `node:sqlite` 是同步 API，没有
+   * `interrupt()`，见 sqlite/query-cancel.ts 的实测记录）。
+   * 那种情况下必须诚实地返回 false，而不是事后假装成功——
+   * UI 据 capability + 返回值决定提示"已取消"还是"当前驱动不支持取消"。
+   *
+   * 实现方约定：没有正在执行的查询时返回 false（取消一个不存在的东西不算成功）。
+   */
+  cancelQuery(): Promise<boolean>
+
+  /**
    * 执行一条查询语句，返回第一页。
    *
    * `cursorId` 模式的语义：
@@ -334,7 +348,8 @@ export const RPC_METHODS = [
   'dropTable',
   'createView',
   'dropView',
-  'renameTable'
+  'renameTable',
+  'cancelQuery'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]
