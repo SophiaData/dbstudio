@@ -37,7 +37,10 @@ jobs:
           # 所以一个平台只需一条，不要按产物拆成两条（会重复构建、白烧 runner 时间）。
           - os: macos-latest
             platform: mac
-            artifacts: 'release/*.dmg release/*.zip'
+            # 多个 glob 用 YAML 多行标量（| 或 >-）；这里用 |- 保持换行
+            artifacts: |-
+              release/*.dmg
+              release/*.zip
           - os: windows-latest
             platform: win
             artifacts: 'release/*.exe'
@@ -80,8 +83,15 @@ jobs:
       - name: 上传产物到 Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifacts }}
+          # ★ glob 用**换行**分隔，不要用空格。
+          # softprops/action-gh-release 把 files 当多行 glob 解析；
+          # 写成一行 `release/*.dmg release/*.zip` 时它会把整串当成一个模式，
+          # 结果匹配不到、又不报错（fail_on_unmatched_files: false），
+          # 表现为「job 绿了但 macOS 产物没上传」——正是踩过的坑。
+          files: |
+            ${{ matrix.artifacts }}
           draft: false
-          fail_on_unmatched_files: false
+          # 明确要求至少匹配到一个文件：宁可报错，也不要静默漏传
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
