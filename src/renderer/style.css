@@ -405,8 +405,30 @@ dialog::backdrop {
 .grid-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 0 0 8px;
+  /* 按钮多了之后（应用/提交/回滚/新增行/删除行/重新加载/统计行数/导出 CSV）
+     在窄窗口里会挤到换行，出现「应用修/改」这种被折断的按钮文字。
+     nowrap + 允许横向滚动，比换行好读得多。 */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+/* 工具条里的按钮：不允许文字折行，并压缩内边距换取可读性 */
+.grid-toolbar button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+/* 那个提示文字（双击单元格可编辑 / 未提交：…）也要 nowrap，
+   否则它会把按钮挤得更窄 */
+.grid-toolbar .grid-tx-info {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .grid-banner {
@@ -421,18 +443,21 @@ dialog::backdrop {
 
 /* 表头 sticky：横向滚动时列头跟随，纵向滚动时固定在顶部 */
 .grid-header {
-  display: inline-flex;
+  /* 外层：铺满容器宽度，只负责背景与裁剪。
+     内层（.grid-header-inner）按内容宽度并跟随横向滚动平移。
+     这样既不会在右侧露出"假空列"，表头又能与数据列对齐。 */
   flex: 0 0 auto;
-  position: sticky;
-  top: 0;
-  z-index: 2;
+  position: relative;
+  overflow: hidden;
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
   height: 26px;
-  /* 用 inline-flex + max-content：表头宽度只覆盖真实列，不铺满容器。
-     否则列宽固定时，右侧剩出的区域会带着表头底色，看起来像多了一列空列。 */
+}
+
+.grid-header-inner {
+  display: flex;
   width: max-content;
-  min-width: 100%;
+  will-change: transform;
 }
 
 .grid-viewport {
@@ -494,7 +519,147 @@ dialog::backdrop {
   font-weight: 600;
   color: var(--fg);
   border-right: 1px solid var(--border);
+  /* 排序/拖动都要用到 relative 定位（手柄绝对定位在右边缘） */
+  position: relative;
+  cursor: pointer;
+  user-select: none;
 }
+
+/* 排序重查进行中：整行表头降透明度，既示忙又不遮挡内容。 */
+.grid-col-header.is-sorting {
+  opacity: 0.6;
+}
+
+.grid-col-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* 排序指示器：▲/▼。用主色强调，让人一眼看出"当前按哪列排"。 */
+.grid-sort-arrow {
+  color: var(--accent);
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+/* 列宽拖拽手柄：只在表头右边缘，4px 宽的透明热区，悬停时高亮。
+   为什么这么窄：太宽会挡住"点列头排序"的点击目标。 */
+.grid-col-resizer {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+  background: transparent;
+}
+.grid-col-resizer:hover {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ---------- 右键菜单 / 全文模态 ---------- */
+
+.grid-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.grid-menu[hidden] {
+  display: none;
+}
+
+.grid-menu-item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.grid-menu-item:hover {
+  background: var(--bg-alt);
+}
+
+.grid-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.grid-modal[hidden] {
+  display: none;
+}
+
+.grid-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.grid-modal-panel {
+  width: min(760px, 92vw);
+  height: min(560px, 82vh);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.grid-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* 全文区：等宽字体 + 可滚动 + 保留换行，长文本才看得清。 */
+.grid-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.grid-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
 
 .grid-cell.is-number {
   text-align: right;

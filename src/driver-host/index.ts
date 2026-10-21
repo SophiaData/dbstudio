@@ -378,6 +378,43 @@ function parseRowUpdates(raw: unknown, method: RpcMethod): RowUpdate[] {
   })
 }
 
+/**
+ * 校验 `deleteRows` 的 `keys`。
+ *
+ * ===== 空数组必须在这里挡掉（本接口最危险的误用面）=====
+ *
+ * 每个 key 元素是一组 WHERE 条件。空数组意味着"没有任何行要删"，
+ * 但若把这个语义传进 adapter 并退化成"空 WHERE 的 DELETE"，就会**清空整张表**。
+ * 两种实现（循环删 vs 拼一条 DELETE）都可能踩到，所以协议层直接拒绝，
+ * 让这个危险状态根本到不了 adapter。
+ *
+ * 顺带也拒绝"某个元素是空对象"——那等价于单行级的空 WHERE。
+ */
+function parseDeleteKeys(raw: unknown, method: RpcMethod): Record<string, CellValue>[] {
+  if (!Array.isArray(raw)) {
+    throw new RpcFailure('bad_params', `${method}: keys 必须是数组`)
+  }
+  if (raw.length === 0) {
+    throw new RpcFailure(
+      'bad_params',
+      `${method}: keys 不能为空数组——空的条件集合会被误解释成"删除整张表"，已拒绝`
+    )
+  }
+  return raw.map((item: unknown, i: number) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new RpcFailure('bad_params', `${method}: keys[${i}] 必须是对象`)
+    }
+    const record = parseCellValueRecord(item, method, `keys[${i}]`)
+    if (Object.keys(record).length === 0) {
+      throw new RpcFailure(
+        'bad_params',
+        `${method}: keys[${i}] 不能为空对象——没有 WHERE 条件的 DELETE 会删整张表`
+      )
+    }
+    return record
+  })
+}
+
 /** 极简参数解析：只认 `--dialect <id>` 与 `--dialect=<id>`。 */
 function parseDialectArg(argv: readonly string[]): string | null {
   for (let i = 0; i < argv.length; i += 1) {
@@ -556,6 +593,43 @@ class DriverHost {
         this.#requireConnected(req.method)
         const state: TransactionState = await this.#adapter.transactionState()
         return state
+      }
+
+      // ---- 增删与完整取值（第五阶段） ----
+
+      case 'insertRow': {
+        this.#requireConnected(req.method)
+        const tableId = parseObjectId(params.tableId, req.method, 'tableId')
+        const values = parseCellValueRecord(params.values, req.method, 'values')
+        // 空 values 构不成 INSERT（没列也没值），协议层先挡掉，
+        // 免得 adapter 收到后拼出 `INSERT INTO t () VALUES ()` 这种非法语句。
+        if (Object.keys(values).length === 0) {
+          throw new RpcFailure('bad_params', `${req.method}: values 不能为空（至少插一列）`)
+        }
+        return await this.#adapter.insertRow(tableId, values)
+      }
+
+      case 'deleteRows': {
+        this.#requireConnected(req.method)
+        const tableId = parseObjectId(params.tableId, req.method, 'tableId')
+        const keys = parseDeleteKeys(params.keys, req.method)
+        return await this.#adapter.deleteRows(tableId, keys)
+      }
+
+      case 'countRows': {
+        this.#requireConnected(req.method)
+        const tableId = parseObjectId(params.tableId, req.method, 'tableId')
+        const count: number = await this.#adapter.countRows(tableId)
+        return count
+      }
+
+      case 'fetchCellValue': {
+        this.#requireConnected(req.method)
+        const cursorId = parseObjectId(params.cursorId, req.method, 'cursorId')
+        const rowIndex = parseNonNegativeInt(params.rowIndex, 'rowIndex', req.method)
+        const columnIndex = parseNonNegativeInt(params.columnIndex, 'columnIndex', req.method)
+        const value: CellValue = await this.#adapter.fetchCellValue(cursorId, rowIndex, columnIndex)
+        return value
       }
 
       default: {

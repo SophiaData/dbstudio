@@ -15,7 +15,7 @@
     "test:edit": "node tests/e2e-edit.mjs",
     "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
     "test:gui": "node scripts/run-in-electron.mjs --gui",
-    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow",
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:mutations && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow && pnpm run test:gui-features",
     "test:persist": "node tests/e2e-persist.mjs",
     "build:app": "pnpm run build && electron-builder --config electron-builder.config.mjs",
     "build:app:mac": "pnpm run build && electron-builder --config electron-builder.config.mjs --mac",
@@ -23,7 +23,9 @@
     "build:app:win": "pnpm run build && electron-builder --config electron-builder.config.mjs --win",
     "build:sdk": "cd sdk && node build.mjs",
     "test:sdk": "cd sdk && node test/sdk.e2e.mjs",
-    "test:gui-flow": "node tests/gui-flow.mjs"
+    "test:gui-flow": "node tests/gui-flow.mjs",
+    "test:mutations": "node tests/e2e-mutations.mjs",
+    "test:gui-features": "node tests/gui-features.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

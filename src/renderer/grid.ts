@@ -26,11 +26,14 @@
 import type { DbStudioApi } from '../core/api'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { CellValue, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
+import type { QuotingRules } from '../core/driver'
 
 /** 行高必须与 CSS `.grid-row { height }` 一致。 */
 const ROW_HEIGHT = 24
-/** 列宽固定值。列太宽会导致横向滚动条过早出现，26 字符大约够看类型与短值。 */
-const COL_WIDTH = 160
+/** 默认列宽。用户拖过之后以实例状态 `#colWidths` 为准（不再用这个定值）。 */
+const DEFAULT_COL_WIDTH = 160
+/** 列宽下限。太窄会连列名都看不清，也无法拖回去。 */
+const MIN_COL_WIDTH = 60
 /** 行号列宽。 */
 const ROWNUM_WIDTH = 64
 /** 每页行数。与主进程侧默认 limit 无关，是网格自己的取数粒度。 */
@@ -48,15 +51,39 @@ export interface GridCallbacks {
   onStatus(text: string, isError?: boolean): void
 }
 
-/** 网格当前的数据来源，决定「能否编辑」。 */
+/**
+ * `window.dbstudio` 上本阶段依赖、但由 P0-B 并行实现的两个方法。
+ *
+ * 为什么单独声明而不是改 `core/api.ts`：那个文件不归我改（写入范围只有
+ * grid.ts / style.css），而且它们属于**同一份契约**——等 P0-B 合并后，
+ * `DbStudioApi` 会自然带上这两个方法，此处的本地扩展就与它重合。
+ * 用可选方法（`?`）是关键：编译期允许缺失，运行期必须判空并优雅降级，
+ * 这样在接口就绪之前网格依然可用，不会白屏。
+ */
+type FutureCellApi = {
+  /** 取某个单元格的完整值（用于被截断的长文本 / BLOB）。未就绪时降级。 */
+  fetchCellValue?: (cursorId: string, rowIndex: number, colIndex: number) => Promise<CellValue>
+  /** 统计某张表的精确行数（全表扫描，必须显式触发）。 */
+  countRows?: (tableNodeId: string) => Promise<number>
+}
+type GridApi = DbStudioApi & FutureCellApi
+
+/** 当前排序状态。`dir === null` 表示未排序（列下标 -1）。 */
+interface SortState {
+  /** 列在 `#columns` 中的下标；-1 表示无排序列。 */
+  col: number
+  dir: 'asc' | 'desc' | null
+}
+
+/** 网格当前的数据来源，决定「能否编辑 / 能否排序 / 能否统计行数」。 */
 type Source =
   | { kind: 'table'; ref: ObjectRef; desc: TableDescription }
-  | { kind: 'sql'; sql: string }
+  | { kind: 'sql'; sql: string; nodeId: string }
 
 export class ResultGrid {
   readonly #root: HTMLElement
   readonly #cb: GridCallbacks
-  #api: DbStudioApi | null = null
+  #api: GridApi | null = null
 
   // 当前查询会话
   #cursorId: string | null = null
@@ -72,6 +99,25 @@ export class ResultGrid {
 
   #selectedRow = -1
   #selectedCol = -1
+
+  // ---- 列宽（实例状态：表头与数据行必须共用同一份） ----
+  //
+  // 为什么存在实例上而不是内联写死：拖宽一列之后，表头那一格和数据行的每一格
+  // 都得同步变宽，否则列会错位（用户把手机号列拖宽了，值却还挤在 160px 里，
+  // 等于没拖）。键用列名而不是列下标，因为重排序后列下标会变。
+  readonly #colWidths = new Map<string, number>()
+
+  // ---- 排序 ----
+  #sort: SortState = { col: -1, dir: null }
+  /** 方言引号规则缓存。取不到时显示"无法排序"，绝不拼接未转义的列名。 */
+  #quoting: QuotingRules | null = null
+  #quotingTried = false
+  /** 排序重查进行中：禁用列头点击，防连点。 */
+  #sorting = false
+
+  // ---- 复制 / 右键菜单 / 全文模态 ----
+  readonly #menuEl: HTMLElement
+  readonly #modalEl: HTMLElement
 
   // ---- 编辑状态 ----
   //
@@ -89,6 +135,19 @@ export class ResultGrid {
 
   // DOM
   readonly #headerEl: HTMLElement
+  /**
+   * 表头的**内层**容器。
+   *
+   * 为什么需要它：`.grid-header` 是 `.grid-viewport` 的兄弟节点，
+   * viewport 横向滚动时表头不会跟着动——实测 30 列的表横滚 400px 后，
+   * 表头第一列停在 x=424 而数据第一列在 x=24，**列名与数据错位 400px**，
+   * 用户会照错列读数据。
+   *
+   * 修法不是把表头塞进 viewport（那会与绝对定位的行层打架、还要重算 y 坐标），
+   * 而是在表头内部再套一层：外层铺满宽度负责背景与裁剪，内层按内容宽度
+   * 并跟随 viewport 的 scrollLeft 平移。这样背景不留空隙、内容又与数据对齐。
+   */
+  readonly #headerInnerEl: HTMLElement
   readonly #viewportEl: HTMLElement
   readonly #spacerEl: HTMLElement
   readonly #rowsEl: HTMLElement
@@ -109,7 +168,11 @@ export class ResultGrid {
 
     this.#headerEl = document.createElement('div')
     this.#headerEl.className = 'grid-header'
-    this.#headerEl.setAttribute('role', 'row')
+
+    this.#headerInnerEl = document.createElement('div')
+    this.#headerInnerEl.className = 'grid-header-inner'
+    this.#headerInnerEl.setAttribute('role', 'row')
+    this.#headerEl.appendChild(this.#headerInnerEl)
 
     this.#viewportEl = document.createElement('div')
     this.#viewportEl.className = 'grid-viewport'
@@ -125,6 +188,18 @@ export class ResultGrid {
     this.#viewportEl.appendChild(this.#spacerEl)
     this.#viewportEl.appendChild(this.#rowsEl)
 
+    // 右键菜单与全文模态挂到 body 上，而不是 #root 里：
+    // 它们要浮在网格之上、且不能被网格的 overflow 裁剪掉。
+    this.#menuEl = document.createElement('div')
+    this.#menuEl.className = 'grid-menu'
+    this.#menuEl.hidden = true
+    document.body.appendChild(this.#menuEl)
+
+    this.#modalEl = document.createElement('div')
+    this.#modalEl.className = 'grid-modal'
+    this.#modalEl.hidden = true
+    document.body.appendChild(this.#modalEl)
+
     this.#root.replaceChildren(
       this.#toolbarEl,
       this.#bannerEl,
@@ -132,13 +207,31 @@ export class ResultGrid {
       this.#viewportEl
     )
 
-    this.#viewportEl.addEventListener('scroll', () => this.#render(), { passive: true })
+    this.#viewportEl.addEventListener(
+      'scroll',
+      () => {
+        // 横向同步：表头内层跟着 viewport 的 scrollLeft 平移。
+        // 用 transform 而不是 scrollLeft 赋值——前者不触发额外的布局与重绘，
+        // 在快速横滚时不会出现表头「追不上」的滞后感。
+        this.#headerInnerEl.style.transform = `translateX(${-this.#viewportEl.scrollLeft}px)`
+        this.#render()
+      },
+      { passive: true }
+    )
     globalThis.addEventListener('resize', () => this.#render())
     this.#viewportEl.addEventListener('keydown', (e) => this.#onKeyDown(e))
+    // 右键菜单：滚动/点击别处时先收起，否则它会"飘"在原地。
+    this.#viewportEl.addEventListener('scroll', () => this.#hideMenu(), { passive: true })
+    document.addEventListener('mousedown', (e) => {
+      if (!this.#menuEl.hidden && !this.#menuEl.contains(e.target as Node)) this.#hideMenu()
+    })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !this.#menuEl.hidden) this.#hideMenu()
+    })
   }
 
   attachApi(api: DbStudioApi): void {
-    this.#api = api
+    this.#api = api as GridApi
   }
 
   /** 网格顶部工具条（执行 SQL 用）。由外部构造好塞进来，避免这里耦合 UI 细节。 */
@@ -157,6 +250,10 @@ export class ResultGrid {
     const api = this.#requireApi()
     this.#source = { kind: 'table', ref, desc }
     this.#desc = desc
+    // 打开新对象时排序三态复位：不同表的列不可比，保留上一次的排序箭头会误导
+    // 用户（看起来排了，其实新表没排）。列宽同理，按列名区分、换了表就清空。
+    this.#sort = { col: -1, dir: null }
+    this.#colWidths.clear()
     await this.#openCursor(() => api.previewTable(ref.id))
     this.#applyEditability()
     await this.#refreshTransactionState()
@@ -165,14 +262,17 @@ export class ResultGrid {
   /** 执行自由 SQL（只读）。 */
   async runSql(nodeId: string, sql: string): Promise<void> {
     const api = this.#requireApi()
-    this.#source = { kind: 'sql', sql }
+    // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
+    this.#source = { kind: 'sql', sql, nodeId }
     this.#desc = null
+    this.#sort = { col: -1, dir: null }
+    this.#colWidths.clear()
     await this.#openCursor(() => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }))
     this.#applyEditability()
     await this.#refreshTransactionState()
   }
 
-  #requireApi(): DbStudioApi {
+  #requireApi(): GridApi {
     if (!this.#api) throw new Error('网格尚未绑定 API')
     return this.#api
   }
@@ -201,9 +301,11 @@ export class ResultGrid {
     this.#txActive = false
     this.#pendingAffected = 0
     this.#headerEl.replaceChildren()
+    this.#headerEl.appendChild(this.#headerInnerEl)
     this.#rowsEl.replaceChildren()
     this.#spacerEl.style.height = '0px'
     this.#bannerEl.hidden = true
+    this.#hideMenu()
     if (api && old) {
       // 释放游标。失败不影响新查询，但不能吞掉——记一条状态即可。
       try {
@@ -268,6 +370,7 @@ export class ResultGrid {
   // -------------------------------------------------------------------------
 
   #renderEditToolbar(): void {
+    // 工具条是整块重建的，先保住外部的「执行 SQL」条（它由外部 setToolbar 塞进来）。
     this.#toolbarEl.replaceChildren()
 
     const info = document.createElement('span')
@@ -281,40 +384,557 @@ export class ResultGrid {
     }
     this.#toolbarEl.appendChild(info)
 
-    if (this.#root.dataset['editable'] !== 'true') return
+    if (this.#root.dataset['editable'] === 'true') {
+      const spacer = document.createElement('span')
+      spacer.className = 'spacer'
+      this.#toolbarEl.appendChild(spacer)
 
-    const spacer = document.createElement('span')
-    spacer.className = 'spacer'
-    this.#toolbarEl.appendChild(spacer)
+      // 「应用」把脏数据写进事务（但不提交）；「提交」才真正落库。
+      // 这个两段式正是 DBeaver 的语义：Persister 构造即 autocommit=false。
+      const applyBtn = document.createElement('button')
+      applyBtn.type = 'button'
+      applyBtn.textContent = '应用修改'
+      applyBtn.disabled = this.#dirty.size === 0
+      applyBtn.addEventListener('click', () => void this.applyEdits())
+      this.#toolbarEl.appendChild(applyBtn)
 
-    // 「应用」把脏数据写进事务（但不提交）；「提交」才真正落库。
-    // 这个两段式正是 DBeaver 的语义：Persister 构造即 autocommit=false。
-    const applyBtn = document.createElement('button')
-    applyBtn.type = 'button'
-    applyBtn.textContent = '应用修改'
-    applyBtn.disabled = this.#dirty.size === 0
-    applyBtn.addEventListener('click', () => void this.applyEdits())
-    this.#toolbarEl.appendChild(applyBtn)
+      const commitBtn = document.createElement('button')
+      commitBtn.type = 'button'
+      commitBtn.textContent = '提交'
+      commitBtn.disabled = !this.#txActive
+      commitBtn.addEventListener('click', () => void this.commit())
+      this.#toolbarEl.appendChild(commitBtn)
 
-    const commitBtn = document.createElement('button')
-    commitBtn.type = 'button'
-    commitBtn.textContent = '提交'
-    commitBtn.disabled = !this.#txActive
-    commitBtn.addEventListener('click', () => void this.commit())
-    this.#toolbarEl.appendChild(commitBtn)
+      const rollbackBtn = document.createElement('button')
+      rollbackBtn.type = 'button'
+      rollbackBtn.textContent = '回滚'
+      rollbackBtn.disabled = !this.#txActive
+      rollbackBtn.addEventListener('click', () => void this.rollback())
+      this.#toolbarEl.appendChild(rollbackBtn)
 
-    const rollbackBtn = document.createElement('button')
-    rollbackBtn.type = 'button'
-    rollbackBtn.textContent = '回滚'
-    rollbackBtn.disabled = !this.#txActive
-    rollbackBtn.addEventListener('click', () => void this.rollback())
-    this.#toolbarEl.appendChild(rollbackBtn)
+      // 新增行 / 删除行。
+      //
+      // 为什么放在这里而不是右键菜单：这是高频操作，藏在菜单里会让「这工具能改数据吗」
+      // 的判断成本变高。放在工具条上一眼可见。
+      const insertBtn = document.createElement('button')
+      insertBtn.type = 'button'
+      insertBtn.textContent = '新增行'
+      insertBtn.title = '插入一行；留空的列交由数据库使用默认值'
+      insertBtn.addEventListener('click', () => this.#openInsertModal())
+      this.#toolbarEl.appendChild(insertBtn)
 
-    const reloadBtn = document.createElement('button')
-    reloadBtn.type = 'button'
-    reloadBtn.textContent = '重新加载'
-    reloadBtn.addEventListener('click', () => void this.reload())
-    this.#toolbarEl.appendChild(reloadBtn)
+      const deleteBtn = document.createElement('button')
+      deleteBtn.type = 'button'
+      deleteBtn.textContent = '删除选中行'
+      // 没有选中行时禁用：删除是不可逆操作，必须由用户明确选中目标
+      deleteBtn.disabled = this.#selectedRow < 0
+      deleteBtn.title =
+        this.#selectedRow < 0 ? '先在网格里点选一行' : '删除当前选中行（需有唯一键）'
+      deleteBtn.addEventListener('click', () => void this.#deleteSelectedRow())
+      this.#toolbarEl.appendChild(deleteBtn)
+
+      const reloadBtn = document.createElement('button')
+      reloadBtn.type = 'button'
+      reloadBtn.textContent = '重新加载'
+      reloadBtn.addEventListener('click', () => void this.reload())
+      this.#toolbarEl.appendChild(reloadBtn)
+    }
+
+    // ---- 本阶段新增：行数统计 / CSV 导出，统一右对齐 ----
+    const spacer2 = document.createElement('span')
+    spacer2.className = 'spacer'
+    this.#toolbarEl.appendChild(spacer2)
+
+    // 行数统计：只在「表」来源可用。
+    // 自由 SQL 禁用原因：countRows(tableNodeId) 是按表名做全表 COUNT，而自由
+    // SQL 没有表节点，FROM 可能是 JOIN / 子查询 / CTE，没法可靠统计。
+    const countBtn = document.createElement('button')
+    countBtn.type = 'button'
+    countBtn.textContent = '统计行数'
+    const isTable = this.#source?.kind === 'table'
+    countBtn.disabled = !isTable
+    countBtn.title = isTable
+      ? '精确统计该表总行数（会执行一次全表 COUNT，大表请谨慎）'
+      : '自由 SQL 结果无法精确统计总行数（无表节点，FROM 可能是多表/子查询/CTE）'
+    countBtn.addEventListener('click', () => void this.#countRows())
+    this.#toolbarEl.appendChild(countBtn)
+
+    const loaded = this.#loadedRowCount()
+    const exportBtn = document.createElement('button')
+    exportBtn.type = 'button'
+    exportBtn.textContent = `导出 CSV（已加载 ${loaded} 行）`
+    exportBtn.disabled = loaded === 0
+    // 这条 tooltip 是硬性要求：绝不能让用户以为「导出 = 全表」。
+    exportBtn.title =
+      `仅导出当前已加载的 ${loaded} 行（页缓存内的数据），未滚动到过的行不含在内。` +
+      '需要全量请先向下滚动加载，或用数据库侧导出。'
+    exportBtn.addEventListener('click', () => this.#exportCsv())
+    this.#toolbarEl.appendChild(exportBtn)
+  }
+
+  /**
+   * 统计行数（用户显式点击才触发）。
+   *
+   * 为什么必须显式：COUNT(*) 在大表上是全表扫描，可能几十秒。若自动调用，
+   * 用户一打开表就卡住且不知道发生了什么。这与网格「默认不查总数、滚动条
+   * 按已加载行数增长」一致（剖析报告 04 问题 2：hasMoreData 是段满推断，
+   * CMD_COUNT 才是显式动作）。
+   */
+  async #countRows(): Promise<void> {
+    const src = this.#source
+    if (!src || src.kind !== 'table') {
+      this.#cb.onStatus('只有表来源支持精确统计行数', true)
+      return
+    }
+    const api = this.#api
+    if (!api || typeof api.countRows !== 'function') {
+      // 优雅降级：接口尚未就绪时给可读提示，而不是抛异常白屏。
+      this.#cb.onStatus('行数统计接口尚未就绪（countRows），请稍后重试', true)
+      return
+    }
+    this.#cb.onStatus('正在统计行数（全表扫描，请稍候）…')
+    try {
+      const n = await api.countRows(src.ref.id)
+      this.#cb.onStatus(`该表共 ${n.toLocaleString()} 行`)
+    } catch (e) {
+      this.#cb.onStatus(`统计行数失败：${errText(e)}`, true)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 排序：三态循环 + **重新查询**
+  // -------------------------------------------------------------------------
+
+  /**
+   * 点击列头 → 升序 / 降序 / 取消，三态循环。
+   *
+   * ===== 为什么必须重新查询，绝不能在前端 sort 已加载的页 =====
+   *
+   * `#pages` 只是**用户看过的那部分数据的缓存**。假设表 100 万行，用户只滚到
+   * 第 3 页，那 `#pages` 里最多两三百行。此时若对 `#pages` 里的行做 sort：
+   *   - 看起来"排好了"，但排的只是"碰巧被加载过的那几十行"；
+   *   - 真正的最大/最小值可能根本不在缓存里，排序结果**完全错误**；
+   *   - 更糟：它**不会报错**。用户以为数据有序并据此判断——这种"静默错误"
+   *     比崩溃危险得多。
+   *
+   * 正确做法是把排序下推给数据库：ORDER BY 在服务端对**全表**排序，再从偏移 0
+   * 重新取页。这样每一页都是全表有序序列的一段，才正确。
+   * 对应 DBeaver：`toggleSortOrder` 默认按 `isHasMoreData()` 决定，还有数据没
+   * 拉完就走服务端（剖析报告 04 问题 6）。
+   */
+  async #onHeaderSortClick(col: number): Promise<void> {
+    if (this.#sorting) return
+    const next = nextSortState(this.#sort, col)
+    const wasSame = this.#sort.col === col
+
+    this.#sort = next
+    this.#renderHeader()
+
+    // 第三种状态（取消排序）也要重查：否则会停留在"上一次服务端排序"的结果上，
+    // 而箭头却显示未排序——状态与数据不一致，同样是静默错误。
+    if (next.dir === null) {
+      await this.#requerySorted(null)
+      return
+    }
+    if (!wasSame && next.dir === 'asc') {
+      // 换了列并从升序开始，正常往下走
+    }
+
+    // 拼 ORDER BY 需要方言引号规则；拿不到就明确拒绝，绝不拼未转义的列名
+    // （列名可能含空格/关键字/引号，直接拼进 SQL 会语法错误甚至注入）。
+    const rules = await this.#ensureQuoting()
+    if (!rules) {
+      this.#sort = { col: -1, dir: null }
+      this.#renderHeader()
+      this.#cb.onStatus('无法获取方言引号规则，已取消排序（不会拼接未转义的列名）', true)
+      return
+    }
+    const colName = this.#columns[col]?.name
+    if (!colName) return
+    await this.#requerySorted({ col, dir: next.dir, rules, colName })
+  }
+
+  /**
+   * 按当前排序重查。`sort === null` 表示取消排序、回到原始顺序。
+   *
+   * 取数方式：
+   *   - 表：`SELECT * FROM <quoted table> [ORDER BY <quoted col> ASC/DESC]`
+   *   - 自由 SQL：`SELECT * FROM (<原 SQL>) _dbstudio_sort [ORDER BY ...]`
+   *     （包一层子查询，保证 ORDER BY 作用在原查询的**结果**上）
+   */
+  async #requerySorted(
+    sort: { col: number; dir: 'asc' | 'desc'; rules: QuotingRules; colName: string } | null
+  ): Promise<void> {
+    const api = this.#requireApi()
+    const src = this.#source
+    if (!src) return
+
+    this.#sorting = true
+    this.#renderHeader() // 刷新箭头/禁用态
+    this.#cb.onStatus(sort ? '正在按列排序（重新查询）…' : '正在恢复原始顺序（重新查询）…')
+    try {
+      const order =
+        sort === null
+          ? ''
+          : ` ORDER BY ${quoteIdentifier(sort.colName, sort.rules)} ${sort.dir === 'asc' ? 'ASC' : 'DESC'}`
+      if (src.kind === 'table') {
+        const table = quoteIdentifier(src.ref.name, sort?.rules ?? (await this.#requireQuoting()))
+        const sql = `SELECT * FROM ${table}${order}`
+        await this.#openCursor(() => api.runQuery(src.ref.id, sql, { limit: PAGE_SIZE }))
+      } else {
+        // 子查询别名固定且带下划线，避开与原 SQL 里的表别名撞名。
+        const sql = `SELECT * FROM (${src.sql}) _dbstudio_sort${order}`
+        await this.#openCursor(() => api.runQuery(src.nodeId, sql, { limit: PAGE_SIZE }))
+      }
+      this.#cb.onStatus(
+        sort
+          ? `已按「${sort.colName}」${sort.dir === 'asc' ? '升序' : '降序'}重新查询`
+          : '已恢复原始顺序（重新查询）'
+      )
+    } catch (e) {
+      this.#cb.onStatus(`排序失败：${errText(e)}`, true)
+    } finally {
+      this.#sorting = false
+      this.#renderHeader()
+    }
+  }
+
+  /** 取一次方言引号规则并缓存；失败返回 null（调用方据此拒绝排序）。 */
+  async #ensureQuoting(): Promise<QuotingRules | null> {
+    if (this.#quoting) return this.#quoting
+    if (this.#quotingTried && !this.#quoting) return null
+    this.#quotingTried = true
+    const api = this.#api
+    if (!api) return null
+    try {
+      const dialects = await api.listDialects()
+      const rules = pickQuotingRules(dialects)
+      if (rules) this.#quoting = rules
+      return this.#quoting
+    } catch {
+      return null
+    }
+  }
+
+  /** 表来源重查需要引号规则；理论上 #ensureQuoting 已保证，兜底再取一次。 */
+  async #requireQuoting(): Promise<QuotingRules> {
+    const r = this.#quoting ?? (await this.#ensureQuoting())
+    if (!r) throw new Error('缺少方言引号规则，无法生成表名')
+    return r
+  }
+
+  // -------------------------------------------------------------------------
+  // 列宽拖拽 / 自适应
+  // -------------------------------------------------------------------------
+
+  #colWidth(col: ResultColumn): number {
+    return this.#colWidths.get(col.name) ?? DEFAULT_COL_WIDTH
+  }
+
+  /** 表头右边缘的拖拽手柄。拖完写进 #colWidths，表头与行同步生效。 */
+  #attachResizer(handle: HTMLElement, col: ResultColumn, headerCell: HTMLElement): void {
+    let startX = 0
+    let startW = 0
+    let dragging = false
+
+    const onMove = (e: MouseEvent): void => {
+      if (!dragging) return
+      const w = Math.max(MIN_COL_WIDTH, startW + (e.clientX - startX))
+      this.#colWidths.set(col.name, w)
+      headerCell.style.width = `${w}px`
+      // 拖动中把数据行同名列也同步改宽，否则"表头动了、数据没动"。
+      this.#applyColumnWidthToRows(col.name, w)
+    }
+    const onUp = (): void => {
+      if (!dragging) return
+      dragging = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      this.#render() // 收尾整体重绘，清掉拖动中的临时状态
+    }
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation() // 别触发列头排序
+      dragging = true
+      startX = e.clientX
+      startW = this.#colWidth(col)
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    })
+
+    // 双击手柄：按已加载数据的最长值估算宽度（一次估算，不逐帧）。
+    handle.addEventListener('dblclick', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const w = this.#autoFitWidth(col)
+      this.#colWidths.set(col.name, w)
+      headerCell.style.width = `${w}px`
+      this.#applyColumnWidthToRows(col.name, w)
+      this.#render()
+    })
+  }
+
+  /** 拖动中同步同名列数据格宽度（避免等下一帧整体重绘的闪动）。 */
+  #applyColumnWidthToRows(colName: string, width: number): void {
+    const idx = this.#columns.findIndex((c) => c.name === colName)
+    if (idx < 0) return
+    const cellIndex = idx + 1 // 行内：行号列在 0，数据列从 1 开始
+    for (const rowEl of Array.from(this.#rowsEl.children)) {
+      const cell = rowEl.children[cellIndex]
+      if (cell instanceof HTMLElement) cell.style.width = `${width}px`
+    }
+  }
+
+  /**
+   * 按已加载数据估算列宽。
+   * 注意"已加载"限定：我们**只有**页缓存里的值，所以这是"当前已加载数据的最长值"，
+   * 不是全表最长值。想看更宽仍可手动拖。
+   */
+  #autoFitWidth(col: ResultColumn): number {
+    const idx = this.#columns.findIndex((c) => c.name === col.name)
+    let maxLen = col.name.length
+    if (idx >= 0) {
+      for (const page of this.#pages.values()) {
+        for (const row of page.rows) {
+          const v = row.cells[idx]
+          if (!v) continue
+          const len = cellDisplayLength(v)
+          if (len > maxLen) maxLen = len
+        }
+      }
+    }
+    // 粗略换算：每字符约 7px + 左右 padding 16 + 一点余量。
+    return Math.max(MIN_COL_WIDTH, Math.min(1200, maxLen * 7 + 24))
+  }
+
+  // -------------------------------------------------------------------------
+  // 复制 / 右键菜单 / 查看全文
+  // -------------------------------------------------------------------------
+
+  #copyCell(row: number, col: number): void {
+    const rowVal = this.#rowAt(row)
+    if (!rowVal) {
+      this.#cb.onStatus('该行尚未加载，无法复制', true)
+      return
+    }
+    const cell = rowVal.cells[col] ?? { kind: 'null' as const }
+    // NULL 复制成空字符串（Excel 里 NULL 常就是空），并在状态栏说清楚。
+    this.#writeClipboard(cellToClipboardText(cell), cell.kind === 'null' ? '已复制（NULL → 空字符串）' : '已复制单元格')
+  }
+
+  #copyRow(row: number): void {
+    const rowVal = this.#rowAt(row)
+    if (!rowVal) {
+      this.#cb.onStatus('该行尚未加载，无法复制', true)
+      return
+    }
+    // 整行用 Tab 分隔：粘到 Excel/表格里就是一行多列。
+    const parts: string[] = []
+    for (let c = 0; c < this.#columns.length; c++) {
+      const cell = rowVal.cells[c] ?? { kind: 'null' as const }
+      // 整行复制里的 NULL 用空串，但保留列结构（否则粘出来列数会错）。
+      parts.push(cellToClipboardText(cell))
+    }
+    this.#writeClipboard(parts.join('\t'), `已复制整行（${parts.length} 列，Tab 分隔）`)
+  }
+
+  #writeClipboard(text: string, okMsg: string): void {
+    // 失败必须提示而不是静默：否则用户以为复制成功，粘出来是旧剪贴板内容。
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => this.#cb.onStatus(okMsg))
+      .catch((e: unknown) => this.#cb.onStatus(`复制失败：${errText(e)}`, true))
+  }
+
+  /** 当前选中的单元格值；无选中返回 null。 */
+  #currentCellValue(): CellValue | null {
+    if (this.#selectedRow < 0 || this.#selectedCol < 0) return null
+    const row = this.#rowAt(this.#selectedRow)
+    return row?.cells[this.#selectedCol] ?? null
+  }
+
+  #showContextMenu(x: number, y: number): void {
+    if (this.#selectedRow < 0 || this.#selectedCol < 0) return
+    const items: Array<{ label: string; run: () => void }> = [
+      { label: '复制单元格', run: () => this.#copyCell(this.#selectedRow, this.#selectedCol) },
+      { label: '复制整行', run: () => this.#copyRow(this.#selectedRow) },
+    ]
+    // 「查看完整值」只对被截断的值有意义。
+    const val = this.#currentCellValue()
+    if (val && (val.kind === 'text' || val.kind === 'blob') && val.truncated) {
+      items.push({ label: '查看完整值…', run: () => void this.#openFullValue() })
+    }
+
+    this.#menuEl.replaceChildren()
+    for (const it of items) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'grid-menu-item'
+      btn.textContent = it.label
+      btn.addEventListener('click', () => {
+        this.#hideMenu()
+        it.run()
+      })
+      this.#menuEl.appendChild(btn)
+    }
+    // 先显示再量尺寸，避免超出视口时被裁掉。
+    this.#menuEl.hidden = false
+    this.#menuEl.style.left = '0px'
+    this.#menuEl.style.top = '0px'
+    const rect = this.#menuEl.getBoundingClientRect()
+    const left = Math.min(x, globalThis.innerWidth - rect.width - 4)
+    const top = Math.min(y, globalThis.innerHeight - rect.height - 4)
+    this.#menuEl.style.left = `${Math.max(0, left)}px`
+    this.#menuEl.style.top = `${Math.max(0, top)}px`
+  }
+
+  #hideMenu(): void {
+    this.#menuEl.hidden = true
+  }
+
+  /**
+   * 查看完整值。
+   *
+   * 被截断的单元格只持有前 1000 字符（数据通道就截断了，见 core/resultset.ts），
+   * 所以要看全文必须回主进程单独取。fetchCellValue 由 P0-B 并行实现，
+   * 就绪前这里必须**优雅降级**：提示接口未就绪，而不是抛异常把页面搞白。
+   */
+  async #openFullValue(): Promise<void> {
+    const row = this.#selectedRow
+    const col = this.#selectedCol
+    const cursorId = this.#cursorId
+    if (row < 0 || col < 0) return
+    if (!this.#currentCellValue()) return
+    if (!cursorId) {
+      this.#cb.onStatus('当前结果集没有游标，无法读取完整值', true)
+      return
+    }
+    const api = this.#api
+    if (!api || typeof api.fetchCellValue !== 'function') {
+      // 优雅降级：接口未就绪
+      this.#cb.onStatus('完整值接口尚未就绪（fetchCellValue），暂时无法查看全文', true)
+      this.#showModal('完整值', '完整值接口尚未就绪（fetchCellValue）。\n等该接口上线后，这里会显示完整内容。')
+      return
+    }
+    this.#cb.onStatus('正在读取完整值…')
+    try {
+      const full = await api.fetchCellValue(cursorId, row, col)
+      const text = cellToClipboardText(full)
+      const len = 'fullLength' in full && typeof full.fullLength === 'number' ? full.fullLength : text.length
+      this.#showModal(`完整值（${len.toLocaleString()} 字符）`, text)
+      this.#cb.onStatus('已读取完整值')
+    } catch (e) {
+      this.#cb.onStatus(`读取完整值失败：${errText(e)}`, true)
+      this.#showModal('完整值', `读取失败：${errText(e)}`)
+    }
+  }
+
+  /** 模态层：可滚动的全文 + 复制按钮。 */
+  #showModal(title: string, body: string): void {
+    this.#modalEl.replaceChildren()
+
+    const backdrop = document.createElement('div')
+    backdrop.className = 'grid-modal-backdrop'
+
+    const panel = document.createElement('div')
+    panel.className = 'grid-modal-panel'
+
+    const head = document.createElement('div')
+    head.className = 'grid-modal-head'
+    const h = document.createElement('span')
+    h.textContent = title
+    head.appendChild(h)
+    const closeBtn = document.createElement('button')
+    closeBtn.type = 'button'
+    closeBtn.textContent = '关闭'
+    closeBtn.addEventListener('click', () => this.#hideModal())
+    head.appendChild(closeBtn)
+
+    const text = document.createElement('textarea')
+    text.className = 'grid-modal-body'
+    text.readOnly = true
+    text.value = body
+    text.spellcheck = false
+
+    const foot = document.createElement('div')
+    foot.className = 'grid-modal-foot'
+    const copyBtn = document.createElement('button')
+    copyBtn.type = 'button'
+    copyBtn.textContent = '复制全文'
+    copyBtn.addEventListener('click', () => {
+      void navigator.clipboard
+        .writeText(body)
+        .then(() => this.#cb.onStatus('已复制全文'))
+        .catch((e: unknown) => this.#cb.onStatus(`复制失败：${errText(e)}`, true))
+    })
+    foot.appendChild(copyBtn)
+
+    panel.append(head, text, foot)
+    backdrop.appendChild(panel)
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) this.#hideModal()
+    })
+    this.#modalEl.appendChild(backdrop)
+    this.#modalEl.hidden = false
+    text.focus()
+  }
+
+  #hideModal(): void {
+    this.#modalEl.hidden = true
+    this.#modalEl.replaceChildren()
+  }
+
+  // -------------------------------------------------------------------------
+  // CSV 导出（只导出已加载的行）
+  // -------------------------------------------------------------------------
+
+  /** 已在页缓存里、可导出的行数。 */
+  #loadedRowCount(): number {
+    let n = 0
+    for (const page of this.#pages.values()) n += page.rows.length
+    return n
+  }
+
+  /**
+   * 导出 CSV。
+   *
+   * 只导出**已加载**的行——页缓存之外的行我们根本没有（也不该为了导出去全量
+   * 拉取，那会把内存打爆）。按钮文案与 tooltip 都写明「已加载 N 行」，
+   * 避免用户误以为这是全表导出。
+   */
+  #exportCsv(): void {
+    const total = this.#loadedRowCount()
+    const rows: CellValue[][] = []
+    for (let i = 0; i < total; i++) {
+      const row = this.#rowAt(i)
+      if (row) rows.push([...row.cells])
+    }
+    if (rows.length === 0) {
+      this.#cb.onStatus('没有已加载的行可导出', true)
+      return
+    }
+
+    const header = this.#columns.map((c) => csvEscape(c.name)).join(',')
+    const lines = [header]
+    for (const cells of rows) {
+      const cellsText = this.#columns.map((_, c) => csvEscape(cellToCsvText(cells[c] ?? { kind: 'null' })))
+      lines.push(cellsText.join(','))
+    }
+    // 加 BOM：Excel 打开不带 BOM 的 UTF-8 CSV 会把中文显示成乱码。
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n') + '\r\n'], {
+      type: 'text/csv;charset=utf-8',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = buildCsvFileName()
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    // 释放 object URL，避免内存泄漏（下载已开始，此时释放是安全的）。
+    globalThis.setTimeout(() => URL.revokeObjectURL(url), 0)
+    this.#cb.onStatus(`已导出 ${rows.length} 行到 ${a.download}（仅已加载数据）`)
   }
 
   /** 把脏数据提交到事务（不 commit）。 */
@@ -443,10 +1063,234 @@ export class ResultGrid {
     if (src.kind === 'table') {
       await this.openTable(src.ref, src.desc)
     } else {
-      const api = this.#requireApi()
-      void api
-      // 自由 SQL 的 nodeId 没存，这里退化为提示用户重执行。
-      this.#cb.onStatus('请重新执行 SQL 以刷新结果')
+      // 自由 SQL 现在记住了 nodeId，可以真正重查（而不是只提示用户重执行）；
+      // 若当前有排序，优先重查保持排序结果。
+      const sort = this.#sort
+      const rules = sort.dir !== null && sort.col >= 0 ? await this.#ensureQuoting() : null
+      const colName = sort.col >= 0 ? this.#columns[sort.col]?.name : undefined
+      if (sort.dir !== null && rules && colName) {
+        await this.#requerySorted({ col: sort.col, dir: sort.dir, rules, colName })
+        return
+      }
+      await this.runSql(src.nodeId, src.sql)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 新增行 / 删除行
+  // -------------------------------------------------------------------------
+
+  /** 当前结果集的表节点 id；只有「表来源」才可执行增删。 */
+  #tableNodeId(): string | null {
+    const src = this.#source
+    return src && src.kind === 'table' ? src.ref.id : null
+  }
+
+  /**
+   * 新增行：弹一个按表结构生成的表单。
+   *
+   * 为什么用表单而不是「先插一个空行再让用户改」：
+   * 空插入需要数据库能给出全部默认值，SQLite 允许 `INSERT INTO t DEFAULT VALUES`，
+   * 但适配器的 `insertRow({})` 是**拒绝**空 values 的（防误用）。
+   * 更重要的是：先插空行会立刻产生一条脏数据，用户中途放弃就留下垃圾行。
+   * 让用户一次填完再提交，更安全。
+   */
+  #openInsertModal(): void {
+    const desc = this.#desc
+    const tableId = this.#tableNodeId()
+    if (!desc || !tableId) {
+      this.#cb.onStatus('只有表（不是自由 SQL）支持新增行', true)
+      return
+    }
+
+    const backdrop = document.createElement('div')
+    backdrop.className = 'grid-modal-backdrop'
+
+    const modal = document.createElement('div')
+    modal.className = 'grid-modal'
+
+    const head = document.createElement('div')
+    head.className = 'grid-modal-head'
+    head.textContent = '新增行'
+    modal.appendChild(head)
+
+    const body = document.createElement('div')
+    body.className = 'grid-modal-body'
+
+    const hint = document.createElement('p')
+    hint.style.cssText = 'margin:0 0 10px;font-size:12px;color:var(--fg-dim)'
+    hint.textContent = '留空的列会使用数据库默认值（或 NULL）。主键为自增时留空即可。'
+    body.appendChild(hint)
+
+    const inputs = new Map<string, HTMLInputElement>()
+    for (const col of desc.columns) {
+      const row = document.createElement('label')
+      row.style.cssText =
+        'display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;margin-bottom:6px'
+
+      const name = document.createElement('span')
+      const isPk = col.primaryKeyOrdinal !== null
+      name.textContent = `${col.name}${isPk ? ' (PK)' : ''}`
+      name.style.cssText = 'font-size:12px;color:var(--fg-dim)'
+      name.title = `${col.typeName}${col.nullable ? '' : ' · NOT NULL'}`
+
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.dataset['column'] = col.name
+      input.placeholder = col.nullable ? '（空 = NULL）' : '（必填）'
+      input.style.cssText =
+        'font:inherit;padding:4px 7px;border:1px solid var(--border);border-radius:5px;' +
+        'background:var(--bg);color:var(--fg)'
+
+      inputs.set(col.name, input)
+      row.append(name, input)
+      body.appendChild(row)
+    }
+    modal.appendChild(body)
+
+    const foot = document.createElement('div')
+    foot.className = 'grid-modal-foot'
+
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.textContent = '取消'
+
+    const submit = document.createElement('button')
+    submit.type = 'button'
+    submit.textContent = '插入'
+
+    foot.append(cancel, submit)
+    modal.appendChild(foot)
+    backdrop.appendChild(modal)
+    document.body.appendChild(backdrop)
+
+    const first = inputs.values().next().value as HTMLInputElement | undefined
+    first?.focus()
+
+    const close = (): void => {
+      backdrop.remove()
+      document.removeEventListener('keydown', onKey)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        close()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    cancel.addEventListener('click', close)
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) close()
+    })
+
+    submit.addEventListener('click', () => {
+      void (async () => {
+        const api = this.#requireApi()
+        const values: Record<string, CellValue> = {}
+        for (const [name, input] of inputs) {
+          const raw = input.value
+          // 留空 = 交给数据库默认值，**不要**写成空字符串——
+          // 那会把一个 NULL/默认值的列变成 ''，是真实的数据偏差。
+          if (raw === '') continue
+          values[name] = { kind: 'text', text: raw }
+        }
+
+        submit.disabled = true
+        this.#cb.onStatus('正在插入…')
+        try {
+          // api.insertRow 由主进程提供；接口缺失时给出可读提示而不是崩
+          const fn = (api as unknown as {
+            insertRow?: (id: string, v: Record<string, CellValue>) => Promise<{ affected: number }>
+          }).insertRow
+          if (typeof fn !== 'function') {
+            throw new Error('insertRow 接口尚未就绪')
+          }
+          const res = await fn(tableId, values)
+          close()
+          this.#cb.onStatus(`已插入 ${res.affected} 行（未提交，点「提交」生效）`)
+          await this.reload()
+          await this.#refreshTransactionState()
+        } catch (e) {
+          this.#cb.onStatus(`插入失败：${errText(e)}`, true)
+        } finally {
+          submit.disabled = false
+        }
+      })()
+    })
+  }
+
+  /** 删除当前选中的行。用主键值定位，避免误删。 */
+  async #deleteSelectedRow(): Promise<void> {
+    const desc = this.#desc
+    const tableId = this.#tableNodeId()
+    if (!desc || !tableId) {
+      this.#cb.onStatus('只有表支持删除行', true)
+      return
+    }
+    if (this.#selectedRow < 0) {
+      this.#cb.onStatus('请先在网格里点选一行', true)
+      return
+    }
+    if (!desc.hasUniqueKey) {
+      this.#cb.onStatus('该表没有唯一键，无法安全删除行', true)
+      return
+    }
+
+    const row = this.#rowAt(this.#selectedRow)
+    if (!row) {
+      this.#cb.onStatus('选中的行不在已加载数据里，请滚动或重新加载', true)
+      return
+    }
+
+    const keyCols = desc.columns
+      .filter((c) => c.primaryKeyOrdinal !== null)
+      .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
+    const keyValues: Record<string, CellValue> = {}
+    for (const kc of keyCols) {
+      const ci = this.#columns.findIndex((c) => c.name === kc.name)
+      if (ci < 0) {
+        this.#cb.onStatus(`主键列「${kc.name}」不在结果集中，无法定位行`, true)
+        return
+      }
+      const cell = row.cells[ci]
+      if (!cell || cell.kind === 'null') {
+        this.#cb.onStatus(`主键列「${kc.name}」为空，无法定位行`, true)
+        return
+      }
+      keyValues[kc.name] = cell
+    }
+
+    // 二次确认：删除不可逆，且这是最容易误触的操作
+    const keyText = Object.entries(keyValues)
+      .map(([k, v]) => `${k}=${v.kind === 'text' ? v.text : v.kind === 'number' ? v.value : '?'}`)
+      .join(', ')
+    if (!globalThis.confirm(`确定删除这一行？\n\n定位条件：${keyText}\n\n删除后需要点「提交」才会真正生效。`)) {
+      return
+    }
+
+    try {
+      const api = this.#requireApi() as unknown as {
+        deleteRows?: (
+          id: string,
+          keys: readonly Record<string, CellValue>[]
+        ) => Promise<{ ok: boolean; affected: number; outcomes: readonly { error: string | null }[] }>
+      }
+      if (typeof api.deleteRows !== 'function') {
+        throw new Error('deleteRows 接口尚未就绪')
+      }
+      this.#cb.onStatus('正在删除…')
+      const res = await api.deleteRows(tableId, [keyValues])
+      if (!res.ok) {
+        const firstErr = res.outcomes.find((o) => o.error !== null)?.error ?? '未知原因'
+        this.#cb.onStatus(`删除失败：${firstErr}`, true)
+        return
+      }
+      this.#selectedRow = -1
+      this.#cb.onStatus(`已删除 ${res.affected} 行（未提交，点「提交」生效）`)
+      await this.reload()
+      await this.#refreshTransactionState()
+    } catch (e) {
+      this.#cb.onStatus(`删除失败：${errText(e)}`, true)
     }
   }
 
@@ -487,22 +1331,53 @@ export class ResultGrid {
   // -------------------------------------------------------------------------
 
   #renderHeader(): void {
-    this.#headerEl.replaceChildren()
+    this.#headerInnerEl.replaceChildren()
 
     const corner = document.createElement('div')
     corner.className = 'grid-cell grid-rownum'
     corner.setAttribute('role', 'columnheader')
     corner.textContent = '#'
-    this.#headerEl.appendChild(corner)
+    // 必须放在内层：数据行里的 `#` 行号格是随行一起横滚的，
+    // 表头的 `#` 若留在外层就不会跟着滚，横滚后同样会错位。
+    this.#headerInnerEl.appendChild(corner)
 
-    for (const col of this.#columns) {
+    for (let i = 0; i < this.#columns.length; i++) {
+      const col = this.#columns[i]
+      if (!col) continue
       const cell = document.createElement('div')
       cell.className = 'grid-cell grid-col-header'
       cell.setAttribute('role', 'columnheader')
-      cell.style.width = `${COL_WIDTH}px`
-      cell.textContent = col.name
-      cell.title = `${col.name} · ${col.type}`
-      this.#headerEl.appendChild(cell)
+      // 列宽与数据行同源（#colWidths），保证表头和数据永远对齐。
+      cell.style.width = `${this.#colWidth(col)}px`
+      cell.style.position = 'relative' // 让右边缘拖拽手柄能绝对定位
+      cell.title = `${col.name} · ${col.type}（点击排序，拖右边缘调整列宽）`
+      if (this.#sorting) cell.classList.add('is-sorting')
+
+      const label = document.createElement('span')
+      label.className = 'grid-col-label'
+      label.textContent = col.name
+      // 排序指示器：▲ 升序 / ▼ 降序。只给当前排序列加。
+      if (this.#sort.col === i && this.#sort.dir) {
+        const arrow = document.createElement('span')
+        arrow.className = 'grid-sort-arrow'
+        arrow.textContent = this.#sort.dir === 'asc' ? '▲' : '▼'
+        label.appendChild(arrow)
+      }
+      cell.appendChild(label)
+
+      cell.addEventListener('click', () => {
+        if (this.#sorting) return
+        void this.#onHeaderSortClick(i)
+      })
+
+      // 右边缘拖拽手柄（独立元素，避免与点击排序抢事件）。
+      const handle = document.createElement('div')
+      handle.className = 'grid-col-resizer'
+      handle.title = '拖动调整列宽，双击按内容自适应'
+      this.#attachResizer(handle, col, cell)
+      cell.appendChild(handle)
+
+      this.#headerInnerEl.appendChild(cell)
     }
   }
 
@@ -601,11 +1476,13 @@ export class ResultGrid {
 
     const row = this.#rowAt(rowIndex)
     if (!row) {
-      // 骨架行：该页还没到。用空白格子占位，保持列宽稳定。
+      // 骨架行：该页还没到。用空白格子占位，保持列宽稳定（用 #colWidths 同一份）。
       for (let c = 0; c < this.#columns.length; c++) {
+        const col = this.#columns[c]
+        if (!col) continue
         const cell = document.createElement('div')
         cell.className = 'grid-cell is-skeleton'
-        cell.style.width = `${COL_WIDTH}px`
+        cell.style.width = `${this.#colWidth(col)}px`
         cell.setAttribute('role', 'gridcell')
         rowEl.appendChild(cell)
       }
@@ -613,9 +1490,12 @@ export class ResultGrid {
     }
 
     for (let c = 0; c < this.#columns.length; c++) {
+      const col = this.#columns[c]
+      if (!col) continue
       const cell = document.createElement('div')
       cell.className = 'grid-cell'
-      cell.style.width = `${COL_WIDTH}px`
+      // 列宽来自实例状态：与 #renderHeader 同源，保证表头与数据永远对齐。
+      cell.style.width = `${this.#colWidth(col)}px`
       cell.setAttribute('role', 'gridcell')
       if (rowIndex === this.#selectedRow && c === this.#selectedCol) {
         cell.classList.add('is-focused')
@@ -632,11 +1512,23 @@ export class ResultGrid {
         this.#selectedRow = rowIndex
         this.#selectedCol = c
         this.#render()
+        // 必须一并重绘工具条：**「删除选中行」按钮的可用性取决于是否有选中行**。
+        // 只调 #render() 的话按钮会一直保持「无选中→禁用」的旧状态，
+        // 用户选了行也点不动删除（这是实测发现的 bug，不是理论问题）。
+        this.#renderEditToolbar()
         this.#viewportEl.focus()
       })
       cell.addEventListener('dblclick', () => {
         if (this.#root.dataset['editable'] !== 'true') return
         this.#beginCellEdit(cell, rowIndex, c, value)
+      })
+      // 右键：先选中该格，再弹出菜单（否则菜单操作的是上一次选中的格子）。
+      cell.addEventListener('contextmenu', (e) => {
+        e.preventDefault()
+        this.#selectedRow = rowIndex
+        this.#selectedCol = c
+        this.#render()
+        this.#showContextMenu(e.clientX, e.clientY)
       })
       rowEl.appendChild(cell)
     }
@@ -799,6 +1691,17 @@ export class ResultGrid {
   }
 
   #onKeyDown(e: KeyboardEvent): void {
+    // 复制快捷键优先于导航：Ctrl/Cmd+C 复制单元格，加 Shift 复制整行。
+    const mod = e.ctrlKey || e.metaKey
+    if (mod && (e.key === 'c' || e.key === 'C')) {
+      if (this.#selectedRow >= 0) {
+        e.preventDefault()
+        if (e.shiftKey) this.#copyRow(this.#selectedRow)
+        else if (this.#selectedCol >= 0) this.#copyCell(this.#selectedRow, this.#selectedCol)
+      }
+      return
+    }
+
     if (this.#knownRows === 0) return
     let nextRow = this.#selectedRow
     let nextCol = this.#selectedCol
@@ -839,6 +1742,8 @@ export class ResultGrid {
   /** 页面卸载/切换时释放游标。 */
   async dispose(): Promise<void> {
     await this.#reset()
+    this.#menuEl.remove()
+    this.#modalEl.remove()
   }
 }
 
@@ -869,4 +1774,140 @@ function isSameValue(a: CellValue, b: CellValue): boolean {
     default:
       return false
   }
+}
+
+// ---------------------------------------------------------------------------
+// 纯函数（可被 /tmp 静态自检直接 import 断言）
+// ---------------------------------------------------------------------------
+
+/**
+ * 三态排序循环：无 → 升序 → 降序 → 无。
+ *
+ * 抽成纯函数是为了让自检能直接验证状态机，而不必启动 UI。
+ * 点击**另一列**时从升序重新开始（不能把上一列的 dir 带过来）。
+ */
+export function nextSortState(prev: { col: number; dir: 'asc' | 'desc' | null }, col: number): {
+  col: number
+  dir: 'asc' | 'desc' | null
+} {
+  if (prev.col !== col) return { col, dir: 'asc' }
+  if (prev.dir === null) return { col, dir: 'asc' }
+  if (prev.dir === 'asc') return { col, dir: 'desc' }
+  return { col: -1, dir: null }
+}
+
+/**
+ * CSV 字段转义（RFC 4180）。
+ *
+ * 规则：字段含逗号、双引号、CR 或 LF 时，整体用双引号包裹，且内部双引号
+ * 翻倍。不含这些字符时原样输出（避免给所有字段都加引号，那样文件又大又难读）。
+ *
+ * 为什么必须严格：一个含逗号的值没加引号，会让整行列数错位——导入方
+ * （Excel/pandas）会把它拆成两列，数据静默错位，比报错更难发现。
+ */
+export function csvEscape(value: string): string {
+  const s = value ?? ''
+  if (s === '') return ''
+  if (/[",\r\n]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"'
+  }
+  return s
+}
+
+/** 单元格 → CSV 文本。NULL 用空串（CSV 里没有 NULL 概念）。 */
+function cellToCsvText(cell: CellValue): string {
+  switch (cell.kind) {
+    case 'null':
+      return ''
+    case 'number':
+      return String(cell.value)
+    case 'boolean':
+      return cell.value ? 'true' : 'false'
+    case 'text':
+      return cell.text
+    case 'blob':
+      return cell.previewBase64
+    default:
+      return ''
+  }
+}
+
+/** 单元格 → 剪贴板文本。NULL 复制成空字符串（Excel 里 NULL 往往就是空）。 */
+function cellToClipboardText(cell: CellValue): string {
+  switch (cell.kind) {
+    case 'null':
+      return ''
+    case 'number':
+      return String(cell.value)
+    case 'boolean':
+      return cell.value ? 'true' : 'false'
+    case 'text':
+      return cell.text
+    case 'blob':
+      return cell.previewBase64
+    default:
+      return ''
+  }
+}
+
+/** 用于「自适应列宽」的显示长度估算（BLOB 按占位符长度算）。 */
+function cellDisplayLength(cell: CellValue): number {
+  switch (cell.kind) {
+    case 'null':
+      return 4
+    case 'number':
+      return String(cell.value).length
+    case 'boolean':
+      return cell.value ? 4 : 5
+    case 'text':
+      return cell.text.length
+    case 'blob':
+      return 24
+    default:
+      return 0
+  }
+}
+
+/**
+ * 从方言列表里挑出引号规则。
+ *
+ * 保守策略：只有在**唯一确定**时才返回规则——
+ *   - 列表里只有一个方言 → 用它；
+ *   - 多个方言但 quoting 完全一致 → 用它们（规则相同，选谁都一样）；
+ *   - 规则不一致且无上下文能确定当前连接用哪个 → 返回 null。
+ *
+ * 为什么这么保守：引号规则猜错，要么 SQL 语法错误，要么把列名当关键字。
+ * 任务书要求「宁可显示无法排序，也不要拼接未转义的列名」。本网格 `#source`
+ * 里没有 dialectId（只有连接作用域 id），多方言且规则不一时无法可靠判断，
+ * 这时就放弃排序并提示。
+ */
+export function pickQuotingRules(dialects: readonly { quoting: QuotingRules }[]): QuotingRules | null {
+  if (dialects.length === 0) return null
+  const first = dialects[0]?.quoting
+  if (!first) return null
+  for (const d of dialects) {
+    const q = d.quoting
+    if (!q || q.open !== first.open || q.close !== first.close || q.escape !== first.escape) {
+      return null
+    }
+  }
+  return first
+}
+
+/**
+ * 按 QuotingRules 转义标识符。与 core/driver.ts 的 `quoteIdentifierWith` 同义，
+ * 此处内联一份是为了让 grid.ts 对 driver 模块只保留类型依赖（不引入运行时耦合）。
+ */
+export function quoteIdentifier(name: string, rules: QuotingRules): string {
+  const escaped =
+    rules.escape === 'double'
+      ? name.split(rules.close).join(rules.close + rules.close)
+      : name.split('\\').join('\\\\').split(rules.close).join('\\' + rules.close)
+  return rules.open + escaped + rules.close
+}
+
+/** 导出文件名带时间戳：`dbstudio-2026-10-22T01-25-30-000Z.csv`（`:/.` 替换为 `-`）。 */
+export function buildCsvFileName(now: Date = new Date()): string {
+  const iso = now.toISOString().replace(/[:.]/g, '-')
+  return `dbstudio-${iso}.csv`
 }

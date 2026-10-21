@@ -83,3 +83,12 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui-flow
+
+      - name: 新功能 GUI 交互测试
+        # 覆盖本轮补齐的能力：树搜索 / 排序 / 列宽 / 统计行数 / CSV /
+        # 新增行 / 删除行 / 右键菜单。与上一步分开，失败时能一眼定位。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-features

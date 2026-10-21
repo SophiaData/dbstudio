@@ -462,6 +462,33 @@ export function toCellValue(value: unknown): CellValue {
 }
 
 /**
+ * 同 `toCellValue`，但**不截断文本**。只给 `fetchCellValue`（用户显式要看全文）用。
+ *
+ * 为什么单独一个函数而不是给 `toCellValue` 加个参数：
+ * 截断是**分页通道的默认安全策略**（防止单帧撑爆 IPC），
+ * 如果把它变成可选参数，任何一个调用点忘了传就会让分页也可能传出整篇大文本。
+ * 把它拆成一个语义独立、名字就说明用途的函数，调用方一眼能看出代价。
+ *
+ * BLOB 也走完整路径：`previewBase64` 装的是**整个 BLOB** 的 base64（`truncated` 恒为 false）。
+ * 超大 BLOB 会把整块读进内存并撑大 IPC——这是"用户显式请求完整值"的应有代价，
+ * UI 侧应在调用前按大小提示/确认。
+ */
+export function toFullCellValue(value: unknown): CellValue {
+  if (typeof value === 'string') {
+    return { kind: 'text', text: value }
+  }
+  if (value instanceof Uint8Array) {
+    return {
+      kind: 'blob',
+      previewBase64: Buffer.from(value).toString('base64'),
+      length: value.length,
+      truncated: false
+    }
+  }
+  return toCellValue(value)
+}
+
+/**
  * 推断列的 `ResultValueType`（规格：按运行时值推断，拿不到就 'unknown'）。
  *
  * 这是**值推断，不是元数据**，所以有两个已知的近似：

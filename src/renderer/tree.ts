@@ -27,6 +27,19 @@
  */
 
 import type { ObjectRef } from '../core/model'
+import type { DbStudioApi } from '../core/api'
+
+/**
+ * 刷新/连接/断开需要调 API，但本类的构造签名只接收 `listChildren`——
+ * 这是刻意的边界（见文件头「渲染进程不知道数据库长什么样」）。
+ * 为了在不改 main.ts 的前提下补上节点级操作，这里把 API 取成**可选**：
+ *   1. 优先用 main.ts 传进来的回调（若日后接线，行为可控）；
+ *   2. 否则退回 `window.dbstudio`（preload 白名单已暴露，见 preload/index.ts#L137）。
+ * 两条路都没有时菜单项直接禁用，绝不静默失效。
+ */
+function optionalApi(): DbStudioApi | undefined {
+  return (globalThis as unknown as { dbstudio?: DbStudioApi }).dbstudio
+}
 
 /** 与 CSS 里 `.tree-row { height }` 必须一致，否则滚动位置会错位。 */
 const ROW_HEIGHT = 26
@@ -71,6 +84,11 @@ export interface TreeCallbacks {
    * 属于会误导用户的信息。修法是把更新权交给这里。
    */
   onSummary(text: string): void
+  /**
+   * 节点级刷新时，要求外部重新载入连接列表（连接层刷新会改变摘要）。
+   * 可选：未接线时退化为只重载该子树。
+   */
+  onRootsChanged?(): void
 }
 
 export class MetadataTree {
@@ -81,9 +99,24 @@ export class MetadataTree {
   readonly #cb: TreeCallbacks
 
   #roots: NodeState[] = []
+  /**
+   * 展平后、**未经搜索过滤**的完整行数组。
+   *
+   * 为什么要保留这份：过滤是「在已展平的可见行里挑」，而 #rows 会变成过滤后的结果。
+   * 清空搜索时必须能原样恢复，所以不能就地覆盖——必须留一份全量。
+   */
+  #allRows: Row[] = []
   #rows: Row[] = []
   #selectedKey: string | null = null
   #lastRenderKey = ''
+
+  /** 当前搜索词（已 trim + 小写）。空串表示不过滤。 */
+  #filter = ''
+  #searchInput: HTMLInputElement | null = null
+  #searchCountEl: HTMLElement | null = null
+  #debounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** 右键菜单元素（单例，复用以避免重复挂 document 监听）。 */
+  #menuEl: HTMLElement | null = null
 
   constructor(
     viewport: HTMLElement,
@@ -103,6 +136,83 @@ export class MetadataTree {
     // 窗口尺寸变化时可视行数变了，必须重算。
     globalThis.addEventListener('resize', () => this.#scheduleRender())
     this.#viewport.addEventListener('keydown', (e) => this.#onKeyDown(e))
+    // 右键菜单：整棵树一个监听，按行定位。
+    this.#viewport.addEventListener('contextmenu', (e) => this.#onContextMenu(e))
+    this.#installSearchBox()
+  }
+
+  /**
+   * 创建搜索框。
+   *
+   * 为什么用 JS 创建而不写在 index.html：index.html 不在本工作流的写入范围内，
+   * 且搜索是树的内部职责——树自己管自己的 UI，外部只需要一个挂载点。
+   *
+   * 插在 #tree-viewport **之前**（即 #tree-pane 里的 toolbar 与 viewport 之间），
+   * 这样它不参与虚拟滚动的绝对定位层，不会被 transform 带走。
+   */
+  #installSearchBox(): void {
+    const host = this.#viewport.parentElement
+    if (!host) return
+
+    const wrap = document.createElement('div')
+    // 复用已有 token 做内联样式：不改 style.css（那是别人的独占文件）。
+    wrap.style.cssText =
+      'display:flex;align-items:center;gap:6px;padding:6px 10px;' +
+      'border-bottom:1px solid var(--border);'
+
+    const label = document.createElement('label')
+    // 无障碍：aria-label + for 双保险，读屏器能念出「搜索元数据节点」。
+    label.setAttribute('for', 'tree-search-input')
+    label.setAttribute('aria-label', '搜索元数据节点')
+    label.textContent = '🔍'
+    label.style.cssText = 'font-size:12px;color:var(--fg-dim);flex:0 0 auto;'
+
+    const input = document.createElement('input')
+    input.id = 'tree-search-input'
+    input.type = 'search'
+    input.setAttribute('aria-label', '搜索元数据节点')
+    input.setAttribute('autocomplete', 'off')
+    // 诚实标注范围：这一点是硬要求——只对**已加载**的节点生效。
+    // 让人以为搜了全库、实际只搜了一部分，比明说「搜不了」更糟。
+    input.placeholder = '仅搜索已展开的节点…（/ 聚焦，Esc 清空）'
+    input.title = '仅搜索已展开的节点：未展开的分支还没有加载，因此搜不到'
+    input.style.cssText =
+      'flex:1 1 auto;min-width:0;font:inherit;font-size:12px;padding:3px 6px;' +
+      'border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);'
+
+    const count = document.createElement('span')
+    count.setAttribute('role', 'status')
+    count.setAttribute('aria-live', 'polite')
+    count.textContent = ''
+    count.style.cssText =
+      'flex:0 0 auto;font-size:11px;color:var(--fg-dim);font-family:var(--mono);' +
+      'white-space:nowrap;'
+
+    // 去抖 150ms：121 张表时每敲一个字符重建行数组代价可观，且打字时中间态没意义。
+    input.addEventListener('input', () => {
+      if (this.#debounceTimer !== null) clearTimeout(this.#debounceTimer)
+      this.#debounceTimer = setTimeout(() => {
+        this.#debounceTimer = null
+        this.#applyFilter(input.value)
+      }, 150)
+    })
+    // Esc：清空并聚焦回树（用户想「退出搜索」时不该留在输入框里）。
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        input.value = ''
+        this.#applyFilter('')
+        this.#viewport.focus()
+      }
+    })
+
+    wrap.appendChild(label)
+    wrap.appendChild(input)
+    wrap.appendChild(count)
+    host.insertBefore(wrap, this.#viewport)
+
+    this.#searchInput = input
+    this.#searchCountEl = count
   }
 
   /** 重新加载根层（连接列表）。 */
@@ -214,9 +324,125 @@ export class MetadataTree {
       }
     }
     walk(this.#roots)
+    // 全量先存起来；过滤只派生 #rows，绝不就地覆盖 #allRows，
+    // 否则清空搜索时无法恢复「折叠/展开的原始视图」。
+    this.#allRows = rows
+    this.#recomputeFilteredRows()
+  }
+
+  /**
+   * 依据当前 #filter 从 #allRows 派生 #rows。
+   *
+   * ===== 过滤规则（含祖先链保留）=====
+   * 直接按 `#rows.filter(命中)` 是错的：子节点命中而父节点被滤掉会看不到层级，
+   * 甚至出现「孤儿行」缩进错乱。正确做法是自顶向下递归，
+   * **只要子树里有命中，当前节点就必须留下**，并在其下继续递归。
+   *
+   * ===== 为什么在「行」这一层做，而不是在 NodeState 上做 =====
+   * #allRows 已经体现了折叠状态（折叠节点的子节点本来就不在里面）。
+   * 在这里过滤，天然满足「只搜索已展开的节点」——这正是必须诚实标注的范围。
+   */
+  #recomputeFilteredRows(): void {
+    const q = this.#filter
+    let matched = 0
+    let rows: Row[]
+
+    if (!q) {
+      rows = this.#allRows
+    } else {
+      const keep: Row[] = []
+      // 递归用「depth 严格递增的连续区间」判断父子关系：#allRows 是 DFS 序。
+      //
+      // 为什么这个判据在真实数据上成立（重要前提，改 #rebuildRows 时必须同改）：
+      // message 行（加载中/出错/无对象）的 depth = 父 depth + 1，且**只在**
+      // 该父节点「已展开但没有真实子节点」时出现——此时该节点子树里只有这一行，
+      // 不会出现「message 行与真正的孙节点同级并列」的情况。
+      // 因此 message 行的 depth 不会与其它同层真实节点混淆，区间切分安全。
+      const visit = (from: number, endIdx: number): boolean => {
+        let i = from
+        let anyKept = false
+        while (i < endIdx) {
+          const row = this.#allRows[i]
+          if (!row) break
+          const depth = row.depth
+          // 找该行的子树区间 [i+1, j)
+          let j = i + 1
+          while (j < endIdx) {
+            const next = this.#allRows[j]
+            if (!next || next.depth <= depth) break
+            j++
+          }
+          const selfHit = row.kind === 'node' && row.node.ref.name.toLowerCase().includes(q)
+          // 先递归子树决定是否也要保留（无论自己是否命中）。
+          const childKept = visit(i + 1, j)
+          if (selfHit) {
+            matched++
+            keep.push(row)
+            // 命中的节点：把整棵子树原样保留，用户才能看清它的位置。
+            for (let k = i + 1; k < j; k++) {
+              const c = this.#allRows[k]
+              if (c) keep.push(c)
+            }
+          } else if (childKept) {
+            keep.push(row)
+          }
+          i = j
+          if (selfHit || childKept) anyKept = true
+        }
+        return anyKept
+      }
+      visit(0, this.#allRows.length)
+      rows = keep
+    }
+
     this.#rows = rows
     this.#lastRenderKey = ''
+    this.#updateSearchCount(matched)
     this.#scheduleRender()
+  }
+
+  /** 更新搜索框右侧的「匹配 N / M」提示；只在有搜索词时显示。 */
+  #updateSearchCount(matched: number): void {
+    const el = this.#searchCountEl
+    if (!el) return
+    if (!this.#filter) {
+      el.textContent = ''
+      return
+    }
+    // 分母用「已加载的可搜索节点数」（节点行，不含加载中/空提示行），
+    // 而不是全库表数——因为我们只搜得到已加载的部分，分母也必须诚实。
+    const loadedNodes = this.#allRows.filter((r) => r.kind === 'node').length
+    el.textContent = `匹配 ${matched} / ${loadedNodes}`
+    // 0 命中时给个更明确的提示，避免用户以为「树坏了」。
+    el.style.color = matched === 0 ? 'var(--danger)' : 'var(--fg-dim)'
+  }
+
+  /** 应用搜索词（由输入框去抖后调用，或 Esc 清空时调用）。 */
+  #applyFilter(raw: string): void {
+    const next = raw.trim().toLowerCase()
+    if (next === this.#filter) return
+    this.#filter = next
+    // 过滤会改变行数与选中项可见性：若当前选中行被滤掉，清掉选中态避免幽灵选中。
+    if (this.#selectedKey !== null) {
+      const stillVisible = this.#allRows.some(
+        (r) => r.kind === 'node' && r.key === this.#selectedKey && this.#matchesVisible(r)
+      )
+      if (!stillVisible) this.#selectedKey = null
+    }
+    this.#recomputeFilteredRows()
+    if (next) {
+      this.#cb.onStatus(`正在过滤已加载节点：「${next}」`)
+    } else {
+      // 清空过滤时必须把状态提示也恢复，否则会一直残留「正在过滤…」，
+      // 用户看着树已经全展开了、状态栏却还在说在过滤——典型的残留状态。
+      this.#cb.onStatus(`已清除过滤，共 ${this.#roots.length} 个连接`)
+    }
+  }
+
+  /** 选中行是否仍出现在过滤后的 #rows 里（按 key 比对，避免对象身份问题）。 */
+  #matchesVisible(row: Extract<Row, { kind: 'node' }>): boolean {
+    if (!this.#filter) return true
+    return this.#rows.some((r) => r.kind === 'node' && r.key === row.key)
   }
 
   #scheduleRender(): void {
@@ -226,6 +452,9 @@ export class MetadataTree {
 
   /** 只渲染可视区。这是整个文件的核心。 */
   render(): void {
+    // ⚠️ 关键：这里的 total 必须是**过滤后**的行数（即 #rows.length），
+    // 不能用 #allRows.length。撑高元素高度 = total × 行高，它决定滚动条比例；
+    // 若用全量行数，过滤后滚动条仍按全量算，会出现「能滚到空白区 / 滚不到底」。
     const total = this.#rows.length
     // 撑高元素决定滚动条能滚多远，必须等于完整高度。
     this.#spacer.style.height = `${total * ROW_HEIGHT}px`
@@ -233,6 +462,9 @@ export class MetadataTree {
     const viewportH = this.#viewport.clientHeight || 0
     const scrollTop = this.#viewport.scrollTop
     const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
+    // 行数变少（过滤后）时，可能当前 scrollTop 已超出新内容高度。
+    // 浏览器在 spacer 变矮后会自动 clamp scrollTop，但本帧读到的仍是旧值，
+    // 于是 end 会算到 total 之外——用 min(total, …) 兜住即可，不会越界渲染。
     const end = Math.min(total, Math.ceil((scrollTop + viewportH) / ROW_HEIGHT) + OVERSCAN)
 
     // 切片没变就不动 DOM —— 滚动时大部分帧其实只需要平移，不需要重建。
@@ -344,6 +576,14 @@ export class MetadataTree {
   }
 
   #onKeyDown(e: KeyboardEvent): void {
+    // `/` 聚焦搜索框这件事不该依赖「当前有没有可导航的行」——
+    // 空树时用户更需要搜索框来确认「是不是真的没东西」。
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && this.#searchInput) {
+      e.preventDefault()
+      this.#searchInput.focus()
+      this.#searchInput.select()
+      return
+    }
     const idxs = this.#nodeIndices()
     if (idxs.length === 0) return
     const cur = this.#currentIndex()
@@ -416,6 +656,235 @@ export class MetadataTree {
     const i = this.#currentIndex()
     const row = i >= 0 ? this.#rows[i] : undefined
     return row?.kind === 'node' ? row.node.ref : null
+  }
+
+  // ===========================================================================
+  // 节点级刷新
+  // ===========================================================================
+
+  /**
+   * 刷新单个节点：清缓存 → 重新拉子节点 → 保持展开状态。
+   *
+   * 为什么要「先置 null 再 load」：`children === null` 是本文件里
+   * 「未加载/需重新加载」的唯一标记（见 #loadChildren）。直接把 children 置空，
+   * expanded 保持原值不动，就能实现「刷新后仍展开」——因为 #loadChildren 结束
+   * 后会 #rebuildRows，展开标志为 true 的子节点会自然重新出现在行数组里。
+   */
+  async refreshNode(node: NodeState): Promise<void> {
+    if (!node.ref.hasChildren) {
+      this.#cb.onStatus(`「${node.ref.name}」没有可刷新的子节点`)
+      return
+    }
+    const wasExpanded = node.expanded
+    node.children = null
+    node.error = null
+    // 保持展开：即使原先折叠，刷新一个节点也默认把它展开给用户看结果。
+    node.expanded = true
+    await this.#loadChildren(node)
+    if (!wasExpanded && node.children === null) {
+      // 加载失败时回退展开态，避免留下一个「展开但空着」的假象。
+      node.expanded = false
+      this.#rebuildRows()
+    }
+    this.#cb.onStatus(`已刷新「${node.ref.name}」`)
+  }
+
+  // ===========================================================================
+  // 右键菜单
+  // ===========================================================================
+
+  #onContextMenu(e: MouseEvent): void {
+    const rowEl = (e.target as HTMLElement | null)?.closest('.tree-row')
+    if (!rowEl) return
+    const key = (rowEl as HTMLElement).dataset['key']
+    if (!key) return
+    // 只对节点行开菜单；message 行（加载中/空/错误）没有可操作对象。
+    const row = this.#rows.find((r) => r.kind === 'node' && r.key === key)
+    if (!row || row.kind !== 'node') return
+    e.preventDefault()
+    this.#openMenu(e.clientX, e.clientY, row.node)
+  }
+
+  /**
+   * 打开右键菜单。
+   *
+   * 用绝对定位 div 手写而非引入依赖：需求只有 3~4 个菜单项，
+   * 引一个菜单库（含主题/定位/焦点陷阱）不划算，且会把 bundle 撑大。
+   *
+   * 菜单是**单例**（#menuEl），每次打开先移除旧的。挂 document 级监听
+   * 在打开时注册、关闭时移除——避免常驻监听泄漏。
+   */
+  #openMenu(x: number, y: number, node: NodeState): void {
+    this.#closeMenu()
+    const isConn = node.ref.kind === 'connection'
+
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('aria-label', `${node.ref.name} 的操作`)
+    // 内联样式：不改 style.css（别人独占）。z-index 用高值压住树与详情面板。
+    menu.style.cssText =
+      'position:fixed;z-index:9999;min-width:160px;padding:4px 0;' +
+      'background:var(--bg);border:1px solid var(--border);border-radius:6px;' +
+      'box-shadow:0 6px 24px rgba(0,0,0,.18);font-size:12px;user-select:none;'
+
+    const items: Array<{ label: string; run: () => void; disabled?: boolean }> = [
+      { label: '刷新此节点', run: () => void this.refreshNode(node) },
+      { label: '复制名称', run: () => void this.#copyName(node.ref.name) }
+    ]
+    if (isConn) {
+      const connected = node.ref.meta?.['connected'] === true
+      const api = optionalApi()
+      items.push(
+        connected
+          ? {
+              label: '断开连接',
+              disabled: !api,
+              run: () => void this.#toggleConnection(node, false)
+            }
+          : {
+              label: '连接',
+              disabled: !api,
+              run: () => void this.#toggleConnection(node, true)
+            }
+      )
+    }
+
+    for (const item of items) {
+      const el = document.createElement('div')
+      el.setAttribute('role', 'menuitem')
+      el.setAttribute('tabindex', '-1')
+      el.textContent = item.label
+      if (item.disabled) el.setAttribute('aria-disabled', 'true')
+      el.style.cssText =
+        'padding:6px 12px;white-space:nowrap;' +
+        (item.disabled
+          ? 'color:var(--fg-dim);opacity:.55;cursor:default;'
+          : 'cursor:pointer;color:var(--fg);')
+      if (!item.disabled) {
+        el.addEventListener('mouseenter', () => {
+          el.style.background = 'var(--bg-alt)'
+        })
+        el.addEventListener('mouseleave', () => {
+          el.style.background = 'transparent'
+        })
+        el.addEventListener('click', (ev) => {
+          ev.stopPropagation()
+          this.#closeMenu()
+          item.run()
+        })
+      }
+      menu.appendChild(el)
+    }
+
+    menu.style.left = `${x}px`
+    menu.style.top = `${y}px`
+    document.body.appendChild(menu)
+    // 视口右侧/下方放不下时向内翻转，避免菜单被裁到屏幕外。
+    const rect = menu.getBoundingClientRect()
+    if (rect.right > window.innerWidth) {
+      menu.style.left = `${Math.max(0, window.innerWidth - rect.width - 4)}px`
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = `${Math.max(0, window.innerHeight - rect.height - 4)}px`
+    }
+
+    this.#menuEl = menu
+    // 关闭路径 1：点击别处（下一帧再挂，否则触发本次右键的 click 会立刻关掉）。
+    // 用 capture 保证在目标元素自己的 handler 之前判定。
+    setTimeout(() => {
+      document.addEventListener('mousedown', this.#onDocMouseDown, true)
+      document.addEventListener('keydown', this.#onDocKeyDown, true)
+      window.addEventListener('blur', this.#onWindowBlur)
+      window.addEventListener('resize', this.#onWindowBlur)
+    }, 0)
+    // 焦点移进菜单第一项，键盘用户可直接 Esc / Tab 退出。
+    const first = menu.querySelector<HTMLElement>('[role="menuitem"]')
+    first?.focus()
+  }
+
+  // 用箭头函数固化 this，便于 add/removeEventListener 拿到同一个引用。
+  #onDocMouseDown = (e: MouseEvent): void => {
+    if (this.#menuEl && !this.#menuEl.contains(e.target as Node)) this.#closeMenu()
+  }
+
+  /** 关闭路径 2：Esc。 */
+  #onDocKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      this.#closeMenu()
+    }
+  }
+
+  #onWindowBlur = (): void => {
+    this.#closeMenu()
+  }
+
+  #closeMenu(): void {
+    if (!this.#menuEl) return
+    this.#menuEl.remove()
+    this.#menuEl = null
+    document.removeEventListener('mousedown', this.#onDocMouseDown, true)
+    document.removeEventListener('keydown', this.#onDocKeyDown, true)
+    window.removeEventListener('blur', this.#onWindowBlur)
+    window.removeEventListener('resize', this.#onWindowBlur)
+  }
+
+  async #copyName(name: string): Promise<void> {
+    try {
+      // 优先用异步剪贴板 API（file:// 下 Electron 渲染进程可用）；
+      // 不可用时退回 execCommand，失败就只给状态栏提示，不静默。
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(name)
+        this.#cb.onStatus(`已复制「${name}」`)
+        return
+      }
+      const ta = document.createElement('textarea')
+      ta.value = name
+      ta.style.cssText = 'position:fixed;opacity:0;'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      ta.remove()
+      this.#cb.onStatus(ok ? `已复制「${name}」` : '复制失败：剪贴板不可用', !ok)
+    } catch (e) {
+      this.#cb.onStatus(`复制失败：${errText(e)}`, true)
+    }
+  }
+
+  async #toggleConnection(node: NodeState, connect: boolean): Promise<void> {
+    const api = optionalApi()
+    if (!api) {
+      this.#cb.onStatus('连接操作不可用：缺少 dbstudio API', true)
+      return
+    }
+    // 连接节点的 id 形如 `connection:c1`；API 要的是裸连接 id（主进程侧的键）。
+    const connId = node.ref.id.startsWith('connection:')
+      ? node.ref.id.slice('connection:'.length)
+      : node.ref.id
+    this.#cb.onStatus(connect ? '正在连接…' : '正在断开…')
+    try {
+      if (connect) await api.connectConnection(connId)
+      else await api.disconnectConnection(connId)
+      // 连接状态变了 → 该连接的子树必须作废重取（目录可能完全不同）。
+      node.children = null
+      node.expanded = true
+      await this.#loadChildren(node)
+      // 连接态影响左上角摘要「N 个连接 · M 个已连接」，交给外部重算。
+      this.#cb.onRootsChanged?.()
+      this.#cb.onStatus(connect ? '已连接' : '已断开')
+    } catch (e) {
+      this.#cb.onStatus(`${connect ? '连接' : '断开'}失败：${errText(e)}`, true)
+    }
+  }
+
+  /** 资源清理：移除常驻监听（菜单是临时的，关闭时自清）。 */
+  dispose(): void {
+    this.#closeMenu()
+    if (this.#debounceTimer !== null) {
+      clearTimeout(this.#debounceTimer)
+      this.#debounceTimer = null
+    }
   }
 }
 

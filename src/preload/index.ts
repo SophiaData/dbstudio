@@ -6,7 +6,7 @@
  * 直接暴露 `ipcRenderer` 等于把整个 IPC 面全开：页面里任何一段代码
  * （包括被注入的、或某个第三方脚本）都能调用任意通道。
  *
- * 这里显式枚举 **17 个**方法（第一阶段 7 + 第二阶段 4 + 第三阶段 4 + 第四阶段 2），
+ * 这里显式枚举 **21 个**方法（第一阶段 7 + 第二阶段 4 + 第三阶段 4 + 第四阶段 2 + 第五阶段 4），
  * 多一个都没有。这份清单与 `DbStudioApi` 是同一份类型：主进程实现它、
  * preload 转发它、渲染进程消费它、测试也验它，任何一边改了签名，`tsc` 会立刻报错。
  *
@@ -54,6 +54,20 @@
  *
  * 注意 `addConnection` 的语义也在这阶段变了（先落盘再连），但它本来就在白名单里，
  * 因此列表数量只增加 2。这两个方法都只接受一个字符串 id，无结构化克隆风险。
+ *
+ * ===== 第五阶段为什么扩到 21 个 =====
+ *
+ * 补的是「增删改里只有改」的三个功能缺口，外加「看不到截断值全文」。四个都不可拆：
+ *   insertRow       插不了新记录，用户就没法真正用这个客户端录入数据。
+ *   deleteRows      删不掉记录，是审计指出的最大缺口。
+ *   countRows       用户需要知道"到底有多少行"；但它**必须**是显式动作
+ *                   （大表 COUNT(*) 是全表扫描），所以单列一个通道而不是塞进
+ *                   listChildren 的返回里——放进去等于每次展开目录都全表扫描。
+ *   fetchCellValue  结果集为省 IPC 把超长文本截断到 1000 字符，没有它就永远
+ *                   看不到全文，用户只能看到"…"。
+ *
+ * 四个参数形状都是纯结构化数据（`CellValue` 对象 / 字符串 / 数字），可安全过
+ * contextBridge；同样**不接受函数、不接受回调**。
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
@@ -61,7 +75,7 @@ import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
-import type { QueryOptions, QueryResult, ResultPage } from '../core/resultset'
+import type { CellValue, QueryOptions, QueryResult, ResultPage } from '../core/resultset'
 import type {
   EditApplyResult,
   RowUpdate,
@@ -131,7 +145,35 @@ const api: DbStudioApi = {
     ipcRenderer.invoke(IPC.rollbackTransaction, nodeId) as Promise<TransactionState>,
 
   transactionState: (nodeId: string) =>
-    ipcRenderer.invoke(IPC.transactionState, nodeId) as Promise<TransactionState>
+    ipcRenderer.invoke(IPC.transactionState, nodeId) as Promise<TransactionState>,
+
+  // ---- 增删与完整取值（第五阶段） ----
+
+  /**
+   * 插入一行，返回新行主键（`keyValues`）让 UI 能定位它。**不自动提交**。
+   */
+  insertRow: (tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
+    ipcRenderer.invoke(IPC.insertRow, tableNodeId, values) as Promise<{
+      affected: number
+      keyValues: Record<string, CellValue>
+    }>,
+
+  /** 按主键批量删除。空数组会被拒绝（空 WHERE 会删整表）。**不自动提交**。 */
+  deleteRows: (
+    tableNodeId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ) => ipcRenderer.invoke(IPC.deleteRows, tableNodeId, keys) as Promise<EditApplyResult>,
+
+  /** 统计行数。**显式动作**，大表上是全表扫描，UI 不要在展开目录时自动调用。 */
+  countRows: (tableNodeId: string) =>
+    ipcRenderer.invoke(IPC.countRows, tableNodeId) as Promise<number>,
+
+  /**
+   * 取单格完整值。用 `runQuery` 返回的 cursorId（带连接前缀，原样回传），
+   * 解决"超长文本被截断到 1000 字符看不懂"的问题。
+   */
+  fetchCellValue: (cursorId: string, rowIndex: number, columnIndex: number) =>
+    ipcRenderer.invoke(IPC.fetchCellValue, cursorId, rowIndex, columnIndex) as Promise<CellValue>
 }
 
 contextBridge.exposeInMainWorld(API_GLOBAL, api)

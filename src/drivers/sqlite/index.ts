@@ -12,6 +12,14 @@ export { SQLITE_INFO } from './info'
 export { buildUpdateParams, buildUpdateSql, resolveColumns, toBindValue } from './edits'
 export type { ColumnMatch, SqliteBind } from './edits'
 export {
+  buildCountSql,
+  buildDeleteParams,
+  buildDeleteSql,
+  buildInsertParams,
+  buildInsertSql,
+  normalizeInsertValues
+} from './mutations'
+export {
   TABLES_FOLDER_ID,
   VIEWS_FOLDER_ID,
   columnObjectId,

@@ -21,6 +21,7 @@ import { quoteIdentifierWith } from '../core/driver'
 import { NodeId, type ConnectionSummary } from '../core/api'
 import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
 import type {
+  CellValue,
   EditApplyResult,
   QueryOptions,
   QueryResult,
@@ -779,6 +780,75 @@ export class ConnectionManager {
   async transactionState(nodeId: string): Promise<TransactionState> {
     const { conn } = this.#resolveConnection(nodeId)
     return conn.host.transactionState()
+  }
+
+  // ---- 增删与完整取值（第五阶段） ----
+
+  /**
+   * 插入一行（不自动提交）。
+   *
+   * `tableNodeId` 用 `#resolveConnection` 拆出连接与 adapterId；adapterId 原样
+   * 交给宿主——adapter 自己认识 `table:<name>`，主进程不解析驱动私有 id。
+   */
+  async insertRow(
+    tableNodeId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) {
+      throw new Error('连接节点不能插入行，请选择具体的表')
+    }
+    return conn.host.insertRow(adapterId, values)
+  }
+
+  /**
+   * 按主键批量删除行（不自动提交）。
+   *
+   * 主进程这一层也做一次**空数组拒绝**（宿主侧还会再挡一次）。两层都挡是
+   * 刻意的：这是会导致整表清空的路径，"省一道防线"换不来任何收益。
+   */
+  async deleteRows(
+    tableNodeId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) {
+      throw new Error('连接节点不能删除行，请选择具体的表')
+    }
+    if (!Array.isArray(keys) || keys.length === 0) {
+      throw new Error('没有要删除的行（keys 为空）——为避免误删整表，已拒绝')
+    }
+    return conn.host.deleteRows(adapterId, keys)
+  }
+
+  /**
+   * 统计表行数。
+   *
+   * **注意：这是显式动作，任何懒加载路径都不得调用它**（大表 COUNT(*) 是全表扫描）。
+   * 方法独立存在、不在 listChildren/describeTable 里被调用，就是这条约束的体现；
+   * e2e 里有一条断言专门验证"列目录不会触发它"。
+   */
+  async countRows(tableNodeId: string): Promise<number> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) {
+      throw new Error('连接节点没有行数，请选择具体的表')
+    }
+    return conn.host.countRows(adapterId)
+  }
+
+  /**
+   * 取单格完整值。
+   *
+   * `cursorId` 是 runQuery 返回的**带连接作用域**的 id，故先经 `#resolveCursor`
+   * 还原成"连接 + 原生游标 id"再转发——与 fetchResultPage 同一套规则。
+   */
+  async fetchCellValue(
+    cursorId: string,
+    rowIndex: number,
+    columnIndex: number
+  ): Promise<CellValue> {
+    const { conn, rawCursorId } = this.#resolveCursor(cursorId)
+    return conn.host.fetchCellValue(rawCursorId, rowIndex, columnIndex)
   }
 
   /** 登记一个游标到账本。 */

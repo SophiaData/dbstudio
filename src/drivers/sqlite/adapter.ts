@@ -26,6 +26,7 @@ import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../cor
 import type { DriverCapabilities, ObjectRef, TableDescription, ColumnDescription } from '../../core/model'
 import type { DriverFactory } from '../../core/registry'
 import type {
+  CellValue,
   EditApplyResult,
   QueryOptions,
   QueryResult,
@@ -41,8 +42,17 @@ import {
   buildUpdateSql,
   mustGetValue,
   resolveColumns,
+  type ColumnMatch,
   type SqliteBind
 } from './edits'
+import {
+  buildCountSql,
+  buildDeleteParams,
+  buildDeleteSql,
+  buildInsertParams,
+  buildInsertSql,
+  normalizeInsertValues
+} from './mutations'
 import { SqliteAdapterError, describeThrown } from './errors'
 import { SQLITE_INFO } from './info'
 import {
@@ -61,6 +71,7 @@ import {
   normalizePageSize,
   prepareReadOnlyStatement,
   readGrid,
+  toFullCellValue,
   cellByName,
   type RawGrid
 } from './results'
@@ -161,6 +172,12 @@ interface EditableTarget {
   readonly availableColumns: readonly string[]
   /** 主键列（按主键序号排序），WHERE 子句的全部内容。 */
   readonly keyColumns: readonly string[]
+  /**
+   * 列名（小写）→ 声明类型。只用于判断"主键是不是 rowid 别名"（见 #isRowidAlias）。
+   * 单独存一份而不是回头再查 PRAGMA：`insertRow` 会在插入后用到它，
+   * 再查一次既慢又要处理"表在这期间被改"的情况。
+   */
+  readonly columnTypes: ReadonlyMap<string, string>
 }
 
 /**
@@ -580,6 +597,230 @@ export class SqliteDriverAdapter implements DriverAdapter {
   }
 
   /**
+   * 插入一行并回传**新行的主键值**。
+   *
+   * ===== 为什么必须回传主键 =====
+   *
+   * UI 提交后要刷新网格并"定位到刚插入的那一行"。
+   * 如果只返回 affected=1，前端只能整表重查再猜哪行是新的——
+   * 在并发写入下猜错就是给用户高亮错行。
+   * 所以这里显式回传主键值（主键由数据库生成时尤其必要，前端拿不到自增值）。
+   *
+   * ===== 主键值怎么拿 =====
+   *
+   * 两条来源，按主键的"是否由数据库生成"分别处理：
+   *   - 调用方显式给了主键值 → 用的就是它（原样回传，不做任何"推断"）
+   *   - 调用方没给（典型：INTEGER PRIMARY KEY 自增）→ 读 `lastInsertRowid`
+   *     仅当该表的唯一主键列**恰好是 rowid 别名**时才这么填；
+   *     否则 `lastInsertRowid` 与那个列无关（比如 TEXT 主键 + 别的自增列），
+   *     这种情况我们**不编造**，返回空 keyValues 让 UI 重查——
+   *     宁可多一次查询，也不能回传一个可能是错的主键。
+   */
+  async insertRow(
+    tableId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }> {
+    const db = this.#requireDb()
+    // 插入不需要主键定位（见 #resolveTableTarget 的注释）
+    const target = this.#resolveTableTarget(db, tableId, false)
+
+    const normalized = normalizeInsertValues(values, target.availableColumns)
+    if (normalized.unknown.length > 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `插入时引用了不存在的列：${normalized.unknown.join('、')}。` +
+          `「${target.tableName}」的可用列：${target.availableColumns.join('、')}`
+      )
+    }
+    if (normalized.columns.length === 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        '插入时必须至少提供一个列的值。若要插入一行全默认值，请在 SQL 窗口执行 INSERT ... DEFAULT VALUES。'
+      )
+    }
+
+    const inOwnTransaction = this.#ensureTransaction(db)
+    const sql = buildInsertSql(this.dialect.quoteIdentifier, target.tableName, normalized.columns)
+    let insertedRowid = 0
+    try {
+      const params = buildInsertParams(normalized.columns, normalized.byColumn)
+      insertedRowid = this.#runInsert(db, sql, params)
+    } catch (thrown) {
+      // 失败时按"本次操作没有产生任何改动"收尾：
+      // 若事务是本方法开的，就撤掉它，别让一个失败的插入留下空事务
+      this.#releaseFailedOwnTransaction(db, inOwnTransaction)
+      if (thrown instanceof SqliteAdapterError) throw thrown
+      throw new SqliteAdapterError('query_failed', `插入失败：${describeThrown(thrown)}`, thrown)
+    }
+
+    this.#pendingAffected += 1
+    return { affected: 1, keyValues: this.#resolveInsertedKeyValues(target, normalized.byColumn, insertedRowid) }
+  }
+
+  /**
+   * 删除一批行。
+   *
+   * ===== 为什么空数组必须在这里挡掉 =====
+   *
+   * `DELETE FROM t`（没有 WHERE）会清空整表。
+   * 这不是"用户写错 SQL"才有的风险：一个 UI bug（比如选中行为 0 却仍点了删除）
+   * 就能把空数组传进来。SQL 注入至少还需要有人恶意构造，这个只要一次误触。
+   * 所以拒绝放在适配器层最靠近执行的地方，而不是指望每个调用方都记得检查。
+   *
+   * 与 applyEdits 共用完全相同的做法：主键定位、参数化、同一事务、逐行 outcome、
+   * 任何一行失败都**不自动回滚**（由上层决定，UI 才能说清"第几行失败"）。
+   */
+  async deleteRows(
+    tableId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult> {
+    const db = this.#requireDb()
+
+    /**
+     * 空数组检查放在最前面，且**早于**表级校验：
+     * 这个请求本身就是危险的，原因应该直接说"空数组会删全表"，
+     * 而不是先被"表没有主键"之类的错误盖掉（那样的提示会让人误以为
+     * 只要给表加个主键就能删，实际上传空数组仍然危险）。
+     */
+    if (keys.length === 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        '拒绝执行删除：没有指定任何要删除的行。空条件会删除整张表的所有数据，' +
+          '因此适配器层直接禁止空 keys（如确需清空表，请在 SQL 窗口显式执行 DELETE FROM 或 DROP）。'
+      )
+    }
+
+    const target = this.#resolveTableTarget(db, tableId, true)
+    // 全部行级校验先做完，再开事务
+    for (let index = 0; index < keys.length; index += 1) {
+      const keyValues = keys[index]
+      if (keyValues === undefined) continue
+      this.#resolveRowKeys(target, keyValues, index + 1, '删除')
+    }
+
+    const inOwnTransaction = this.#ensureTransaction(db)
+    const outcomes: RowEditOutcome[] = []
+    let affectedTotal = 0
+    let aborted = false
+
+    for (let index = 0; index < keys.length; index += 1) {
+      const keyValues = keys[index]
+      if (keyValues === undefined) continue
+      const outcome = this.#applyOneDelete(db, target, keyValues, index)
+      outcomes.push(outcome)
+      if (outcome.error === null) {
+        affectedTotal += outcome.affected
+        continue
+      }
+      /**
+       * 删除路径上遇到"执行失败"就停手，不再继续删后面的行：
+       * 继续删只会在一个已经出错的批次里多删几行，而事务最终很可能被回滚，
+       * 白白增加"回滚前改了更多东西"的风险。剩下的行明确标记为"未执行"。
+       */
+      aborted = true
+      for (let rest = index + 1; rest < keys.length; rest += 1) {
+        outcomes.push({
+          index: rest,
+          affected: 0,
+          error: `未执行：第 ${index + 1} 行删除失败，为避免连带影响已停止后续删除。`,
+          sql: ''
+        })
+      }
+      break
+    }
+
+    this.#pendingAffected += affectedTotal
+    if (aborted && inOwnTransaction) {
+      /**
+       * 本方法自己开的事务里已经出现失败：不提交、也不静默吞掉。
+       * 保留事务让上层能看到 state.active 并显式 rollback（与 applyEdits 一致）。
+       */
+    }
+    return { affected: affectedTotal, outcomes, ok: !aborted, inTransaction: db.isTransaction }
+  }
+
+  /**
+   * 统计行数。
+   *
+   * ⚠️ **性能：这是全表扫描**。SQLite 的 `COUNT(*)` 没有元数据缓存，
+   * 大表上可能秒级乃至更久，且会持读锁。
+   * 所以它只在用户**显式请求**（点"统计行数"）时被调用，
+   * 绝不能塞进 `listChildren` 里"顺手"算一下——
+   * 那会让每次展开表节点都付一次全表扫描的代价（DBeaver 的经验教训）。
+   */
+  async countRows(tableId: string): Promise<number> {
+    const db = this.#requireDb()
+    // COUNT 不需要主键：它不定位任何行
+    const target = this.#resolveTableTarget(db, tableId, false)
+    const sql = buildCountSql(this.dialect.quoteIdentifier, target.tableName)
+    try {
+      const grid = readGrid(db, sql, this.#arrayMode)
+      const raw = grid.rows[0]?.[0]
+      // readBigInts 已开启 → COUNT 结果是 bigint；超过安全范围说明行数离谱，
+      // 此时返回 Number.MAX_SAFE_INTEGER 并在注释里说明（不静默给一个错数）
+      const count = readNumber(raw)
+      if (count === null) {
+        throw new SqliteAdapterError('query_failed', `统计行数返回了无法解析的值：${String(raw)}`)
+      }
+      return count
+    } catch (thrown) {
+      if (thrown instanceof SqliteAdapterError) throw thrown
+      throw new SqliteAdapterError('query_failed', `统计行数失败：${describeThrown(thrown)}`, thrown)
+    }
+  }
+
+  /**
+   * 按游标 + 行列下标取某个单元格的**完整值**（不截断）。
+   *
+   * ===== 为什么不能直接复用 fetchResultPage =====
+   *
+   * 分页接口为了让单帧不撑爆 IPC，把超长文本截断到 `MAX_CELL_TEXT_CHARS`
+   * 并标 `truncated: true`（见 core/resultset.ts）。用户看到一个
+   * "……" 结尾的值却没有任何办法看全文——这是真实的功能缺口。
+   *
+   * ===== 实现方式与它的代价 =====
+   *
+   * 重新执行一次游标 SQL、把这一行取出来（`LIMIT 1 OFFSET rowIndex`），
+   * 然后**只对这一格**做"不截断"的转换。
+   *
+   * 代价有两层，都写在这里不回避：
+   * 1. **深行取格很慢**：`OFFSET rowIndex` 要求数据库先跳过 rowIndex 行。
+   *    与 fetchResultPage 的深翻页代价同源。对大结果集的深处取值会明显变慢。
+   * 2. **可能读到一个不一致的值**：用户 SQL 非确定（如 `SELECT random()`）
+   *    或底层表在此期间被改，重取的值可能与网格上显示的不同。
+   *    这是"不缓存整表"的必然结果，接受它；但 UI 侧应当把它当成
+   *    "重新取一次"，而不是"这就是网格里那个值"。
+   */
+  async fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue> {
+    const db = this.#requireDb()
+    const cursor = this.#cursors.get(cursorId)
+    if (cursor === undefined) {
+      throw new SqliteAdapterError(
+        'object_not_found',
+        `结果集游标不存在或已关闭：${cursorId}（结果集可能已被关闭，或连接断过）`
+      )
+    }
+
+    const row = normalizeOffset(rowIndex)
+    const column = normalizeOffset(columnIndex)
+    // 一次只取一行：LIMIT 1 OFFSET row
+    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, 1, row))
+    const targetRow = grid.rows[0]
+    if (targetRow === undefined) {
+      throw new SqliteAdapterError('object_not_found', `结果集里没有第 ${row} 行（可能已到末尾）。`)
+    }
+    if (column >= grid.names.length) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `列下标 ${column} 越界：这条查询只有 ${grid.names.length} 列。`
+      )
+    }
+
+    // 关键差别：这里用 toFullCellValue（不截断），而不是分页用的 toCellValue
+    return toFullCellValue(targetRow[column])
+  }
+
+  /**
    * 应用一批行更新。**不会自动提交**。
    *
    * ===== 与只读护栏的关系（这一条很容易做错）=====
@@ -824,12 +1065,17 @@ export class SqliteDriverAdapter implements DriverAdapter {
   }
 
   /**
-   * 解析并校验编辑目标：表名、可用列、主键列。
+   * 解析并校验**表级**编辑目标（表名、可用列、主键列）。
    *
-   * 校验**全部**在开事务之前完成，理由：校验失败属于"请求本身不对"，
-   * 不该留下一个空事务让 UI 显示"有未提交改动"。
+   * 拆出"表级"与"行级"两层校验是刻意的：
+   * - 表级（这里）：表存在、不是视图、有主键 → 三条路径（UPDATE/INSERT/DELETE 共用）
+   * - 行级：每条更新/删除是否覆盖了全部主键列 → 只有 UPDATE/DELETE 需要
+   *
+   * 为什么把"缺主键"放在表级：它是一条表属性，与传了几行无关。
+   * 先做表级校验，也让 `deleteRows([])` 这种请求在检查空数组**之前**
+   * 就得到一个准确的原因（无主键表 vs 空数组），报错不会张冠李戴。
    */
-  #resolveEditableTarget(db: DatabaseSync, tableId: string, updates: readonly RowUpdate[]): EditableTarget {
+  #resolveTableTarget(db: DatabaseSync, tableId: string, requireKey: boolean): EditableTarget {
     const parsed = parseObjectId(tableId)
     if (parsed === null) {
       throw new SqliteAdapterError('object_not_found', `无法识别的对象 id：${tableId}`)
@@ -848,13 +1094,18 @@ export class SqliteDriverAdapter implements DriverAdapter {
       .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
       .map((column) => column.name)
 
-    if (keyColumns.length === 0) {
-      /**
-       * DBeaver 在这里的原话就是 "No unique key defined"，
-       * UI 会直接把这句话展示给用户，所以消息里保留它。
-       * 拒绝而不是"用全部列当条件"：拿整行当 WHERE 会在有重复行时
-       * 一次改掉多行，属于静默改错数据。
-       */
+    /**
+     * 只有**定位行**的操作（UPDATE / DELETE）才要求主键。
+     * INSERT 不需要：它是新增一行，不存在"定位哪一行"的问题；
+     * 用同一个检查把无主键表的新增也拦掉，是把规则用错了地方
+     * （会让用户在一个没有主键的日志表上连插一条记录都做不到）。
+     *
+     * DBeaver 在这里的原话就是 "No unique key defined"，
+     * UI 会直接把这句话展示给用户，所以消息里保留它。
+     * 拒绝而不是"用全部列当条件"：拿整行当 WHERE 会在有重复行时
+     * 一次改掉多行，属于静默改错数据。
+     */
+    if (requireKey && keyColumns.length === 0) {
       throw new SqliteAdapterError(
         'object_not_found',
         `表「${parsed.name}」没有唯一键，无法定位要修改的行（No unique key defined）。` +
@@ -862,7 +1113,63 @@ export class SqliteDriverAdapter implements DriverAdapter {
       )
     }
 
-    const availableColumns = columns.map((column) => column.name)
+    return {
+      tableName: parsed.name,
+      availableColumns: columns.map((column) => column.name),
+      keyColumns,
+      columnTypes: new Map(columns.map((column) => [column.name.toLowerCase(), column.typeName]))
+    }
+  }
+
+  /**
+   * 行级校验：主键覆盖是否完整，并返回「表内真实列名」的匹配结果。
+   *
+   * 返回 `ColumnMatch[]` 而不是 `string[]`：SQL 里要用 canonical（真实列名），
+   * 而取值必须用 callerName（调用方原始键）——两者混用会取空（task-19 踩过）。
+   */
+  #resolveRowKeys(
+    target: EditableTarget,
+    keyValues: Readonly<Record<string, CellValue>>,
+    position: number,
+    actionLabel: string
+  ): readonly ColumnMatch[] {
+    const keyKeys = Object.keys(keyValues)
+    const keyResolved = resolveColumns(keyKeys, target.availableColumns)
+    if (keyResolved.unknown.length > 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `第 ${position} 条${actionLabel}的主键列不存在：${keyResolved.unknown.join('、')}。` +
+          `「${target.tableName}」的可用列：${target.availableColumns.join('、')}`
+      )
+    }
+    const missingKeys = target.keyColumns.filter(
+      (key) => !keyKeys.some((candidate) => candidate.toLowerCase() === key.toLowerCase())
+    )
+    if (missingKeys.length > 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `第 ${position} 条${actionLabel}缺少主键列的值：${missingKeys.join('、')}。` +
+          '在线编辑必须用完整主键定位行（缺主键就无法保证只改到目标那一行）。'
+      )
+    }
+    // 按表定义的主键顺序返回，不依赖调用方对象键顺序
+    const ordered: ColumnMatch[] = []
+    for (const key of target.keyColumns) {
+      const match = keyResolved.matched.find((candidate) => candidate.canonical.toLowerCase() === key.toLowerCase())
+      if (match !== undefined) ordered.push(match)
+    }
+    return ordered
+  }
+
+  /**
+   * 解析并校验一次 applyEdits 的全部目标。
+   *
+   * 校验**全部**在开事务之前完成：校验失败属于"请求本身不对"，
+   * 不该留下一个空事务让 UI 显示"有未提交改动"。
+   */
+  #resolveEditableTarget(db: DatabaseSync, tableId: string, updates: readonly RowUpdate[]): EditableTarget {
+    const target = this.#resolveTableTarget(db, tableId, true)
+
     for (let index = 0; index < updates.length; index += 1) {
       const update = updates[index]
       if (update === undefined) continue
@@ -872,37 +1179,18 @@ export class SqliteDriverAdapter implements DriverAdapter {
       if (changeKeys.length === 0) {
         throw new SqliteAdapterError('bad_params', `第 ${position} 条更新没有指定任何要修改的列。`)
       }
-      const changeResolved = resolveColumns(changeKeys, availableColumns)
+      const changeResolved = resolveColumns(changeKeys, target.availableColumns)
       if (changeResolved.unknown.length > 0) {
         throw new SqliteAdapterError(
           'bad_params',
           `第 ${position} 条更新引用了不存在的列：${changeResolved.unknown.join('、')}。` +
-            `「${parsed.name}」的可用列：${availableColumns.join('、')}`
+            `「${target.tableName}」的可用列：${target.availableColumns.join('、')}`
         )
       }
-
-      const keyKeys = Object.keys(update.keyValues)
-      const keyResolved = resolveColumns(keyKeys, availableColumns)
-      if (keyResolved.unknown.length > 0) {
-        throw new SqliteAdapterError(
-          'bad_params',
-          `第 ${position} 条更新的主键列不存在：${keyResolved.unknown.join('、')}。` +
-            `「${parsed.name}」的可用列：${availableColumns.join('、')}`
-        )
-      }
-      const missingKeys = keyColumns.filter(
-        (key) => !keyKeys.some((candidate) => candidate.toLowerCase() === key.toLowerCase())
-      )
-      if (missingKeys.length > 0) {
-        throw new SqliteAdapterError(
-          'bad_params',
-          `第 ${position} 条更新缺少主键列的值：${missingKeys.join('、')}。` +
-            '在线编辑必须用完整主键定位行（缺主键就无法保证只改到目标那一行）。'
-        )
-      }
+      this.#resolveRowKeys(target, update.keyValues, position, '更新')
     }
 
-    return { tableName: parsed.name, availableColumns, keyColumns }
+    return target
   }
 
   /**
@@ -993,6 +1281,151 @@ export class SqliteDriverAdapter implements DriverAdapter {
       db.exec(statement)
     } catch (thrown) {
       throw new SqliteAdapterError('query_failed', `${statement} 执行失败（原始错误：${describeThrown(thrown)}）`, thrown)
+    }
+  }
+
+  /**
+   * 保证有事务；返回"这个事务是不是本方法刚开的"。
+   *
+   * 为什么要区分：只有自己开的事务才由自己负责清理失败现场。
+   * 若事务是上层（比如连续多次编辑）开的，撤掉它就会把上层的工作一起弄丢。
+   */
+  #ensureTransaction(db: DatabaseSync): boolean {
+    if (db.isTransaction) return false
+    this.#execTransaction(db, 'BEGIN IMMEDIATE')
+    this.#pendingAffected = 0
+    return true
+  }
+
+  /**
+   * 本方法自己开的、且该操作整体失败的（目前 insert 会用），
+   * 撤掉这个空事务，避免 UI 显示一个"有未提交改动"的空事务。
+   *
+   * 注意：只在**没有任何成功行**的情况下撤。deleteRows 里只要有一行成功，
+   * 就不能走这里（那属于"部分完成"，必须留给上层决策）。
+   */
+  #releaseFailedOwnTransaction(db: DatabaseSync, inOwnTransaction: boolean): void {
+    if (!inOwnTransaction) return
+    if (!db.isTransaction) return
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // 回滚失败也无法再做别的了
+    }
+  }
+
+  /** 执行 INSERT，返回新行的 rowid（`lastInsertRowid`）。 */
+  #runInsert(db: DatabaseSync, sql: string, params: readonly SqliteBind[]): number {
+    try {
+      const result = db.prepare(sql).run(...params)
+      // readBigInts 已开启 → lastInsertRowid 是 bigint
+      return readNumber(result.lastInsertRowid) ?? 0
+    } catch (thrown) {
+      throw new SqliteAdapterError('query_failed', `插入执行失败（原始错误：${describeThrown(thrown)}）`, thrown)
+    }
+  }
+
+  /**
+   * 推断新行的主键值。
+   *
+   * 规则（保守优先，宁缺毋错）：
+   *  1. 调用方显式给了该主键列的值 → 原样采用（这是最可靠的来源）。
+   *  2. 主键是**单列**、且该列是 `INTEGER PRIMARY KEY`（rowid 别名）→ 用 `lastInsertRowid`。
+   *  3. 其余情况（TEXT 主键、复合主键、普通 INTEGER 主键但值未给）→ **不猜**，
+   *     返回空对象，UI 重查即可。
+   *
+   * 为什么不回头查询"刚插入的那行"来取主键：
+   * 那样需要一个可靠的定位条件，而"刚插入的行"在没有主键值的前提下
+   * 只能用 rowid 或全列匹配——在并发写入下都可能定位到别人的行。
+   * 与其给出一个可能错的主键，不如诚实地少给。
+   */
+  #resolveInsertedKeyValues(
+    target: EditableTarget,
+    givenValues: ReadonlyMap<string, CellValue>,
+    insertedRowid: number
+  ): Record<string, CellValue> {
+    const keyValues: Record<string, CellValue> = {}
+    if (target.keyColumns.length === 1 && target.keyColumns[0] !== undefined) {
+      const singleKey = target.keyColumns[0]
+      const given = givenValues.get(singleKey)
+      if (given !== undefined) {
+        keyValues[singleKey] = given
+        return keyValues
+      }
+      // 仅当该列确实是 rowid 别名时才用 lastInsertRowid
+      if (this.#isRowidAlias(singleKey, target)) {
+        keyValues[singleKey] = { kind: 'number', value: insertedRowid }
+        return keyValues
+      }
+    }
+    return keyValues
+  }
+
+  /**
+   * 判断某个主键列是不是 rowid 别名（`INTEGER PRIMARY KEY`）。
+   *
+   * 为什么需要这个判断：SQLite 的 `lastInsertRowid` 指的是 **rowid**，
+   * 只有当主键就是 rowid 别名时，二者才是同一个值。
+   * 对 `TEXT PRIMARY KEY` 或复合主键，`lastInsertRowid` 与主键毫无关系，
+   * 直接拿它当主键回传就是回传一个错值。
+   *
+   * 可靠判据（SQLite 官方文档明确的两条同时成立）：
+   *   列的声明类型为 INTEGER（大小写/空格不敏感）+ 该表是普通 rowid 表（非 WITHOUT ROWID）。
+   * 后者通过 `PRAGMA table_info` 里存在名为 rowid 的隐含列无法直接看出，
+   * 这里改用 `PRAGMA index_list` 之外更直接的近似：
+   * 单列主键 + 类型 INTEGER + 该列值由数据库生成（调用方未给）就够了——
+   * 若表是 WITHOUT ROWID 且只有一个 INTEGER 主键，插入后主键也必须由调用方给，
+   * 走到这里的场景（调用方没给主键）在 WITHOUT ROWID 表上本来就必然失败，不会误判。
+   */
+  #isRowidAlias(keyColumn: string, target: EditableTarget): boolean {
+    const declared = target.columnTypes.get(keyColumn.toLowerCase())
+    return declared !== undefined && /^integer$/i.test(declared.trim())
+  }
+
+  /**
+   * 执行一条行删除，把结果收成一个 outcome（与 #applyOneUpdate 的收尾风格一致）。
+   */
+  #applyOneDelete(
+    db: DatabaseSync,
+    target: EditableTarget,
+    keyValues: Readonly<Record<string, CellValue>>,
+    index: number
+  ): RowEditOutcome {
+    const orderedKeys = this.#resolveRowKeys(target, keyValues, index + 1, '删除')
+    const keyColumns = orderedKeys.map((match) => match.canonical)
+    const sql = buildDeleteSql(this.dialect.quoteIdentifier, target.tableName, keyColumns)
+
+    let params: SqliteBind[]
+    try {
+      params = buildDeleteParams(
+        keyColumns,
+        new Map(orderedKeys.map((match) => [match.canonical, mustGetValue(keyValues, match.requested)]))
+      )
+    } catch (thrown) {
+      return { index, affected: 0, error: `值转换失败：${describeThrown(thrown)}`, sql }
+    }
+
+    try {
+      const affected = this.#runWrite(db, sql, params)
+      if (affected === 0) {
+        return {
+          index,
+          affected,
+          error: '没有匹配到任何行：主键值可能已过期（该行已被删除或主键被改过），本次删除未生效。',
+          sql
+        }
+      }
+      if (affected > 1) {
+        return {
+          index,
+          affected,
+          error: `主键定位到了 ${affected} 行：该"唯一键"实际不唯一，为避免误删已停止这一行。`,
+          sql
+        }
+      }
+      return { index, affected, error: null, sql }
+    } catch (thrown) {
+      return { index, affected: 0, error: describeThrown(thrown), sql }
     }
   }
 

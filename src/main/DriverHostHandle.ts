@@ -31,6 +31,7 @@ import { isRpcResponse } from '../core/driver'
 import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
 import type { QueryOptions, QueryResult, ResultPage } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
+import type { CellValue } from '../core/resultset'
 
 /** 单条 RPC 的默认超时。宿主无响应时宁可报错，也不要让 UI 无限等待。 */
 const RPC_TIMEOUT_MS = 15_000
@@ -360,6 +361,46 @@ export class DriverHostHandle {
     )
   }
 
+  // ---- 增删与完整取值（第五阶段）：全部沿用 60s（写入/全表扫描都可能慢） ----
+
+  /** 插入一行（不自动提交）。 */
+  insertRow(
+    tableId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }> {
+    return this.#requestWithTimeout(
+      'insertRow',
+      { tableId, values },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
+  /** 按主键批量删除（不自动提交）。空数组在宿主侧被拒。 */
+  deleteRows(
+    tableId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult> {
+    return this.#requestWithTimeout<EditApplyResult>(
+      'deleteRows',
+      { tableId, keys },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
+  /** 统计行数。用 60s 是因为大表 COUNT(*) 可能真的跑很久。 */
+  countRows(tableId: string): Promise<number> {
+    return this.#requestWithTimeout<number>('countRows', { tableId }, RESULT_SET_TIMEOUT_MS)
+  }
+
+  /** 取单格完整值。 */
+  fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue> {
+    return this.#requestWithTimeout<CellValue>(
+      'fetchCellValue',
+      { cursorId, rowIndex, columnIndex },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
   /** 优雅关闭：先 disconnect，再关 stdin 让宿主自行退出；超时则强杀。 */
   async close(): Promise<void> {
     if (this.#closed) return
@@ -417,6 +458,10 @@ export type RemoteAdapterShape = Pick<
   | 'commitTransaction'
   | 'rollbackTransaction'
   | 'transactionState'
+  | 'insertRow'
+  | 'deleteRows'
+  | 'countRows'
+  | 'fetchCellValue'
 >
 
 export type { DialectInfo }

@@ -15,7 +15,7 @@ import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
-import type { QueryOptions, RowUpdate } from '../core/resultset'
+import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
@@ -362,7 +362,17 @@ function registerIpc(): void {
       getManager().applyEdits(tableNodeId, updates),
     commitTransaction: async (nodeId: string) => getManager().commitTransaction(nodeId),
     rollbackTransaction: async (nodeId: string) => getManager().rollbackTransaction(nodeId),
-    transactionState: async (nodeId: string) => getManager().transactionState(nodeId)
+    transactionState: async (nodeId: string) => getManager().transactionState(nodeId),
+    // 增删与完整取值（第五阶段）。共享 60s：写入可能慢，countRows 在大表上是全表扫描。
+    insertRow: async (tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
+      getManager().insertRow(tableNodeId, values),
+    deleteRows: async (
+      tableNodeId: string,
+      keys: readonly Readonly<Record<string, CellValue>>[]
+    ) => getManager().deleteRows(tableNodeId, keys),
+    countRows: async (tableNodeId: string) => getManager().countRows(tableNodeId),
+    fetchCellValue: async (cursorId: string, rowIndex: number, columnIndex: number) =>
+      getManager().fetchCellValue(cursorId, rowIndex, columnIndex)
   }
 
   // 逐个通道注册，而不是用一个万能通道 + 方法名字符串。
@@ -412,6 +422,24 @@ function registerIpc(): void {
   ipcMain.handle(IPC.commitTransaction, (_e, nodeId: string) => api.commitTransaction(nodeId))
   ipcMain.handle(IPC.rollbackTransaction, (_e, nodeId: string) => api.rollbackTransaction(nodeId))
   ipcMain.handle(IPC.transactionState, (_e, nodeId: string) => api.transactionState(nodeId))
+
+  // ---- 增删与完整取值通道（第五阶段新增） ----
+  ipcMain.handle(
+    IPC.insertRow,
+    (_e, tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
+      api.insertRow(tableNodeId, values)
+  )
+  ipcMain.handle(
+    IPC.deleteRows,
+    (_e, tableNodeId: string, keys: readonly Readonly<Record<string, CellValue>>[]) =>
+      api.deleteRows(tableNodeId, keys)
+  )
+  ipcMain.handle(IPC.countRows, (_e, tableNodeId: string) => api.countRows(tableNodeId))
+  ipcMain.handle(
+    IPC.fetchCellValue,
+    (_e, cursorId: string, rowIndex: number, columnIndex: number) =>
+      api.fetchCellValue(cursorId, rowIndex, columnIndex)
+  )
 }
 
 app.whenReady().then(() => {

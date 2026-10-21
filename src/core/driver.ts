@@ -21,6 +21,7 @@ import type { ConnectionConfig, SqlDialect } from './dialect'
 import type { DriverCapabilities, ObjectRef, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type {
+  CellValue,
   EditApplyResult,
   RowUpdate,
   TransactionState
@@ -135,6 +136,61 @@ export interface DriverAdapter {
 
   /** 查询当前事务状态。UI 用它决定按钮可用性。 */
   transactionState(): Promise<TransactionState>
+
+  // ---- 增删与完整取值（第五阶段） ----
+  //
+  // 补的是「只有 UPDATE 不够用」的三个缺口：删不掉记录、插不了新记录、
+  // 看不到被截断值全文。四个方法都遵循与 applyEdits 相同的写入纪律：
+  // 参数化语句、标识符走 quoteIdentifier、无唯一键时拒绝、不自动提交。
+
+  /**
+   * 插入一行。**不自动提交**（与 applyEdits 一致，需要显式 commit）。
+   *
+   * 返回 `keyValues` 是为了让 UI 能立刻定位刚插入的这行——否则用户插完
+   * 一行，网格里没有它的稳定标识，后续想改/删都无从下手。
+   * 若该表没有可用主键（或数据库未回填），实现可返回空对象；调用方必须能从
+   * `affected` 判断"插成功了"，而不能靠 keyValues 是否为空。
+   */
+  insertRow(
+    tableId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }>
+
+  /**
+   * 按主键批量删除行。**不自动提交**。
+   *
+   * `keys` 是「一组 WHERE 条件的集合」，每个元素定位一行（与 RowUpdate.keyValues
+   * 同构）。空数组**必须被拒绝**——空 WHERE 的 DELETE 会删掉整张表，
+   * 这是本接口最危险的误用面，协议层与 adapter 都要挡。
+   */
+  deleteRows(
+    tableId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult>
+
+  /**
+   * 表的总行数。
+   *
+   * ===== 为什么这是一个"显式动作"，绝不参与懒加载 =====
+   *
+   * `COUNT(*)` 在大表上是全表扫描。它必须是用户主动触发（比如点了"统计行数"），
+   * **绝不能**被 listChildren / describeTable 顺手调用——那会让"展开一个表目录"
+   * 变成"对每个表各做一次全表扫描"，在百万行库上是灾难。
+   * 测试里有一条专钉「列目录不会触发 countRows」，防止后人顺手加。
+   */
+  countRows(tableId: string): Promise<number>
+
+  /**
+   * 按游标 + 行列下标取某个单元格的**完整值**。
+   *
+   * ===== 为什么需要单独一个接口 =====
+   *
+   * 结果集为了让单帧不撑爆 IPC，把超长文本截断到 `MAX_CELL_TEXT_CHARS`
+   * （1000 字符）并标 `truncated: true`（见 resultset.ts 的设计说明）。
+   * 用户看到一个截断的值却没有任何办法看全文——这是真实的功能缺口。
+   * 这个接口按需重取单格，返回值**不应被截断**（完整内容）。
+   */
+  fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue>
 }
 
 /** 方言的展示信息，UI 用它渲染「新建连接」的下拉框。 */
@@ -235,7 +291,11 @@ export const RPC_METHODS = [
   'applyEdits',
   'commitTransaction',
   'rollbackTransaction',
-  'transactionState'
+  'transactionState',
+  'insertRow',
+  'deleteRows',
+  'countRows',
+  'fetchCellValue'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

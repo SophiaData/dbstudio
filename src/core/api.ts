@@ -20,6 +20,7 @@ import type { TestConnectionResult, DialectInfo } from './driver'
 import type { DriverCapabilities, ObjectRef, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
+import type { CellValue } from './resultset'
 
 /** 连接在 UI 里的展示态。会话态（是否已连上）单独放，避免和配置混在一起。 */
 export interface ConnectionSummary {
@@ -140,6 +141,42 @@ export interface DbStudioApi {
 
   /** 查询当前事务状态，用于 UI 决定按钮可用性与「有未提交改动」提示。 */
   transactionState(nodeId: string): Promise<TransactionState>
+
+  // ---- 增删与完整取值（第五阶段） ----
+
+  /**
+   * 插入一行（**不自动提交**，需显式 commit）。
+   *
+   * `tableNodeId` 是表节点 id；`values` 是「列名 → 值」。
+   * 返回 `keyValues`（新行的主键值），让 UI 能立刻定位这一行。
+   */
+  insertRow(
+    tableNodeId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }>
+
+  /**
+   * 按主键批量删除行（**不自动提交**）。
+   *
+   * `keys` 每个元素定位一行。空数组会被拒绝——空 WHERE 的 DELETE 会清空整表。
+   */
+  deleteRows(
+    tableNodeId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult>
+
+  /**
+   * 统计表的总行数。
+   *
+   * 这是**显式动作**：大表上是全表扫描，绝不能由列目录等懒加载路径顺带触发。
+   */
+  countRows(tableNodeId: string): Promise<number>
+
+  /**
+   * 取某单元格的**完整值**（结果集平时会把超长文本截断到
+   * `MAX_CELL_TEXT_CHARS`，这个接口按需取全文）。
+   */
+  fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue>
 }
 
 /** preload 注入到 window 上的全局名。 */
@@ -163,7 +200,11 @@ export const IPC = {
   applyEdits: 'dbstudio:applyEdits',
   commitTransaction: 'dbstudio:commitTransaction',
   rollbackTransaction: 'dbstudio:rollbackTransaction',
-  transactionState: 'dbstudio:transactionState'
+  transactionState: 'dbstudio:transactionState',
+  insertRow: 'dbstudio:insertRow',
+  deleteRows: 'dbstudio:deleteRows',
+  countRows: 'dbstudio:countRows',
+  fetchCellValue: 'dbstudio:fetchCellValue'
 } as const
 
 /**
