@@ -56,6 +56,17 @@ jobs:
           pnpm run test:electron
 
       - name: GUI 自检（xvfb 提供虚拟显示）
+        # --no-sandbox 的来历（Linux CI 常见坑）：
+        # Electron 的 chrome-sandbox 需要 root 所有且权限为 4755 才能启用 SUID 沙箱。
+        # GitHub Actions 的 runner 上安装出来的 chrome-sandbox 不满足这两个条件，
+        # Electron 直接 FATAL 退出："The SUID sandbox helper binary was found,
+        # but is not configured correctly. Rather than run without sandboxing I'm aborting now."
+        #
+        # 这里关掉沙箱是**测试环境的合理妥协**：我们只在 CI 里跑一次自检，
+        # 加载的是自己刚构建的本地页面，不访问外部不受信内容。
+        # 生产运行不经过这个脚本，不受影响。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui

@@ -77,6 +77,11 @@ if (guiMode) {
   // GUI 自检：由主进程里 DBSTUDIO_SMOKE=1 触发的自检钩子完成断言。
   childArgs = ['.']
   childEnv = { ...env, DBSTUDIO_SMOKE: '1' }
+  // Linux CI 上 chrome-sandbox 的 SUID 权限不满足要求，Electron 会 FATAL 退出。
+  // 用环境变量开关无沙箱模式，只在 CI 自检时启用（见 workflow 注释）。
+  if (env.ELECTRON_DISABLE_SANDBOX === '1' && process.platform === 'linux') {
+    childArgs.push('--no-sandbox')
+  }
 } else {
   // Node 模式：让 Electron 以 Node 身份跑给定脚本。
   childArgs = [args[0]]
