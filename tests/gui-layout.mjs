@@ -137,7 +137,6 @@ async function openOrders() {
 // ---------------------------------------------------------------------------
 console.log('\n[1] 打开表 → 默认布局')
 await openOrders()
-await debugDom('打开后')
 const hasGrid = await win.evaluate(() => document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-col-header').length > 0)
 check('表已打开', hasGrid)
 if (!hasGrid) {

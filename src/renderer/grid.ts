@@ -27,8 +27,8 @@ import type { DbStudioApi } from '../core/api'
 import {
   clearLayoutPrefs,
   loadLayoutPrefs,
+  parseTableNodeId,
   saveLayoutPrefs,
-  tableNameFromNodeId,
   type GridLayoutPrefs,
   type StorageLike
 } from './layout-persist'
@@ -289,7 +289,12 @@ export class ResultGrid {
 
   /** 当前是否具备持久化条件：有作用域、当前来源是表、且有存储可用。 */
   #canPersistLayout(): boolean {
-    return this.#layoutScope !== null && this.#layoutTableName !== null && this.#storage() !== null
+    return (
+      this.#layoutScope !== null &&
+      this.#layoutScope.dialect !== '' &&
+      this.#layoutTableName !== null &&
+      this.#storage() !== null
+    )
   }
 
   /**
@@ -303,7 +308,7 @@ export class ResultGrid {
     const storage = this.#storage()
     const scope = this.#layoutScope
     const tableName = this.#layoutTableName
-    if (storage === null || scope === null || tableName === null) return
+    if (storage === null || scope === null || tableName === null || scope.dialect === '') return
 
     const prefs = loadLayoutPrefs(
       storage,
@@ -392,7 +397,21 @@ export class ResultGrid {
      * 只对**表**做持久化：自由 SQL 的列不固定（同一句 SQL 换个数就是另一组列），
      * 存下来的偏好下次几乎必然失效，没有意义（见 `runSql` 里清空该字段）。
      */
-    this.#layoutTableName = tableNameFromNodeId(ref.id)
+    /**
+     * 直接从节点 id 推导「连接 + 表名」，不依赖外部先调 `setLayoutScope`。
+     *
+     * 为什么这样更可靠：节点的 id 本身就带着连接归属
+     * （`connection:<cid>|table:<name>`，见 core/api.ts 的 NodeId），
+     * 让外部每打开一个表都记得先注入 scope，迟早漏一处；
+     * 而从 id 自己推是**无状态**的，不会漏。
+     * `setLayoutScope` 仍然保留：外部若要覆盖（比如测试固定值）可以调它。
+     */
+    const parsedNode = parseTableNodeId(ref.id)
+    if (parsedNode !== null && this.#layoutScope === null) {
+      // 方言先留空占位：真正的方言在 #resolveLayoutDialect 里异步查（见下）
+      this.#layoutScope = { dialect: '', connectionId: parsedNode.connectionId }
+    }
+    this.#layoutTableName = parsedNode?.tableName ?? null
     await this.#openCursor(() => api.previewTable(ref.id))
     // 必须在 openCursor 之后：那时 #columns 才就绪，才能校验列名是否还存在
     this.#applyPersistedLayout()
@@ -573,16 +592,36 @@ export class ResultGrid {
    */
   async #refreshCancelCapability(): Promise<void> {
     const api = this.#api
-    const nodeId = this.#layoutScope?.connectionId
-    if (!api || nodeId === undefined) {
+    const connectionId = this.#layoutScope?.connectionId
+    if (!api || connectionId === undefined || connectionId === '') {
       this.#syncCancelButton()
       return
     }
     try {
       const connections = await api.listConnections()
-      const conn = connections.find((c) => c.id === nodeId)
+      const conn = connections.find((c) => c.id === connectionId)
       const supported = conn?.capabilities?.supportsCancel
       this.#cancelSupported = typeof supported === 'boolean' ? supported : null
+      /**
+       * 顺带把方言补进布局作用域。
+       *
+       * 为什么在这里做：打开表时需要会话的 `dialectId` 才能拼出正确的
+       * localStorage key，而渲染进程只有在 `listConnections()` 的结果里
+       * 才拿得到它（`ConnectionSummary.dialectId`）。两次独立的异步查询
+       * 会把同一件事拆成两条调用链，就在这里一次问完。
+       *
+       * 拿不到方言时保持空串：`#canPersistLayout` 会因此拒绝持久化，
+       * 功能降级而不是存到错的 key 上。
+       */
+      if (this.#layoutScope !== null && typeof conn?.dialectId === 'string') {
+        this.#layoutScope = { ...this.#layoutScope, dialect: conn.dialectId }
+        // 方言到位后，若之前因为缺方言而没恢复布局，这里补一次
+        if (this.#layoutTableName !== null && this.#colWidths.size === 0) {
+          this.#applyPersistedLayout()
+          this.#renderHeader()
+          this.#render()
+        }
+      }
     } catch {
       this.#cancelSupported = null
     }

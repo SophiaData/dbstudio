@@ -14,6 +14,8 @@
  * 所以本文件只依赖一个最小接口 `StorageLike`，`localStorage` 只是它的一个实现。
  */
 
+import { NodeId } from '../core/api'
+
 /** `localStorage` 的最小子集。用接口而不是直接依赖 DOM 的 `Storage`，便于在 Node 里 mock。 */
 export interface StorageLike {
   getItem(key: string): string | null
@@ -216,19 +218,49 @@ export function clearLayoutPrefs(
 }
 
 /**
- * 从表节点 id 里取出表名。
+ * 从**渲染进程拿到的节点 id** 里取出「连接 id + 表名」。
  *
- * adapterId 形如 `table:users`、`table:a.b`（表名可以含点号）。
- * 解析规则与驱动侧保持一致：**只切第一个冒号**，后面原样作为名字——
- * 从右往左切在"名字里含点号"时会有歧义（见 sqlite/ids.ts 的说明）。
+ * ===== 为什么这里要特别小心（踩过一次）=====
  *
- * 非 `table:` 开头的 id（视图、连接、自由 SQL）返回 null：
+ * 树节点 id 不是裸的 adapterId `table:users`，而是**带连接归属**的
+ * `connection:<cid>|table:users`（规则定义在 `core/api.ts` 的 `NodeId`）。
+ * 我最初的实现直接按 `table:` 前缀切，结果永远匹配不到——
+ * 表现为"持久化完全不生效"，而且不报错（读不到就静默不存）。
+ *
+ * 所以这里显式复用 `NodeId.parse`，不再自己猜格式：
+ * 连接归属与 adapterId 都由同一个权威解析器给出（单一真相）。
+ *
+ * NodeId 的规则：先剥 `connection:` 前缀，剩下按**第一个** `|` 切成
+ * connectionId 与 adapterId；adapterId 再按**第一个** `:` 切成 kind 与名字。
+ *
+ * 非 `table:` 的节点（视图、连接根、自由 SQL 的 nodeId）返回 null：
  * 这些场景按规格**不做持久化**（自由 SQL 的列不固定，持久化没有意义）。
  */
+export function parseTableNodeId(nodeId: string): { connectionId: string; tableName: string } | null {
+  /**
+   * 用 `core/api.ts` 的 `NodeId.parse` 而不是本地再写一遍切分逻辑。
+   *
+   * 理由是**只有一处真相**：id 的编解码规则一旦在两边实现，
+   * 迟早会在某次格式调整后一边跟上一处漏掉，症状是"偶尔读不到偏好"这种难查的 bug。
+   */
+  const parsed = NodeId.parse(nodeId)
+  if (parsed === null || parsed.adapterId === null) return null
+  if (parsed.connectionId === '') return null
+
+  const colon = parsed.adapterId.indexOf(':')
+  if (colon <= 0) return null
+  if (parsed.adapterId.slice(0, colon) !== 'table') return null
+  const tableName = parsed.adapterId.slice(colon + 1)
+  if (tableName === '') return null
+  return { connectionId: parsed.connectionId, tableName }
+}
+
+/**
+ * 从表节点 id 里取出表名（保留旧名字，内部复用 `parseTableNodeId`）。
+ *
+ * 注意：只对**带连接归属**的渲染进程节点 id 有效（见上）。
+ * 驱动侧看到的裸 adapterId 不适用这个函数。
+ */
 export function tableNameFromNodeId(nodeId: string): string | null {
-  const separator = nodeId.indexOf(':')
-  if (separator <= 0) return null
-  if (nodeId.slice(0, separator) !== 'table') return null
-  const name = nodeId.slice(separator + 1)
-  return name === '' ? null : name
+  return parseTableNodeId(nodeId)?.tableName ?? null
 }
