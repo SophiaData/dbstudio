@@ -29,3 +29,6 @@ release/
 sdk/dist/
 sdk/.tmp-js/
 sdk/*.tgz
+
+# 误跑的 tsc 可能在源码目录生成声明文件，不应入库
+src/**/*.d.ts
