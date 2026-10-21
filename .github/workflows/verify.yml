@@ -73,3 +73,13 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui
+
+      - name: GUI 真实交互测试（Playwright 驱动 Electron）
+        # 上一步只验证「界面起来了」；这一步像真人一样点击操作：
+        # 新建连接 → 展开树 → 点表看数据 → 双击改单元格 → 应用 → 提交 → 验证落库。
+        # 用 playwright-core（不下载浏览器），仅用它的 Electron 支持。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-flow

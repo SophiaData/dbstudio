@@ -15,22 +15,24 @@
     "test:edit": "node tests/e2e-edit.mjs",
     "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
     "test:gui": "node scripts/run-in-electron.mjs --gui",
-    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk",
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow",
     "test:persist": "node tests/e2e-persist.mjs",
     "build:app": "pnpm run build && electron-builder --config electron-builder.config.mjs",
     "build:app:mac": "pnpm run build && electron-builder --config electron-builder.config.mjs --mac",
     "build:app:linux": "pnpm run build && electron-builder --config electron-builder.config.mjs --linux",
     "build:app:win": "pnpm run build && electron-builder --config electron-builder.config.mjs --win",
     "build:sdk": "cd sdk && node build.mjs",
-    "test:sdk": "cd sdk && node test/sdk.e2e.mjs"
+    "test:sdk": "cd sdk && node test/sdk.e2e.mjs",
+    "test:gui-flow": "node tests/gui-flow.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
     "electron": "^45.0.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^6.0.0",
+    "playwright-core": "^1.64.1",
     "typescript": "^5.9.0",
-    "vite": "^7.0.0",
-    "electron-builder": "^26.15.3"
+    "vite": "^7.0.0"
   },
   "author": "SophiaData",
   "license": "MIT",

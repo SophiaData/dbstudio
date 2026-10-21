@@ -105,8 +105,12 @@ async function boot(): Promise<void> {
     el('tree-rows'),
     (nodeId) => api.listChildren(nodeId),
     {
-      onStatus: (t) => setStatus(t),
-      onSelect: onSelectNode
+      onStatus: (t, isErr) => setStatus(t, isErr),
+      onSelect: onSelectNode,
+      // 树面板左上角的摘要。原先这个元素写死在 HTML 里，连上库也显示「未连接」。
+      onSummary: (t) => {
+        el('tree-summary').textContent = t
+      }
     }
   )
 

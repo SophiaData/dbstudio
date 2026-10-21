@@ -421,7 +421,7 @@ dialog::backdrop {
 
 /* 表头 sticky：横向滚动时列头跟随，纵向滚动时固定在顶部 */
 .grid-header {
-  display: flex;
+  display: inline-flex;
   flex: 0 0 auto;
   position: sticky;
   top: 0;
@@ -429,7 +429,10 @@ dialog::backdrop {
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
   height: 26px;
-  overflow: hidden;
+  /* 用 inline-flex + max-content：表头宽度只覆盖真实列，不铺满容器。
+     否则列宽固定时，右侧剩出的区域会带着表头底色，看起来像多了一列空列。 */
+  width: max-content;
+  min-width: 100%;
 }
 
 .grid-viewport {
@@ -461,6 +464,8 @@ dialog::backdrop {
   height: 24px;
   line-height: 24px;
   white-space: nowrap;
+  /* 与表头同理：行宽按内容，不铺满，避免右侧出现一条"假空列" */
+  width: max-content;
 }
 
 .grid-row.is-selected {

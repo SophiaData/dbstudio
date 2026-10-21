@@ -62,7 +62,15 @@ export interface TreeCallbacks {
   /** 选中并需要展示详情（点击/回车）。 */
   onSelect(node: ObjectRef | null): void
   /** 状态栏提示。 */
-  onStatus(text: string): void
+  onStatus(text: string, isError?: boolean): void
+  /**
+   * 更新树面板左上角的一行摘要（如「2 个连接 · 1 个已连接」）。
+   *
+   * 为什么要单独一个回调：这个元素原先只在 index.html 里写死「未连接」，
+   * 渲染进程从不更新它——于是**连上库之后界面依然显示「未连接」**，
+   * 属于会误导用户的信息。修法是把更新权交给这里。
+   */
+  onSummary(text: string): void
 }
 
 export class MetadataTree {
@@ -104,6 +112,14 @@ export class MetadataTree {
       const refs = await this.#listChildren(null)
       this.#roots = refs.map((ref) => this.#makeNode(ref, 0))
       this.#rebuildRows()
+      const connected = refs.filter((r) => r.meta?.['connected'] === true).length
+      // 摘要里区分「已保存」与「已连接」——加入持久化后这两个不是一回事：
+      // 启动时只载入配置不建会话，所以「2 个连接 · 0 个已连接」是正常状态。
+      this.#cb.onSummary(
+        refs.length === 0
+          ? '未连接'
+          : `${refs.length} 个连接 · ${connected} 个已连接`
+      )
       this.#cb.onStatus(`共 ${refs.length} 个连接`)
       if (refs.length === 0) {
         this.#cb.onStatus('还没有连接，点击右上角「新建连接」开始')
