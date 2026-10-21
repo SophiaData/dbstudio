@@ -31,23 +31,31 @@ jobs:
           cache: pnpm
 
       - name: 安装依赖
+        # 注意：不要在 CI 里重写 pnpm-workspace.yaml。
+        # 仓库里那份已经包含两件必需的东西：
+        #   - allowBuilds: electron / esbuild 的 postinstall 需要跑（下载本机二进制）
+        #   - minimumReleaseAgeExclude: electron@45.0.0（pnpm 供应链策略默认拒绝
+        #     "发布不足 X 小时" 的包，这个版本发布太新，必须显式豁免）
+        # 早先这里用脚本重写 yaml，结果把 minimumReleaseAgeExclude 抹掉了，
+        # CI 直接挂在 lockfile 供应链校验上。教训：CI 不要改仓库里的锁/配置。
         run: pnpm install --frozen-lockfile
 
-      - name: 许可依赖的构建脚本（electron / esbuild 需要下载本机二进制）
+      - name: 类型检查 + 构建 + 全部 e2e（不含 GUI）
+        # 注意这里刻意**逐段列出**而不是直接 `pnpm verify`：
+        # `verify` 末尾包含 test:gui，而 GUI 需要显示环境。
+        # 在无头 CI 上直接跑 verify 会挂在 GUI 那一步（错误信息还很难懂）。
+        # 所以这里跑除 GUI 以外的全部，GUI 放到下一步用 xvfb 单独跑。
         run: |
-          node -e "
-            const fs = require('fs');
-            // pnpm 11 默认拦截 postinstall；本项目需要 electron/esbuild 的二进制
-            fs.writeFileSync('pnpm-workspace.yaml',
-              'allowBuilds:\n  esbuild: true\n  electron: true\n');
-            console.log('allowBuilds 已写入');
-          "
-          pnpm install --frozen-lockfile
+          pnpm run typecheck
+          pnpm run build
+          pnpm run fixture
+          pnpm run test
+          pnpm run test:resultset
+          pnpm run test:edit
+          pnpm run test:persist
+          pnpm run test:electron
 
-      - name: 类型检查 + 构建 + 全部 e2e
-        run: pnpm verify
-
-      - name: GUI 自检（需要虚拟显示）
+      - name: GUI 自检（xvfb 提供虚拟显示）
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui
