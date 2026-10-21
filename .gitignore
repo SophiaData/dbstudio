@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+out/
+dist/
+
+# 测试产物：夹具数据库是**生成出来的**，不应入库
+# （`pnpm fixture` / 各 e2e 会重新生成）
+tests/fixtures/*.db
+tests/fixtures/*.db-*
+
+# 本地日志与临时文件
+*.log
+.DS_Store
+*.tmp
+.corrupt-*
+
+# 编辑器
+.vscode/
+.idea/
+
+# 环境变量（本项目当前不依赖，但防止将来误提交）
+.env
+.env.*

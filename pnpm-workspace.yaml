@@ -1,0 +1,9 @@
+# pnpm 11 默认拦截依赖的构建脚本（安全默认值）。
+# 这里必须显式放行两个：它们的 postinstall 负责准备本机二进制。
+#   - electron: 下载 Electron.app 运行时；不放行则主进程无法启动
+#   - esbuild : 校验并链接平台二进制（vite 的构建底座）
+allowBuilds:
+  esbuild: true
+  electron: true
+minimumReleaseAgeExclude:
+  - electron@45.0.0

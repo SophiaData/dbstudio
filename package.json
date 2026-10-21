@@ -1,0 +1,29 @@
+{
+  "name": "dbstudio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "数据库客户端：元数据/方言抽象 + 连接管理。架构参考 DBeaver 剖析结论，实现走 Electron/TS 进程隔离路线。",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "pnpm run build:driver-host && electron-vite dev",
+    "build:driver-host": "node scripts/build-driver-host.mjs",
+    "build": "pnpm run build:driver-host && electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "fixture": "node scripts/make-fixture.mjs",
+    "test": "node tests/e2e.mjs",
+    "test:resultset": "node tests/e2e-resultset.mjs",
+    "test:edit": "node tests/e2e-edit.mjs",
+    "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
+    "test:gui": "node scripts/run-in-electron.mjs --gui",
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:electron && pnpm run test:gui",
+    "test:persist": "node tests/e2e-persist.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.0",
+    "electron": "^45.0.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

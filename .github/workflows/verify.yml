@@ -1,0 +1,53 @@
+# CI：在干净环境里跑一遍 `pnpm verify`
+#
+# 为什么值得加这一条：本地开发时 node_modules / out / fixtures 都是现成的，
+# 很容易出现「在我机器上能过」。这个 workflow 从零安装、重新生成夹具、
+# 跑全部 232 条断言 + Electron 内置 Node 验证 + GUI 自检，
+# 是「这个仓库克隆下来真的能跑」的唯一客观证据。
+#
+# 注意 GUI 自检需要显示环境；Linux CI 上用 xvfb 提供虚拟显示。
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 许可依赖的构建脚本（electron / esbuild 需要下载本机二进制）
+        run: |
+          node -e "
+            const fs = require('fs');
+            // pnpm 11 默认拦截 postinstall；本项目需要 electron/esbuild 的二进制
+            fs.writeFileSync('pnpm-workspace.yaml',
+              'allowBuilds:\n  esbuild: true\n  electron: true\n');
+            console.log('allowBuilds 已写入');
+          "
+          pnpm install --frozen-lockfile
+
+      - name: 类型检查 + 构建 + 全部 e2e
+        run: pnpm verify
+
+      - name: GUI 自检（需要虚拟显示）
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui

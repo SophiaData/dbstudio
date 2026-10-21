@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@core/*": ["src/core/*"],
+      "@drivers/*": ["src/drivers/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "tests/**/*.mjs", "scripts/**/*.mjs"]
+}

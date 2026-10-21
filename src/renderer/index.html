@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      安全基线：只允许加载本地资源；connect-src 放开 ws/http 是为了 vite 的 HMR，
+      生产构建下不会用到。不加载任何远程脚本。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
+    />
+    <title>dbstudio</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar">
+        <span id="app-title">dbstudio</span>
+        <span id="app-subtitle">元数据浏览（虚拟化 + 懒加载）</span>
+        <span class="spacer"></span>
+        <button id="btn-new-connection" type="button">＋ 新建连接</button>
+      </header>
+
+      <main id="layout">
+        <!-- 左：元数据树。role=tree 让屏幕阅读器能正确播报层级 -->
+        <section id="tree-pane" aria-label="数据库对象树">
+          <div id="tree-toolbar">
+            <span id="tree-summary">未连接</span>
+            <button id="btn-refresh" type="button" title="重新加载连接列表">↻</button>
+          </div>
+          <!--
+            虚拟滚动结构：
+              #tree-viewport  负责滚动与裁剪
+              #tree-spacer    把滚动高度撑到「总行数 × 行高」，让滚动条比例正确
+              #tree-rows      只放可视区的行，用 transform 定位到正确位置
+          -->
+          <div id="tree-viewport" tabindex="0">
+            <div id="tree-spacer"></div>
+            <div id="tree-rows" role="tree" aria-label="数据库元数据" aria-multiselectable="false"></div>
+          </div>
+        </section>
+
+        <!-- 右：详情 / 结果集 -->
+        <section id="detail-pane" aria-label="对象详情与结果集">
+          <div id="detail-empty">在左侧选择一张表或视图，或在上方执行 SQL。</div>
+          <div id="detail-content" hidden></div>
+          <!--
+            结果集网格。由 grid.ts 接管其内部结构（toolbar / banner / header / viewport）。
+            放两个都存在的容器: 详情是「结构」，网格是「数据」，可来回切换。
+          -->
+          <div id="result-grid" hidden></div>
+        </section>
+      </main>
+
+      <!-- 顶部 SQL 输入条。执行结果进右侧结果集网格。 -->
+      <div id="sqlbar">
+        <input id="sql-input" type="text" spellcheck="false"
+               placeholder="输入 SQL 后回车执行，例如：SELECT * FROM users" />
+        <button id="btn-run-sql" type="button">执行</button>
+      </div>
+
+      <div id="status-bar" role="status" aria-live="polite"></div>
+    </div>
+
+    <!-- 新建连接对话框 -->
+    <dialog id="dlg-connection">
+      <form method="dialog" id="form-connection">
+        <h2>新建连接</h2>
+        <label class="field">
+          <span>连接名</span>
+          <input id="f-name" type="text" required placeholder="例如：本地测试库" />
+        </label>
+        <label class="field">
+          <span>数据库类型</span>
+          <select id="f-dialect" required></select>
+        </label>
+        <div id="f-dynamic"></div>
+        <p id="f-error" class="error" hidden></p>
+        <menu>
+          <button id="btn-cancel" type="button" value="cancel">取消</button>
+          <button id="btn-test" type="button">测试连接</button>
+          <button id="btn-submit" type="submit">连接</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

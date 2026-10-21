@@ -1,0 +1,815 @@
+/**
+ * 连接管理器（主进程）。
+ *
+ * 对应 DBeaver 的 `DataSourceSerializer` + `DataSourceProviderRegistry` 那一层，
+ * 但我们只保留真正需要的两件事：**连接的生命周期**与**节点 id 的作用域封装**。
+ *
+ * ===== 设计要点：id 作用域 =====
+ *
+ * adapter 只保证「同一连接内 id 唯一」（比如 SQLite 里只有一个 `table:users`）。
+ * 但树里同时挂着多个连接，如果直接把 adapter 的 id 交给 UI，两个连接下的
+ * 同名表就会撞在一起，展开一个另一个也跟着变。
+ *
+ * 所以主进程在这里做一次**统一的作用域封装**：出站时把 `table:users`
+ * 包成 `connection:<cid>|table:users`，入站时再拆回去。
+ * 规则只在 `core/api.ts` 的 `NodeId` 里定义一次，UI 与测试共用同一套。
+ */
+
+import type { ConnectionConfig } from '../core/dialect'
+import type { DialectInfo, TestConnectionResult } from '../core/driver'
+import { quoteIdentifierWith } from '../core/driver'
+import { NodeId, type ConnectionSummary } from '../core/api'
+import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
+import type {
+  EditApplyResult,
+  QueryOptions,
+  QueryResult,
+  ResultPage,
+  RowUpdate,
+  TransactionState
+} from '../core/resultset'
+import { DriverHostHandle } from './DriverHostHandle'
+import { ConnectionStore, SecretStorageUnavailableError } from './ConnectionStore'
+
+/**
+ * ===== 为什么主进程这里**不** import 任何驱动目录 =====
+ *
+ * 早先 `previewTable` 需要 `quoteIdentifier` 来安全拼表名，而 `DialectInfo`
+ * 里没有任何语法能力，于是只能在主进程 import 驱动的 dialect 模块。
+ * 那条路哪怕只 import 纯语法也会留一个后门：`src/drivers/<x>/dialect.ts`
+ * 和 `adapter.ts` 在同一个目录下，后人顺手就能把 adapter 也 import 进来，
+ * 进程隔离就名存实亡了。
+ *
+ * 现在 `DialectInfo.quoting`（纯数据，可序列化）由注册表带出来，
+ * `quoteIdentifierWith` 又在 core 里统一实现，所以主进程只需拼字符串——
+ * **依赖方向上不再有任何一条边从 main 指向 drivers**。
+ *
+ * 顺带因此删掉了「方言 → 分页子句」的对照表：`previewTable` 只生成
+ * `SELECT * FROM <quoted>`，把行数限制交给 `QueryOptions.limit`，
+ * 由 adapter（唯一懂自己分页语法的那个）去落实。主进程不再猜 SQL 方言。
+ */
+
+interface LiveConnection {
+  readonly id: string
+  readonly config: ConnectionConfig
+  readonly capabilities: DriverCapabilities
+  readonly host: DriverHostHandle
+  /**
+   * 该连接的方言展示信息。
+   *
+   * `previewTable` 用它取 `quoting` 规则。存成字段而不是每次回 `#dialects`
+   * 线性查一遍：方言清单构造后不可变，而查询是热路径，存一份更直白也更快。
+   */
+  readonly info: DialectInfo
+}
+
+/**
+ * 已保存但**没有活动会话**的连接。
+ *
+ * 为什么需要这个类型：加入持久化后，"有配置"与"有会话"是两件独立的事。
+ * 启动时我们载入所有配置但不连接（见 `#loadPersisted`），因此大部分连接
+ * 在任意时刻都只是"一条配置"。把它和 `LiveConnection` 分开，
+ * 能让"要不要 spawn 宿主"这件事由类型系统提醒——拿到 SavedConnection
+ * 却想调 host 会立刻编译失败，而不是运行时空指针。
+ */
+interface SavedConnection {
+  readonly id: string
+  readonly config: ConnectionConfig
+  readonly info: DialectInfo
+}
+
+/** 生成短连接 id。只需要本会话内唯一，不必是 UUID。 */
+function makeConnectionId(seq: number): string {
+  return `c${seq}`
+}
+
+/**
+ * 移除连接时「尽力回滚」的时限。
+ *
+ * 这个值刻意**远小于** RPC 的 60s：remove 是用户点了「删除连接」之后的动作，
+ * 界面在原地等；若宿主正卡在一条慢 UPDATE 上，回滚 RPC 会排在它后面排 60s，
+ * 那会让「删个连接」看起来像卡死。
+ *
+ * 超时放弃回滚并不等于数据有风险：宿主随后被关闭，数据库连接断开时
+ * 未提交事务依然会被数据库回滚。这里只是把「显式、立刻的回滚」降级为
+ * 「由连接关闭兜底的回滚」。
+ */
+const ROLLBACK_CLEANUP_TIMEOUT_MS = 3_000
+
+/** 从任意异常里取一句可读信息。 */
+function describeThrown(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * 游标 id 的作用域封装。
+ *
+ * ===== 问题：cursorId 是「进程内局部变量」，而主进程要跨连接找宿主 =====
+ *
+ * adapter 生成的 cursorId（如 `cur-3`）只在**生成它的那个宿主进程**里有意义。
+ * 另一个宿主进程可能也生成了 `cur-3`，指向完全不同的结果集。
+ * 而 `fetchResultPage(cursorId)` 进来时，主进程手上只有一个字符串，
+ * 它必须先回答「这是哪个连接的游标」才能转发。
+ *
+ * ===== 两个方案与取舍 =====
+ *
+ * (a) 给 cursorId 加连接前缀（本实现）：`connection:c1|cur-3`
+ * (b) 主进程维护 `Map<cursorId, connectionId>`
+ *
+ * 选 (a)，理由三条：
+ *
+ * 1. **无状态**。(b) 的映射表是主进程里一份额外的可变状态：进程重启、连接重建、
+ *    或者某处忘了删除，都会留下脏条目。而 (a) 的信息完全编码在字符串本身，
+ *    不存在「表和实际游标不同步」这种状态。
+ * 2. **复用已验证的规则**。`NodeId` 已经用同一套 `connection:<cid>|<payload>`
+ *    解决了完全同构的问题（节点 id 的作用域），并且 `core/api.ts` 里写明
+ *    「规则只定义一次，UI 与测试共用」。游标是同一类问题，用同一套规则，
+ *    读代码的人不用再学第二种编码。
+ * 3. **失败可辨识**。传进来的 cursorId 若不带前缀（比如 UI 把原生 id 直接回传），
+ *    (a) 能在本地立刻判定「这不是我给出去的 id」并报错；
+ *    (b) 只会在映射表里查不到，报出的错误与「游标已被关闭」无法区分。
+ *
+ * (b) 唯一比 (a) 强的地方是「Cursor 里能塞进前缀不允许的字符」——
+ * 但我们的前缀用 `|` 分隔，宿主侧的 id 只要不含 `|` 就安全；
+ * 且这里**只用 NodeId 的解析能力**，编码本身不改动游标内容。
+ *
+ * ===== 注意对 UI 的影响（重要） =====
+ *
+ * 一旦加了前缀，`QueryResult.cursorId` 与 adapter 的原生 id **不再是同一个字符串**。
+ * 所以 `runQuery` 返回前必须重新包装、`fetchResultPage`/`closeCursor` 入参必须还原。
+ * UI 只需要把它当**不透明字符串**存着再传回来，不该尝试解析它。
+ */
+const CursorId = {
+  /** 把 adapter 的原生游标 id 包上连接归属，交给 UI。 */
+  scope(connectionId: string, rawCursorId: string): string {
+    return NodeId.scoped(connectionId, rawCursorId)
+  },
+  /**
+   * 还原成 adapter 的原生 id。
+   *
+   * 返回 null 表示这个字符串不是本层发出去的（格式不对），
+   * 由调用方决定怎么报错——而不是在这里抛，因为两种入参错误
+   * （格式错 / 连接不存在）需要不同的提示。
+   */
+  parse(scoped: string): { connectionId: string; rawCursorId: string } | null {
+    const parsed = NodeId.parse(scoped)
+    // adapterId 为 null 说明只有 `connection:c1` 而没有 `|游标`，不是合法游标 id。
+    if (!parsed || parsed.adapterId === null || parsed.adapterId === '') return null
+    return { connectionId: parsed.connectionId, rawCursorId: parsed.adapterId }
+  }
+} as const
+
+export class ConnectionManager {
+  /** 有活动会话（宿主进程活着）的连接。 */
+  readonly #connections = new Map<string, LiveConnection>()
+  /**
+   * 已保存的配置（含没有会话的）。
+   *
+   * 与 `#connections` 分开存而不是合成一个带 `connected?` 字段的 Map：
+   * 两者生命周期不同（配置长存、会话可断可连），混在一起会让每个
+   * 读会话的地方都要先判空，且很容易在"断开时忘了保留配置"上出错。
+   */
+  readonly #saved = new Map<string, SavedConnection>()
+  readonly #store: ConnectionStore
+  readonly #dialects: readonly DialectInfo[]
+  #seq = 0
+
+  /**
+   * 已发出的游标：连接 id → 该连接上仍存活的原生游标 id 集合。
+   *
+   * ===== 为什么方案 (a) 还需要这张表 =====
+   *
+   * 前缀解决了「往哪转发」，但解决不了「清理」。宿主进程被关掉时它内部的游标
+   * 自然消失，可主进程若不留痕，就无法回答两件事：
+   *   1. `remove(connectionId)` 时该清理哪些——虽然宿主会退出，
+   *      但我们仍要主动 closeCursor，让「释放」在双方都留下明确语义，
+   *      而不是依赖「进程没了所以大概没事」。
+   *   2. 泄漏可见性。若某个连接不断开查询却从不 closeCursor，
+   *      这张表的大小就是泄漏的量化指标；没有它，泄漏是完全隐形的。
+   *
+   * 所以它**不是**路由表（路由靠前缀），而是**生命周期账本**。
+   * 这个区分很重要：(b) 方案把路由和账本混成一份状态，而这里两者分开，
+   * 前缀坏了不会影响清理，清理漏了也不会导致转发到错误的宿主。
+   */
+  readonly #openCursors = new Map<string, Set<string>>()
+
+  constructor(dialects: readonly DialectInfo[], store: ConnectionStore) {
+    this.#dialects = dialects
+    this.#store = store
+    this.#loadPersisted()
+  }
+
+  /**
+   * 从磁盘载入配置。**载入不等于连接**。
+   *
+   * ===== 为什么启动时不把所有库都连上 =====
+   *
+   * 1. 启动会变慢：5 个远端连接每个都要做一次 TCP + 认证，冷启动直接几十秒。
+   * 2. 会弹一堆错误：某个库的机器关机了、密码轮换了，启动时就冒 5 个红色错误框，
+   *    而用户此刻根本不想用这些连接。
+   * 3. 会占资源：每个连接一个宿主进程，全连上等于空转 N 个子进程。
+   *
+   * 所以这里只**把配置装进内存**，会话由用户显式 `connectConnection` 或
+   * 展开树时按需建立。list() 里 `connected:false` 是正常状态，不是错误。
+   */
+  #loadPersisted(): void {
+    for (const stored of this.#store.listConnections()) {
+      const info = this.#dialects.find((d) => d.id === stored.config.dialectId)
+      if (!info) {
+        // 配置里存着一个当前版本不认识的方言（比如驱动被移除了）。
+        // 不删用户的配置——保留，只是无法连接。UI 会显示为不可用。
+        this.#log(
+          'warn',
+          `[manager] 已保存的连接 ${stored.id} 使用了未知方言 "${stored.config.dialectId}"，已保留配置但不可连接`
+        )
+        continue
+      }
+      this.#saved.set(stored.id, { id: stored.id, config: stored.config, info })
+      // 让序号越过已存在的 id（c1/c2…），避免新建时撞车。
+      this.#bumpSeqFrom(stored.id)
+    }
+  }
+
+  /** 从形如 `c12` 的 id 里提取序号，保证 `#seq` 不会与已载入的 id 冲突。 */
+  #bumpSeqFrom(id: string): void {
+    const match = /^c(\d+)$/.exec(id)
+    if (!match) return
+    const n = Number(match[1])
+    if (Number.isFinite(n) && n > this.#seq) this.#seq = n
+  }
+
+  /** 统一的日志出口。移除连接时的回滚失败只是 warn，不该被当成连接删除失败。 */
+  #log(level: 'info' | 'warn' | 'error', message: string): void {
+    console[level === 'error' ? 'error' : 'log'](message)
+  }
+
+  listDialects(): DialectInfo[] {
+    return [...this.#dialects]
+  }
+
+  /**
+   * 判断某连接密码（凭据）的保存状态。**唯一的判定出口**。
+   *
+   * ===== 三态的语义（与 core/api.ts 的注释对齐） =====
+   *
+   *   null  → 该方言本就不需要密码（SQLite 是文件库，没 password 字段）
+   *   true  → 需要密码且密文确实存下来了
+   *   false → 需要密码但没存成（典型原因：safeStorage 不可用，我们拒绝存明文）
+   *
+   * ===== 为什么集中成一个函数 =====
+   *
+   * 这个判定要出现在 list() / add() / connect() / disconnect() / listChildren()
+   * 至少五个地方。若各处自己写一遍，迟早出现"列表里显示已保存、树里显示未保存"
+   * 这种自相矛盾的 UI。集中一处，改规则只改这里。
+   */
+  #secretStoredFor(saved: SavedConnection): boolean | null {
+    // 1. 方言声明了 password 字段吗？没有 → 这个连接不需要密码，返回 null。
+    //    注意看的是**方言的字段声明**，而不是"这次 add 有没有传 secret"：
+    //    用户可能这次没填密码而想之后补，但那不改变"这个方言需要密码"的事实。
+    const needsPassword = saved.info.fields.some((f) => f.kind === 'password')
+    if (!needsPassword) return null
+
+    // 2. 需要密码：磁盘上确有密文 → true。
+    if (this.#store.hasSecret(saved.id)) return true
+
+    // 3. 需要密码但没有密文 → false。
+    //    典型成因是 cipher 不可用导致 setSecret 抛错（我们宁可拒存也不存明文）。
+    return false
+  }
+
+  /**
+   * 列出**所有已保存的连接**（含未连接的）。
+   *
+   * 语义相对第一阶段变了：以前只返回活动会话，现在返回配置清单。
+   * 依据是 `core/api.ts` 里 `listConnections` 的注释——UI 需要看到
+   * "存了但没连"的连接才能让用户点它去连。
+   *
+   * `capabilities` 只在有活动会话时非 null：能力是连上之后才知道的，
+   * 未连接时给 null 而不是编一组默认值，这样 UI 不会误以为编辑能力可用。
+   */
+  list(): ConnectionSummary[] {
+    const out: ConnectionSummary[] = []
+    for (const saved of this.#saved.values()) {
+      const live = this.#connections.get(saved.id)
+      out.push({
+        id: saved.id,
+        name: saved.config.name,
+        dialectId: saved.config.dialectId,
+        connected: live !== undefined,
+        capabilities: live?.capabilities ?? null,
+        persisted: true,
+        secretStored: this.#secretStoredFor(saved)
+      })
+    }
+    return out
+  }
+
+  /**
+   * 新建连接：**先落盘，再尝试连通**（契约要求，也是正确的顺序）。
+   *
+   * ===== 为什么先存后连 =====
+   *
+   * 反过来的问题是：连上了但保存失败时，用户以为已经存了，重启后连接消失。
+   * 而先存后连，最坏情况是"存了但连不上"——用户看得见它、能改参数重试。
+   * 两种失败里后者可恢复，前者会让人丢失配置。
+   *
+   * ===== 连接失败不抛错（关键） =====
+   *
+   * 返回 `connected:false` 而不是 throw：UI 需要这个连接**留在列表里**
+   * 让用户能改参数重试。如果抛错，调用方通常会把整条记录丢掉，
+   * 那"先存后连"就没意义了。
+   */
+  async add(config: ConnectionConfig, secret?: string): Promise<ConnectionSummary> {
+    const info = this.#dialects.find((d) => d.id === config.dialectId)
+    if (!info) {
+      throw new Error(
+        `未知方言 "${config.dialectId}"，可用方言: ${this.#dialects.map((d) => d.id).join(', ')}`
+      )
+    }
+
+    const id = makeConnectionId(++this.#seq)
+
+    // ---- 第一步：落盘（配置 + 凭据） ----
+    // 保存密码可能因 cipher 不可用而抛 SecretStorageUnavailableError。
+    // 这时**配置仍然要存下来**（配置没有保密需求），只放弃密码，
+    // 并把这件事交给 UI 提示——绝不能因此连配置都不存。
+    let secretError: unknown = null
+    this.#store.saveConnection(id, config)
+    try {
+      this.#store.setSecret(id, secret)
+    } catch (err) {
+      secretError = err
+    }
+    this.#saved.set(id, { id, config, info })
+    this.#log(
+      'info',
+      `[manager] 已保存连接 ${id}（${config.name}）到磁盘${
+        secretError instanceof SecretStorageUnavailableError ? '；密码未保存（安全存储不可用）' : ''
+      }`
+    )
+
+    // ---- 第二步：尝试连通 ----
+    const summary = await this.#establishSession(id)
+    // 密码保存失败时，把这件事"挂"在返回对象之外无法表达（ConnectionSummary 没这个字段），
+    // 所以走日志 + 让 summary 反映真实连接结果。UI 侧通过 list() 看到 persisted=true。
+    if (secretError !== null) {
+      this.#log(
+        'warn',
+        `[manager] 连接 ${id} 的密码未能保存: ${describeThrown(secretError)}`
+      )
+    }
+    return summary
+  }
+
+  /**
+   * 为已保存的连接建立会话（`add` 之后的重连、或启动后用户点"连接"）。
+   *
+   * **幂等**：已经连着时直接返回当前状态，不重复 spawn。
+   * 理由是重复 spawn 会泄漏宿主进程（旧的没人关），而且用户连点两次
+   * 按钮是很常见的操作。
+   */
+  async connectConnection(connectionId: string): Promise<ConnectionSummary> {
+    const saved = this.#saved.get(connectionId)
+    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+
+    const existing = this.#connections.get(connectionId)
+    if (existing) {
+      // 已连接：幂等返回，不重复建宿主。
+      return this.#toSummary(saved, existing)
+    }
+    return this.#establishSession(connectionId)
+  }
+
+  /**
+   * 关闭会话但**保留配置**。
+   *
+   * 与 `remove` 的区别是只关宿主、不动磁盘。用户点"断开"后
+   * 连接仍留在列表里，下次可以再连——这正是持久化的价值。
+   */
+  async disconnectConnection(connectionId: string): Promise<ConnectionSummary> {
+    const saved = this.#saved.get(connectionId)
+    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+
+    const live = this.#connections.get(connectionId)
+    if (live) {
+      // 断开前先回滚未提交事务：用户的意图是"结束这个会话"，
+      // 静默保留未提交改动会让数据进入一个悬空状态。
+      await this.#rollbackQuietly(live)
+      this.#connections.delete(connectionId)
+      this.#openCursors.delete(connectionId)
+      await live.host.close()
+    }
+    return this.#toSummary(saved, undefined)
+  }
+
+  /**
+   * 真正 spawn 宿主并连接。`add` 与 `connectConnection` 共用。
+   *
+   * 失败时**不抛**，而是返回 `connected:false`：配置还在，用户能重试。
+   * 但必须回收子进程，否则每次失败都漏一个。
+   */
+  async #establishSession(connectionId: string): Promise<ConnectionSummary> {
+    const saved = this.#saved.get(connectionId)
+    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+
+    const secret = this.#store.getSecret(connectionId)
+    const host = new DriverHostHandle({
+      dialectId: saved.config.dialectId,
+      onLog: (level, msg) => this.#log(level, msg)
+    })
+
+    try {
+      await host.handshake
+      const capabilities = await host.connect(saved.config, secret)
+      const live: LiveConnection = {
+        id: saved.id,
+        config: saved.config,
+        capabilities,
+        host,
+        info: saved.info
+      }
+      this.#connections.set(connectionId, live)
+      return this.#toSummary(saved, live)
+    } catch (err) {
+      // 失败：回收进程、不加进 #connections，但**配置保留**。
+      host.kill()
+      this.#log('warn', `[manager] 连接 ${connectionId}（${saved.config.name}）失败: ${describeThrown(err)}`)
+      return this.#toSummary(saved, undefined)
+    }
+  }
+
+  #toSummary(saved: SavedConnection, live: LiveConnection | undefined): ConnectionSummary {
+    return {
+      id: saved.id,
+      name: saved.config.name,
+      dialectId: saved.config.dialectId,
+      connected: live !== undefined,
+      capabilities: live?.capabilities ?? null,
+      persisted: true,
+      secretStored: this.#secretStoredFor(saved)
+    }
+  }
+
+  async remove(connectionId: string): Promise<void> {
+    const conn = this.#connections.get(connectionId)
+    const saved = this.#saved.get(connectionId)
+
+    // 既没有会话也没有配置 → 已经不存在，幂等返回。
+    // 只有配置没有会话（断开状态）时仍需删除配置，所以不能只看 conn。
+    if (!conn && !saved) return
+
+    if (conn) {
+      // ===== 先回滚，再关宿主 =====
+      //
+      // 顺序不能反。若先 close：宿主进程退出时连接被断开，SQLite 也会回滚，
+      // 但那属于「依赖底层实现的隐式行为」——换成别的数据库、或某个驱动在
+      // 关闭时先刷盘，就可能留下半提交状态。显式回滚让这件事有确定的语义：
+      // **移除连接 = 放弃该连接上所有未提交改动**。
+      //
+      // 三个防御，缺一个都会让 remove 变成一个可能抛错的操作：
+      //   1. try/catch：回滚失败不该阻止回收进程（否则连接删不掉、进程还漏着）
+      //   2. 超时竞速：宿主若正卡在慢写入上，回滚 RPC 会排 60s，
+      //      不能让「关一个连接」把界面卡住；超时就放弃回滚直接关
+      //      （关进程本身仍会回滚，只是不再是显式保证）
+      //   3. 放在 `#connections.delete` **之前**：回滚要通过 host 句柄做，
+      //      与是否还在 map 里无关，但先删会让人误以为顺序无所谓
+      await this.#rollbackQuietly(conn)
+
+      this.#connections.delete(connectionId)
+
+      // ---- 清理该连接的游标账本 ----
+      // 宿主进程马上会被 close() 掉，它内部的游标也随之消失；
+      // 但主进程这张账本必须同步清空，否则每删一个用过查询的连接就漏一堆 id，
+      // 长时间运行的应用会在这张表上慢慢涨上去（典型的映射表泄漏）。
+      //
+      // 刻意**不**在删除前逐个 closeCursor：宿主已经要被关了，
+      // 再发 N 条 RPC 只会拖慢关闭、并制造「关到一半进程没了」的竞态。
+      // 直接丢弃账本是正确且更简单的做法——这点与「资源必须显式释放」不冲突，
+      // 因为释放的实际执行者是宿主进程的退出。
+      this.#openCursors.delete(connectionId)
+
+      await conn.host.close()
+    }
+
+    // ---- 删磁盘状态：配置 + 凭据 ----
+    // 放在关主机之后：这样"关会话失败"（极端情况）时至少配置还在，
+    // 用户还能再试一次删除；反过来先删配置再关，会留下一个删不掉的活动会话。
+    this.#saved.delete(connectionId)
+    this.#store.deleteConnection(connectionId)
+    this.#log('info', `[manager] 已删除连接 ${connectionId}（配置与凭据已清除）`)
+  }
+
+  /**
+   * 尽力回滚，永不抛错、永不长时间阻塞。
+   *
+   * 用 `ROLLBACK_CLEANUP_TIMEOUT_MS` 而不是 RPC 的 60s：这是**清理路径**，
+   * 目标是「别留下半提交状态」，而不是「一定要等到回滚完成」。
+   * 超时后仍然 close 宿主，进程退出时数据库连接断开，未提交事务依然会被回滚。
+   */
+  async #rollbackQuietly(conn: LiveConnection): Promise<void> {
+    const rollback = conn.host.rollbackTransaction().catch((err: unknown) => {
+      // 没有事务时某些驱动会报错，这属于正常情况，不该污染日志以外的地方。
+      this.#log('warn', `[${conn.id}] 移除连接前回滚事务失败（忽略）: ${describeThrown(err)}`)
+    })
+    const timeout = new Promise<void>((res) => setTimeout(res, ROLLBACK_CLEANUP_TIMEOUT_MS))
+    await Promise.race([rollback, timeout])
+  }
+
+  /**
+   * 解析 nodeId 并返回它所属的连接；出错时抛出可直接展示的消息。
+   *
+   * 三种失败各有独立文案，因为用户能做的应对完全不同：
+   * 语法错（界面 bug）、连接没了（重连）、adapterId 缺失（用错了节点类型）。
+   */
+  #resolveConnection(nodeId: string): { conn: LiveConnection; adapterId: string | null } {
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) throw new Error(`无法解析的节点 id: ${nodeId}`)
+    const conn = this.#connections.get(parsed.connectionId)
+    if (!conn) throw new Error(`连接不存在或已断开: ${parsed.connectionId}`)
+    return { conn, adapterId: parsed.adapterId }
+  }
+
+  async testConnection(
+    config: ConnectionConfig,
+    secret?: string
+  ): Promise<TestConnectionResult> {
+    const host = new DriverHostHandle({ dialectId: config.dialectId })
+    try {
+      await host.handshake
+      return await host.testConnection(config, secret)
+    } finally {
+      // 测试连接不留会话，务必回收。
+      await host.close()
+    }
+  }
+
+  /**
+   * 列子节点。
+   *
+   * 三处细节，都是踩过坑才知道要处理的：
+   *  1. 根层（null）返回的是「连接」本身，不是 adapter 的数据
+   *  2. 连接层（adapterId === null）要调 adapter 的 `listChildren(null)`
+   *  3. 子节点的 parentId 必须改写成本层的**作用域 id**，否则 UI 建树会接错
+   */
+  async listChildren(nodeId: string | null): Promise<ObjectRef[]> {
+    if (nodeId === null) {
+      return this.list().map((c) => ({
+        id: NodeId.connection(c.id),
+        kind: 'connection' as const,
+        name: c.name,
+        parentId: null,
+        hasChildren: true,
+        meta: {
+          dialect: c.dialectId,
+          connected: c.connected,
+          // ★ 这两个字段是 UI 显示状态所必需的，漏传会让 UI 永远显示"未保存"
+          //   （`ref.meta?.['persisted'] === true` 永远为 false）。
+          //   meta 的值域是 string|number|boolean|null，故 secretStored 的
+          //   `boolean|null` 可直接放。null 表示"该方言不需要密码"，
+          //   UI 应据此区分"无需密码"与"需要但没存上"。
+          persisted: c.persisted,
+          secretStored: c.secretStored,
+          ...(c.capabilities ? { inlineEdit: c.capabilities.supportsInlineEdit } : {})
+        }
+      }))
+    }
+
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) throw new Error(`无法解析的节点 id: ${nodeId}`)
+
+    const conn = this.#connections.get(parsed.connectionId)
+    if (!conn) throw new Error(`连接不存在或已断开: ${parsed.connectionId}`)
+
+    const raw = await conn.host.listChildren(parsed.adapterId)
+    const parentScoped = nodeId
+    return raw.map((item) => ({
+      ...item,
+      id: NodeId.scoped(conn.id, item.id),
+      parentId: parentScoped
+    }))
+  }
+
+  describeTable(nodeId: string): Promise<TableDescription> {
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) return Promise.reject(new Error(`无法解析的节点 id: ${nodeId}`))
+    if (parsed.adapterId === null) {
+      return Promise.reject(new Error('连接节点没有表结构，请选择具体的表或视图'))
+    }
+    const conn = this.#connections.get(parsed.connectionId)
+    if (!conn) return Promise.reject(new Error(`连接不存在或已断开: ${parsed.connectionId}`))
+    return conn.host.describeTable(parsed.adapterId)
+  }
+
+  /** 应用退出时统一回收所有宿主进程。 */
+  async disposeAll(): Promise<void> {
+    const all = [...this.#connections.values()]
+    this.#connections.clear()
+    // 与 remove 同理：账本不能留，否则「退出过一次」就成了泄漏的隐藏来源。
+    this.#openCursors.clear()
+    await Promise.all(all.map((c) => c.host.close().catch(() => undefined)))
+  }
+
+  // ---- 结果集（第二阶段） ----
+
+  /**
+   * 执行 SQL，返回第一页。
+   *
+   * `nodeId` 复用树节点的编码来指明「在哪个连接上执行」。
+   * 这里允许 connector 根节点（`connection:c1`，adapterId === null）——
+   * 用户在连接上右键「执行 SQL」时没有具体表，仍应能跑任意语句。
+   */
+  async runQuery(nodeId: string, sql: string, options?: QueryOptions): Promise<QueryResult> {
+    const { conn } = this.#resolveConnection(nodeId)
+    const result = await conn.host.query(sql, options)
+
+    // 把 adapter 的原生游标 id 包上连接归属后再交给 UI（理由见 CursorId 注释）。
+    // 同时登记进账本，让「这个连接还有游标没关」在主进程侧可见。
+    if (result.cursorId !== null && result.cursorId !== undefined) {
+      const scoped = CursorId.scope(conn.id, result.cursorId)
+      this.#trackCursor(conn.id, result.cursorId)
+      return { ...result, cursorId: scoped }
+    }
+    return result
+  }
+
+  /** 从游标按偏移量取一页。入参若是坏 id 会立刻报错，不会挂死。 */
+  async fetchResultPage(cursorId: string, offset: number, limit: number): Promise<ResultPage> {
+    const { conn, rawCursorId } = this.#resolveCursor(cursorId)
+    return conn.host.fetchResultPage(rawCursorId, offset, limit)
+  }
+
+  /**
+   * 释放游标。
+   *
+   * 幂等：重复关闭、关闭一个不存在的游标都不报错。
+   * 这与宿主侧 `closeCursor` 不做 requireConnected 的决定是配套的——
+   * 网格关闭时会无条件调用它，这条路径上任何噪音错误都会变成用户可见的弹窗。
+   */
+  async closeCursor(cursorId: string): Promise<void> {
+    const { conn, rawCursorId } = this.#resolveCursor(cursorId)
+    try {
+      await conn.host.closeCursor(rawCursorId)
+    } finally {
+      // 即使宿主侧关闭失败也要销账：那条游标要么已经没了，
+      // 要么随着宿主退出而消失，留着账本条目只会被误判成泄漏。
+      this.#openCursors.get(conn.id)?.delete(rawCursorId)
+    }
+  }
+
+  /**
+   * 便捷方法：预览一张表 / 视图。
+   *
+   * ===== 为什么不拼字符串 =====
+   *
+   * 表名来自数据库元数据，但用户可以创建任意名字的表——包含双引号、分号、
+   * 甚至 `"; DROP TABLE users; --` 这种名字（SQLite 完全允许）。
+   * 直接 `${name}` 拼进 SELECT 就是一个注入面。
+   * 所以必须走方言的 `quoteIdentifier`，它内部把 `"` 翻倍成 `""`，破坏语句结构。
+   *
+   * ===== 为什么用 Lazy 的 limit 而不是把整个结果集拉回来 =====
+   *
+   * 预览的语义是「看一眼前 N 行」。用方言的 `buildLimitClause` 生成
+   * `LIMIT n OFFSET 0` 交给数据库执行，而不是拉全量再在内存里截断——
+   * 后者在百万行表上会直接把主进程内存打爆（这也是 core/resultset.ts 里
+   * 「不做 DBeaver 那套滚动条以已加载行数为准」的原因）。
+   *
+   * 表名从 nodeId 里取：adapter 的 id 形如 `table:users` / `view:v`
+   * （编码规则见 `src/drivers/sqlite/ids.ts`，只切第一个冒号，名字原样保留）。
+   * 这里直接用 `nodeId` 的 adapterId 部分再切掉前缀——不 import adapter，
+   * 因为那会把一个持有连接的实现拖进主进程（见文件头 import 注释）。
+   */
+  async previewTable(nodeId: string, limit = 200): Promise<QueryResult> {
+    const { conn, adapterId } = this.#resolveConnection(nodeId)
+    if (adapterId === null) {
+      throw new Error('连接节点不能预览，请选择具体的表或视图')
+    }
+
+    // 只切第一个冒号：与 ids.ts 的 `table:<name>` 编码规则一致，
+    // 所以名字里含冒号也能正确还原（`table:a:b` → `a:b`）。
+    const sep = adapterId.indexOf(':')
+    if (sep <= 0) throw new Error(`无法识别的对象 id: ${adapterId}`)
+    const kind = adapterId.slice(0, sep)
+    const name = adapterId.slice(sep + 1)
+
+    if (kind !== 'table' && kind !== 'view') {
+      throw new Error(`只能预览表或视图，收到: ${kind}`)
+    }
+    if (name === '') throw new Error(`对象名为空，无法预览: ${adapterId}`)
+
+    const quoted = quoteIdentifierWith(name, conn.info.quoting)
+    // 只生成「取这张表」的语句，**不自己拼 LIMIT**：
+    // 分页语法（LIMIT/OFFSET、TOP、FETCH FIRST…）是方言知识，
+    // 主进程猜它就等于把方言差异复制一份到 main 里，迟早和驱动侧不一致。
+    // 行数限制通过 QueryOptions.limit 交给 adapter —— 它才是唯一懂自己方言的那个。
+    const sql = `SELECT * FROM ${quoted}`
+    const result = await this.runQuery(nodeId, sql, { limit })
+
+    // ===== 兜底校验：确认 adapter 真的落实了 limit =====
+    //
+    // 上面的设计把「怎么限行」完全交给了 adapter，这是对的（方言知识不该复制到 main）。
+    // 但它有一个失败模式：某个 adapter 忽略了 `options.limit`，
+    // 于是 previewTable 悄悄退化成「拉全量」——而这正是剖析报告「陷阱 5」里
+    // 要防的事（跨进程一次性搬运百万行会把内存打爆）。
+    //
+    // 主进程在这里不可能纠正它（不重查、不猜方言），但**必须让它可见**：
+    // 一旦返回行数超出请求上限，说明契约被违反了。宁可抛错让人发现，
+    // 也不要静默返回一个已经吞掉内存的结果。
+    const effectiveLimit = Math.max(1, Math.floor(limit))
+    if (result.returned > effectiveLimit) {
+      throw new Error(
+        `方言 "${conn.info.id}" 的 adapter 违反了 limit 契约：请求 ${effectiveLimit} 行，` +
+          `实际返回 ${result.returned} 行。预览功能会因此退化为全量拉取，已中止。` +
+          `这属于 adapter 实现缺陷，不是 UI 问题。`
+      )
+    }
+    return result
+  }
+
+  // ---- 在线编辑与事务（第三阶段） ----
+
+  /**
+   * 应用一批行更新（**不自动提交**）。
+   *
+   * `tableNodeId` 必须是表节点（带连接作用域）；`adapterId` 原样传给宿主，
+   * 由 adapter 自己解析 `table:<name>`——主进程不解析驱动私有的 id 编码，
+   * 这是「驱动知识只存在于驱动里」这条边界的直接结果。
+   *
+   * 提交语义：applyEdits 成功后连接进入事务，必须显式 commit/rollback。
+   * 这个"不自动提交"来自 DBeaver 的 Persister（构造即 autocommit=false），
+   * 也是"在线编辑"与"随便跑条 UPDATE"最重要的区别：用户要有反悔的机会。
+   */
+  async applyEdits(
+    tableNodeId: string,
+    updates: readonly RowUpdate[]
+  ): Promise<EditApplyResult> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) {
+      throw new Error('连接节点不能提交编辑，请选择具体的表')
+    }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      throw new Error('没有要提交的修改（updates 为空）')
+    }
+    return conn.host.applyEdits(adapterId, updates)
+  }
+
+  /**
+   * 提交事务。
+   *
+   * 无活动事务时**不静默成功**：那说明 UI 状态与后端不一致，
+   * 静默成功会让"用户以为保存了、其实什么都没发生"这种最坏的 bug 悄悄发生。
+   */
+  async commitTransaction(nodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(nodeId)
+    return conn.host.commitTransaction()
+  }
+
+  /** 回滚事务。幂等——重复回滚、回滚一个没有事务的连接都不该报错。 */
+  async rollbackTransaction(nodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(nodeId)
+    return conn.host.rollbackTransaction()
+  }
+
+  /**
+   * 查询事务状态。
+   *
+   * `nodeId` 只用来定位连接：事务是**连接级**的状态，宿主进程内的
+   * adapter 实例持有它。因此这里传连接根节点（`connection:c1`）也可以，
+   * UI 不必先知道某张表。
+   */
+  async transactionState(nodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(nodeId)
+    return conn.host.transactionState()
+  }
+
+  /** 登记一个游标到账本。 */
+  #trackCursor(connectionId: string, rawCursorId: string): void {
+    let set = this.#openCursors.get(connectionId)
+    if (!set) {
+      set = new Set<string>()
+      this.#openCursors.set(connectionId, set)
+    }
+    set.add(rawCursorId)
+  }
+
+  /** 把 UI 传来的 scoped cursorId 还原成「连接 + adapter 原生 id」。 */
+  #resolveCursor(cursorId: string): { conn: LiveConnection; rawCursorId: string } {
+    const parsed = CursorId.parse(cursorId)
+    if (!parsed) {
+      throw new Error(
+        `无法解析的游标 id: ${cursorId}（游标 id 必须原样使用 runQuery 返回的值，不要自行拼接）`
+      )
+    }
+    const conn = this.#connections.get(parsed.connectionId)
+    if (!conn) {
+      throw new Error(`游标所属的连接已断开: ${parsed.connectionId}（游标随宿主进程一起失效）`)
+    }
+    return { conn, rawCursorId: parsed.rawCursorId }
+  }
+
+  /** 诊断用：当前连接数 / 游标账本条目数。让泄漏可以被观测而不是靠猜。 */
+  stats(): { connections: number; openCursors: number } {
+    let cursors = 0
+    for (const set of this.#openCursors.values()) cursors += set.size
+    return { connections: this.#connections.size, openCursors: cursors }
+  }
+}
