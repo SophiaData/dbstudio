@@ -126,14 +126,14 @@ if (clickInfo.found) {
 }
 check('在树中找到 people 并点击', clickInfo.found, JSON.stringify(clickInfo))
 try {
-  await win.waitForFunction(() => document.querySelectorAll('#result-grid .grid-row').length > 0, { timeout: 15000 })
+  await win.waitForFunction(() => document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row').length > 0, { timeout: 15000 })
 } catch {
   const diag = await win.evaluate(() => ({
     status: document.getElementById('status-bar')?.textContent,
-    gridHidden: (document.getElementById('result-grid')).hidden,
-    rows: document.querySelectorAll('#result-grid .grid-row').length,
-    empties: [...document.querySelectorAll('#result-grid .grid-empty')].map((e) => e.textContent),
-    toolbar: [...document.querySelectorAll('#result-grid .grid-toolbar button')].map((b) => b.textContent?.trim())
+    gridHidden: (document.querySelector('.tab-pane:not([hidden]) .tab-grid-root')).hidden,
+    rows: document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row').length,
+    empties: [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-empty')].map((e) => e.textContent),
+    toolbar: [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].map((b) => b.textContent?.trim())
   }))
   console.log('  [诊断]', JSON.stringify(diag))
   throw new Error('结果集未渲染，见上方诊断')
@@ -141,7 +141,7 @@ try {
 await win.waitForTimeout(500)
 
 const buttons = await win.evaluate(() =>
-  [...document.querySelectorAll('#result-grid .grid-toolbar button')].map((b) => ({
+  [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].map((b) => ({
     text: b.textContent?.trim(),
     disabled: b.disabled
   }))
@@ -154,7 +154,7 @@ check('删除按钮初始禁用（未选行）', buttons.find((b) => b.text?.inc
 // ---------------------------------------------------------------------------
 console.log('\n[3] 排序（点列头）')
 const sortResult = await win.evaluate(() => {
-  const cells = [...document.querySelectorAll('#result-grid .grid-header-inner .grid-cell')]
+  const cells = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-header-inner .grid-cell')]
   // cells[0] 是 # 角格，cells[2] 是 name 列
   const nameCell = cells[2]
   if (!nameCell) return { clicked: false }
@@ -164,8 +164,8 @@ const sortResult = await win.evaluate(() => {
 check('点击 name 列头', sortResult.clicked)
 await win.waitForTimeout(1500)
 const sortedState = await win.evaluate(() => {
-  const arrows = [...document.querySelectorAll('#result-grid .grid-sort-arrow')].map((e) => e.textContent)
-  const firstRow = document.querySelector('#result-grid .grid-row')
+  const arrows = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-sort-arrow')].map((e) => e.textContent)
+  const firstRow = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-row')
   const vals = firstRow ? [...firstRow.querySelectorAll('.grid-cell')].map((c) => c.textContent) : []
   return { arrows, vals }
 })
@@ -176,7 +176,7 @@ await win.screenshot({ path: join(shotDir, 'f02-排序.png') })
 // ---------------------------------------------------------------------------
 console.log('\n[4] 统计行数')
 const countClicked = await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find((x) =>
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find((x) =>
     x.textContent?.includes('统计')
   )
   if (!b) return false
@@ -191,7 +191,7 @@ check('状态栏显示总行数 3', /\b3\b/.test(statusAfterCount), JSON.stringi
 // ---------------------------------------------------------------------------
 console.log('\n[5] CSV 导出按钮')
 const csvBtn = await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find((x) =>
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find((x) =>
     x.textContent?.includes('CSV') || x.textContent?.includes('导出')
   )
   return b ? { text: b.textContent?.trim(), title: b.title } : null
@@ -204,7 +204,7 @@ check('导出按钮标明「仅已加载」范围',
 // ---------------------------------------------------------------------------
 console.log('\n[6] 新增行（走真实模态表单）')
 await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find((x) =>
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find((x) =>
     x.textContent?.includes('新增行')
   )
   ;(b).click()
@@ -244,7 +244,7 @@ console.log('  [插入诊断]', JSON.stringify(insertDiag))
 // 早先我直接去读数据库文件断言，结果读到的是提交前的旧数据，误判成「插入失败」——
 // 那不是应用的问题，是测试没走完流程。
 const committed = await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find(
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find(
     (x) => x.textContent?.trim() === '提交'
   )
   if (!b || b.disabled) return false
@@ -270,7 +270,7 @@ dbBeforeDelete.close()
 console.log(`  [基线] 删除前行数 = ${countBeforeDelete}`)
 // 先点选一行（第 1 行）
 const selected = await win.evaluate(() => {
-  const row = document.querySelector('#result-grid .grid-row')
+  const row = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-row')
   const cell = row?.querySelectorAll('.grid-cell')[2]
   if (!cell) return false
   ;(cell).click()
@@ -280,7 +280,7 @@ check('点选一行', selected)
 await win.waitForTimeout(400)
 
 const delEnabled = await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find((x) =>
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find((x) =>
     x.textContent?.includes('删除')
   )
   return b ? !b.disabled : false
@@ -288,14 +288,14 @@ const delEnabled = await win.evaluate(() => {
 check('选中后「删除选中行」可用', delEnabled)
 
 await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find((x) =>
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find((x) =>
     x.textContent?.includes('删除')
   )
   ;(b).click()
 })
 await win.waitForTimeout(2000)
 const delCommitted = await win.evaluate(() => {
-  const b = [...document.querySelectorAll('#result-grid .grid-toolbar button')].find(
+  const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-toolbar button')].find(
     (x) => x.textContent?.trim() === '提交'
   )
   if (!b || b.disabled) return false

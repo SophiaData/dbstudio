@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
 import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
+import type { TableCreateSpec } from '../core/model'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
@@ -189,7 +190,11 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       const tree = document.getElementById('tree-rows');
       const spacer = document.getElementById('tree-spacer');
       const status = document.getElementById('status-bar');
-      const grid = document.getElementById('result-grid');
+      // 多标签页改造后，结果区容器是 #result-tabbar + #result-stack，
+      // 原来的 #result-grid 已不存在。自检断言必须跟着改，
+      // 否则会误报「界面坏了」——实际是断言过时（这次就是这么发现的）。
+      const tabbar = document.getElementById('result-tabbar');
+      const resultStack = document.getElementById('result-stack');
       const sqlInput = document.getElementById('sql-input');
       const api = window.dbstudio;
       // 结果集相关的 API 必须全部就位——白名单从 7 扩到 11 时，
@@ -204,6 +209,10 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       // 会把连接永久卡在未提交事务里并占着行锁。
       const editApi = api ? ['applyEdits','commitTransaction','rollbackTransaction','transactionState']
         .filter(k => typeof api[k] === 'function') : [];
+      // 第三轮：DDL 五件 + 编辑连接
+      const ddlApi = api ? ['createTable','dropTable','createView','dropView','renameTable']
+        .filter(k => typeof api[k] === 'function') : [];
+      const hasUpdateConnection = api && typeof api.updateConnection === 'function';
       return {
         title: document.title,
         hasTree: !!tree,
@@ -214,11 +223,14 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
         spacerHeight: spacer ? spacer.style.height : null,
         statusText: status ? status.textContent : null,
         // 结果集区域必须存在（虽然初始 hidden）
-        hasGrid: !!grid,
+        hasTabbar: !!tabbar,
+        hasResultStack: !!resultStack,
         hasSqlInput: !!sqlInput,
         gridApiCount: gridApi.length,
         persistApiCount: persistApi.length,
-        editApiCount: editApi.length
+        editApiCount: editApi.length,
+        ddlApiCount: ddlApi.length,
+        hasUpdateConnection: !!hasUpdateConnection
       };
     })()`)
     // 把 safeStorage 探针结果合并进 SMOKE_RESULT：DOM 侧与主进程侧的信息
@@ -236,11 +248,14 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       apiInjected: boolean
       renderedRows: number
       statusText: string | null
-      hasGrid: boolean
+      hasTabbar: boolean
+      hasResultStack: boolean
       hasSqlInput: boolean
       gridApiCount: number
       persistApiCount: number
       editApiCount: number
+      ddlApiCount: number
+      hasUpdateConnection: boolean
     }
     const ok =
       r.hasTree &&
@@ -248,13 +263,17 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       r.apiInjected &&
       typeof r.renderedRows === 'number' &&
       // 结果集：DOM 容器 + SQL 输入框 + 4 个新 API 必须齐全
-      r.hasGrid &&
+      r.hasTabbar &&
+      r.hasResultStack &&
       r.hasSqlInput &&
       r.gridApiCount === 4 &&
       // 持久化：connectConnection / disconnectConnection 两个新方法必须注入
       r.persistApiCount === 2 &&
       // 在线编辑：4 个方法必须齐全（缺 rollback 会让连接卡在未提交事务里）
       r.editApiCount === 4 &&
+      // DDL 五件齐全 + 编辑连接可用
+      r.ddlApiCount === 5 &&
+      r.hasUpdateConnection &&
       // safeStorage 走不通时**不算自检失败**：Linux 无密钥服务是合法环境，
       // 此时功能降级为"不保存密码"而非崩溃。所以这里只要求探针真的跑过
       // （字段存在），可用性本身由 Lead 读 SMOKE_RESULT 判断。
@@ -372,7 +391,21 @@ function registerIpc(): void {
     ) => getManager().deleteRows(tableNodeId, keys),
     countRows: async (tableNodeId: string) => getManager().countRows(tableNodeId),
     fetchCellValue: async (cursorId: string, rowIndex: number, columnIndex: number) =>
-      getManager().fetchCellValue(cursorId, rowIndex, columnIndex)
+      getManager().fetchCellValue(cursorId, rowIndex, columnIndex),
+    // DDL 与编辑连接（第六阶段）。DDL 可能因锁等待而慢，沿用 60s。
+    createTable: async (connectionId: string, spec: TableCreateSpec) =>
+      getManager().createTable(connectionId, spec),
+    dropTable: async (nodeId: string) => getManager().dropTable(nodeId),
+    createView: async (connectionId: string, viewName: string, selectSql: string) =>
+      getManager().createView(connectionId, viewName, selectSql),
+    dropView: async (nodeId: string) => getManager().dropView(nodeId),
+    renameTable: async (nodeId: string, newName: string) =>
+      getManager().renameTable(nodeId, newName),
+    updateConnection: async (
+      connectionId: string,
+      config: Partial<ConnectionConfig>,
+      secret?: string
+    ) => getManager().updateConnection(connectionId, config, secret)
   }
 
   // 逐个通道注册，而不是用一个万能通道 + 方法名字符串。
@@ -439,6 +472,26 @@ function registerIpc(): void {
     IPC.fetchCellValue,
     (_e, cursorId: string, rowIndex: number, columnIndex: number) =>
       api.fetchCellValue(cursorId, rowIndex, columnIndex)
+  )
+
+  // ---- DDL 与编辑连接通道（第六阶段新增） ----
+  ipcMain.handle(IPC.createTable, (_e, connectionId: string, spec: TableCreateSpec) =>
+    api.createTable(connectionId, spec)
+  )
+  ipcMain.handle(IPC.dropTable, (_e, nodeId: string) => api.dropTable(nodeId))
+  ipcMain.handle(
+    IPC.createView,
+    (_e, connectionId: string, viewName: string, selectSql: string) =>
+      api.createView(connectionId, viewName, selectSql)
+  )
+  ipcMain.handle(IPC.dropView, (_e, nodeId: string) => api.dropView(nodeId))
+  ipcMain.handle(IPC.renameTable, (_e, nodeId: string, newName: string) =>
+    api.renameTable(nodeId, newName)
+  )
+  ipcMain.handle(
+    IPC.updateConnection,
+    (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: string) =>
+      api.updateConnection(connectionId, config, secret)
   )
 }
 

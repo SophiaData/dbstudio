@@ -17,7 +17,7 @@
 
 import type { ConnectionConfig } from './dialect'
 import type { TestConnectionResult, DialectInfo } from './driver'
-import type { DriverCapabilities, ObjectRef, TableDescription } from './model'
+import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
 import type { CellValue } from './resultset'
@@ -53,6 +53,16 @@ export interface ConnectionSummary {
    * `null` 表示该连接本就不需要密码（例如 SQLite 文件库）。
    */
   readonly secretStored: boolean | null
+  /**
+   * 该连接的配置参数（**不含密码**）。
+   *
+   * 为什么必须暴露：编辑连接时必须能把现有值回填到表单里。
+   * 早先没有这个字段，编辑对话框只能显示空白输入框——
+   * 用户看不到当前路径，等于"盲改"，一不留神就把能用的配置改坏。
+   *
+   * 密码**不在这里**（走独立的加密通道，见 secretStored）。
+   */
+  readonly options: Readonly<Record<string, string | number | boolean>>
 }
 
 export interface DbStudioApi {
@@ -177,6 +187,42 @@ export interface DbStudioApi {
    * `MAX_CELL_TEXT_CHARS`，这个接口按需取全文）。
    */
   fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue>
+
+  // ---- DDL 与编辑连接（第六阶段） ----
+
+  /**
+   * 建表。成功后**必须立刻能在 listChildren 里看到**（DDL 已生效，不在未提交事务里）。
+   * `spec` 见 `core/model.ts` 的 `TableCreateSpec`。
+   */
+  createTable(connectionId: string, spec: TableCreateSpec): Promise<void>
+
+  /**
+   * 删表。`nodeId` 是**节点 id**（`connection:c1|table:users`）。
+   * 主进程只解析连接归属，完整 adapterId 交给宿主，由 adapter 解析表名。
+   */
+  dropTable(nodeId: string): Promise<void>
+
+  /** 建视图：`CREATE VIEW <viewName> AS <selectSql>`。 */
+  createView(connectionId: string, viewName: string, selectSql: string): Promise<void>
+
+  /** 删视图。`nodeId` 是节点 id（`connection:c1|view:v`）。 */
+  dropView(nodeId: string): Promise<void>
+
+  /** 重命名表。`nodeId` 是节点 id（`connection:c1|table:users`）。 */
+  renameTable(nodeId: string, newName: string): Promise<void>
+
+  /**
+   * 编辑已保存的连接（改配置 / 改密码）。
+   *
+   * **语义**：更新落盘配置 → 若当前已连接则断开重连（否则新配置不生效，
+   * 用户会困惑"我改了为什么还连旧的"）→ 返回新的 summary。
+   * `config` 是部分更新（只传要改的字段）。
+   */
+  updateConnection(
+    connectionId: string,
+    config: Partial<ConnectionConfig>,
+    secret?: string
+  ): Promise<ConnectionSummary>
 }
 
 /** preload 注入到 window 上的全局名。 */
@@ -204,7 +250,13 @@ export const IPC = {
   insertRow: 'dbstudio:insertRow',
   deleteRows: 'dbstudio:deleteRows',
   countRows: 'dbstudio:countRows',
-  fetchCellValue: 'dbstudio:fetchCellValue'
+  fetchCellValue: 'dbstudio:fetchCellValue',
+  createTable: 'dbstudio:createTable',
+  dropTable: 'dbstudio:dropTable',
+  createView: 'dbstudio:createView',
+  dropView: 'dbstudio:dropView',
+  renameTable: 'dbstudio:renameTable',
+  updateConnection: 'dbstudio:updateConnection'
 } as const
 
 /**

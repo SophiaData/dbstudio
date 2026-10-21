@@ -46,10 +46,21 @@
           <div id="detail-empty">在左侧选择一张表或视图，或在上方执行 SQL。</div>
           <div id="detail-content" hidden></div>
           <!--
-            结果集网格。由 grid.ts 接管其内部结构（toolbar / banner / header / viewport）。
-            放两个都存在的容器: 详情是「结构」，网格是「数据」，可来回切换。
+            结果区：多标签容器。由 tabs.ts 接管。
+               #result-tabbar     标签栏（横向可滚动），右侧固定「导出全部」按钮
+               #result-stack      标签内容栈：每个标签一个 .tab-pane，靠 hidden 切换
+               每个标签内部是一个独立的 ResultGrid 实例（grid.ts），
+               互不干扰：各自的 cursor / 排序 / 列宽 / 脏数据。
           -->
-          <div id="result-grid" hidden></div>
+          <div id="result-area" hidden>
+            <div id="result-tabbar">
+              <div id="result-tabs-scroll" role="tablist" aria-label="结果集标签"></div>
+              <button id="btn-export-all" type="button" disabled
+                      title="导出当前标签的全部行（会重新执行一次该查询）">导出全部</button>
+            </div>
+            <div id="result-stack"></div>
+            <div id="result-tabs-empty">在左侧点击一张表，或执行 SQL，结果会以新标签打开。</div>
+          </div>
         </section>
       </main>
 

@@ -6,7 +6,7 @@
  * 直接暴露 `ipcRenderer` 等于把整个 IPC 面全开：页面里任何一段代码
  * （包括被注入的、或某个第三方脚本）都能调用任意通道。
  *
- * 这里显式枚举 **21 个**方法（第一阶段 7 + 第二阶段 4 + 第三阶段 4 + 第四阶段 2 + 第五阶段 4），
+ * 这里显式枚举 **27 个**方法（第一~五阶段 21 + 第六阶段 DDL/编辑连接 6），
  * 多一个都没有。这份清单与 `DbStudioApi` 是同一份类型：主进程实现它、
  * preload 转发它、渲染进程消费它、测试也验它，任何一边改了签名，`tsc` 会立刻报错。
  *
@@ -68,12 +68,26 @@
  *
  * 四个参数形状都是纯结构化数据（`CellValue` 对象 / 字符串 / 数字），可安全过
  * contextBridge；同样**不接受函数、不接受回调**。
+ *
+ * ===== 第六阶段为什么扩到 27 个 =====
+ *
+ * DDL 五条 + 编辑连接一条。它们对应两个"日常立刻撞上"的缺口：
+ *   建不了表、删不了表（界面里连一张表都造不出来）；
+ *   已保存的连接改不了参数（路径填错只能删掉重建，等于丢配置）。
+ *
+ *   createTable / dropTable     建表/删表——DDL 的最小可用集合
+ *   createView / dropView       视图同理，必须和能力成对出现
+ *   renameTable                 重命名是高频操作；没有它只能建新表+搬数据
+ *   updateConnection            编辑已保存连接（改配置/改密码），会话自动重连生效
+ *
+ * 六个参数形态：连接 id / 节点 id / `TableCreateSpec`（纯数据对象）/ 字符串。
+ * `TableCreateSpec` 里只有字符串、布尔、数字与数组，可安全结构化克隆。
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
-import type { ObjectRef, TableDescription } from '../core/model'
+import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
 import type { CellValue, QueryOptions, QueryResult, ResultPage } from '../core/resultset'
 import type {
@@ -173,7 +187,43 @@ const api: DbStudioApi = {
    * 解决"超长文本被截断到 1000 字符看不懂"的问题。
    */
   fetchCellValue: (cursorId: string, rowIndex: number, columnIndex: number) =>
-    ipcRenderer.invoke(IPC.fetchCellValue, cursorId, rowIndex, columnIndex) as Promise<CellValue>
+    ipcRenderer.invoke(IPC.fetchCellValue, cursorId, rowIndex, columnIndex) as Promise<CellValue>,
+
+  // ---- DDL 与编辑连接（第六阶段） ----
+
+  /** 建表。成功后 listChildren 立刻能看到（DDL 已提交）。 */
+  createTable: (connectionId: string, spec: TableCreateSpec) =>
+    ipcRenderer.invoke(IPC.createTable, connectionId, spec) as Promise<void>,
+
+  /** 删表。`nodeId` 是节点 id（如 `connection:c1|table:users`）。 */
+  dropTable: (nodeId: string) => ipcRenderer.invoke(IPC.dropTable, nodeId) as Promise<void>,
+
+  /** 建视图：`CREATE VIEW <viewName> AS <selectSql>`。 */
+  createView: (connectionId: string, viewName: string, selectSql: string) =>
+    ipcRenderer.invoke(IPC.createView, connectionId, viewName, selectSql) as Promise<void>,
+
+  /** 删视图。`nodeId` 是节点 id。 */
+  dropView: (nodeId: string) => ipcRenderer.invoke(IPC.dropView, nodeId) as Promise<void>,
+
+  /** 重命名表。`nodeId` 是节点 id，`newName` 是新表名。 */
+  renameTable: (nodeId: string, newName: string) =>
+    ipcRenderer.invoke(IPC.renameTable, nodeId, newName) as Promise<void>,
+
+  /**
+   * 编辑已保存连接。若当前已连接，主进程内部会断开重连，使新配置生效；
+   * 原本断开的连接更新后仍保持断开（不自作主张连库）。
+   */
+  updateConnection: (
+    connectionId: string,
+    config: Partial<ConnectionConfig>,
+    secret?: string
+  ) =>
+    ipcRenderer.invoke(
+      IPC.updateConnection,
+      connectionId,
+      config,
+      secret
+    ) as Promise<ConnectionSummary>
 }
 
 contextBridge.exposeInMainWorld(API_GLOBAL, api)

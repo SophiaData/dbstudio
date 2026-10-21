@@ -11,7 +11,7 @@ import type { ConnectionConfig } from '../core/dialect'
 import type { DialectField, DialectInfo } from '../core/driver'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
-import { ResultGrid } from './grid'
+import { ResultTabs } from './tabs'
 
 declare global {
   interface Window {
@@ -55,11 +55,19 @@ async function boot(): Promise<void> {
     return
   }
 
-  // ---- 结果集网格接线 ----
-  const grid = new ResultGrid(el('result-grid'), {
-    onStatus: (t, isErr) => setStatus(t, isErr)
-  })
-  grid.attachApi(api)
+  // ---- 结果集多标签接线 ----
+  //
+  // 之前这里是 `new ResultGrid(...)` 单实例。现在改成由 ResultTabs 统一管理：
+  // 每查一次就**新开**一个标签，标签内部各自持有一个独立的 ResultGrid 实例
+  // （见 tabs.ts 文件头：改外层、多实例化，绝不复制 grid.ts 的代码）。
+  const tabs = new ResultTabs(
+    el('result-tabs-scroll'),
+    el('result-stack'),
+    el('result-tabs-empty'),
+    el<HTMLButtonElement>('btn-export-all'),
+    api,
+    { onStatus: (t, isErr) => setStatus(t, isErr) }
+  )
 
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
@@ -67,15 +75,16 @@ async function boot(): Promise<void> {
   const showPane = (which: 'detail' | 'grid' | 'empty'): void => {
     el('detail-empty').hidden = which !== 'empty'
     el('detail-content').hidden = which !== 'detail'
-    el('result-grid').hidden = which !== 'grid'
+    el('result-area').hidden = which !== 'grid'
   }
 
-  /** 选中表/视图 → 打开结果集网格（同时会拿到 hasUniqueKey 判定可编辑性）。 */
+  /** 选中表/视图 → **新开**一个结果标签（不再替换当前结果）。 */
   const openTableGrid = async (ref: ObjectRef): Promise<void> => {
     showPane('grid')
     try {
       const desc = await api.describeTable(ref.id)
-      await grid.openTable(ref, desc)
+      // 来源（ref + desc）在调用点记下，tabs 会把它绑定到该标签，供「导出全部」重查。
+      await tabs.openTable(ref, desc)
     } catch (e) {
       setStatus(`打开表失败：${errText(e)}`, true)
     }
@@ -124,7 +133,8 @@ async function boot(): Promise<void> {
       return
     }
     showPane('grid')
-    await grid.runSql(currentConnectionNodeId, sql)
+    // 每次执行都**新开**一个标签（标签名取 SQL 前若干字符），而不是替换上次结果。
+    await tabs.runSql(currentConnectionNodeId, sql)
   }
 
   el('btn-run-sql').addEventListener('click', () => void runSql())

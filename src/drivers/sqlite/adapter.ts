@@ -46,6 +46,14 @@ import {
   type SqliteBind
 } from './edits'
 import {
+  buildCreateTableSql,
+  buildCreateViewSql,
+  buildDropTableSql,
+  buildDropViewSql,
+  buildRenameTableSql
+} from './ddl'
+import type { TableCreateSpec } from './ddl-types'
+import {
   buildCountSql,
   buildDeleteParams,
   buildDeleteSql,
@@ -821,6 +829,119 @@ export class SqliteDriverAdapter implements DriverAdapter {
   }
 
   /**
+   * 建表。
+   *
+   * ===== 为什么 DDL 要"执行后立即提交" =====
+   *
+   * 我们的模型是显式事务（`applyEdits` 之后等 UI 点"应用"才 commit）。
+   * 但 DDL 不一样：用户点"建表"，期望的是**立刻生效**。
+   * 如果建表留在未提交事务里，`listChildren` 走的是同一连接，
+   * 理论上能看到未提交的 schema——但只要我们同时存在"用户上一次编辑还没提交"，
+   * 情形就会变得难以解释；更糟的是宿主进程一断，这个未提交的表就凭空消失，
+   * 用户会以为"建表失败"，然后反复重建。
+   * 所以 DDL 一律在自己的动作里提交，绝不把结构变更留在半路。
+   *
+   * 注意：若调用方**已经**在事务里（比如连续做几步 DDL），这里就不再单独 BEGIN/COMMIT，
+   * 而是把提交交给外层——否则会把用户其它未提交的改动一起提交掉。
+   * 返回前会报告 `#commitDdlIfSelfManaged` 的判断依据，见该函数注释。
+   */
+  async createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
+    // connectionId 用不到：一个 adapter 实例只服务一个连接（见 core/driver.ts 的说明）。
+    // 显式 void 掉，避免 lint 报"未使用形参"时有人误以为可以删。
+    void connectionId
+    const db = this.#requireDb()
+    /**
+     * 语句文本在这一步就构造完（含全部白名单校验）。
+     * 校验失败会在真正动数据库之前抛出，不会留下半成品状态。
+     */
+    const sql = buildCreateTableSql(this.dialect.quoteIdentifier, spec)
+    this.#runDdl(db, sql, {
+      action: '建表',
+      target: spec.name,
+      alreadyExists: /already exists/i,
+      alreadyExistsMessage: `表「${spec.name}」已存在（already exists）。`
+    })
+  }
+
+  /** 删表。不做 IF EXISTS：静默成功会让用户以为删掉了一个其实不存在的表。 */
+  async dropTable(nodeId: string): Promise<void> {
+    const db = this.#requireDb()
+    const tableName = this.#requireObjectName(nodeId, 'table', '删表')
+    const sql = buildDropTableSql(this.dialect.quoteIdentifier, tableName)
+    this.#runDdl(db, sql, {
+      action: '删表',
+      target: tableName,
+      missing: /no such table/i,
+      missingMessage: `表「${tableName}」不存在（no such table）。`
+    })
+  }
+
+  /**
+   * 建视图。
+   *
+   * `selectSql` 必须先是**只读查询**——这里复用 `prepareReadOnlyStatement`
+   * （与查询窗口同一套扫描器）：它会拒掉写操作与多语句。
+   * 复用而不是自写一份判断，是为了避免"两条规则不一致"造成的漏网。
+   *
+   * 注意视图定义不能绑定参数，所以 `selectSql` 里的字面量只能是用户自己写的；
+   * 我们只保证它是"一条只读 SELECT"，不替它改写。
+   */
+  async createView(connectionId: string, viewName: string, selectSql: string): Promise<void> {
+    void connectionId // 同上：连接由实例承载
+    const db = this.#requireDb()
+    this.#requireName(viewName, '视图名')
+    // 校验失败抛 bad_params；通过后拿到的是"去掉尾部多余内容"的单条语句
+    const checkedSql = prepareReadOnlyStatement(selectSql)
+    const sql = buildCreateViewSql(this.dialect.quoteIdentifier, viewName, checkedSql)
+    this.#runDdl(db, sql, {
+      action: '建视图',
+      target: viewName,
+      alreadyExists: /already exists/i,
+      alreadyExistsMessage: `视图「${viewName}」已存在（already exists）。`
+    })
+  }
+
+  /** 删视图。不做 IF EXISTS。 */
+  async dropView(nodeId: string): Promise<void> {
+    const db = this.#requireDb()
+    const viewName = this.#requireObjectName(nodeId, 'view', '删视图')
+    const sql = buildDropViewSql(this.dialect.quoteIdentifier, viewName)
+    this.#runDdl(db, sql, {
+      action: '删视图',
+      target: viewName,
+      missing: /no such view/i,
+      missingMessage: `视图「${viewName}」不存在（no such view）。`
+    })
+  }
+
+  /**
+   * 重命名表。
+   *
+   * 目标名已存在时**让数据库报错**再包装：SQLite 自己会做重名检查
+   * （包括与索引/视图的重名），我们抢先判断反而可能漏掉边界情形。
+   * 这里只负责把它的英文错误翻译成用户看得懂的话。
+   */
+  async renameTable(nodeId: string, newName: string): Promise<void> {
+    const db = this.#requireDb()
+    const oldName = this.#requireObjectName(nodeId, 'table', '重命名表')
+    this.#requireName(newName, '新表名')
+    const sql = buildRenameTableSql(this.dialect.quoteIdentifier, oldName, newName)
+    /**
+     * SQLite 对"重命名到已存在名字"的原文是
+     * `there is already another table or index with this name: r_b`
+     * ——注意它说的是 "already another ... with this name"，
+     * 而不是 create 那种 "already exists"。所以这里单独匹配这组措辞，
+     * 否则用户拿到的是一句英文引擎错误（实测踩到过）。
+     */
+    this.#runDdl(db, sql, {
+      action: '重命名表',
+      target: `${oldName} → ${newName}`,
+      alreadyExists: /already another table or index|already exists/i,
+      alreadyExistsMessage: `重命名失败：目标名「${newName}」已被其它表或索引占用（already exists）。请换一个名字。`
+    })
+  }
+
+  /**
    * 应用一批行更新。**不会自动提交**。
    *
    * ===== 与只读护栏的关系（这一条很容易做错）=====
@@ -1426,6 +1547,107 @@ export class SqliteDriverAdapter implements DriverAdapter {
       return { index, affected, error: null, sql }
     } catch (thrown) {
       return { index, affected: 0, error: describeThrown(thrown), sql }
+    }
+  }
+
+  /**
+   * 从完整 adapterId 里取出对象名，并校验它确实是**期望的节点类型**。
+   *
+   * 为什么由 adapter 解析而不是主进程：`table:users` 这种编码是本驱动自己的约定
+   * （见 ids.ts），主进程不该猜 `table:` 后面是什么——猜错一次就是操作错对象。
+   *
+   * 为什么还要校验 kind：`dropTable('view:v')` 这种调用本该在接线层被挡住，
+   * 但这里再挡一次成本几乎为零，而放过去的后果是"用 DROP TABLE 去删一个视图"，
+   * 直接报 SQLite 的语法错误给用户。
+   */
+  #requireObjectName(nodeId: string, expectedKind: 'table' | 'view', actionLabel: string): string {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null) {
+      throw new SqliteAdapterError('object_not_found', `${actionLabel}失败：无法识别的对象 id「${nodeId}」。`)
+    }
+    if (parsed.kind !== expectedKind) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `${actionLabel}失败：期待${expectedKind === 'table' ? '表' : '视图'}节点，收到的是 ${parsed.kind}（${nodeId}）。`
+      )
+    }
+    this.#requireName(parsed.name, expectedKind === 'table' ? '表名' : '视图名')
+    return parsed.name
+  }
+
+  /** 名字不能是空白：空名字会被 quote 成 `""`，那是合法语法但与用户意图不符。 */
+  #requireName(name: string, label: string): void {
+    if (name.trim() === '') {
+      throw new SqliteAdapterError('bad_params', `${label}不能为空。`)
+    }
+  }
+
+  /**
+   * 执行一条 DDL 并**按需立即提交**，同时把数据库错误翻译成人话。
+   *
+   * ===== 提交策略（这是 DDL 与 DML 最关键的区别）=====
+   *
+   * - 调用前**没有**事务 → 本方法自己开、自己提交。用户点"建表"就该立刻生效。
+   * - 调用前**已有**事务 → 复用外层事务，**不**在这里提交：
+   *   外层（比如连续几步操作）才有权决定何时提交。若这里擅自提交，
+   *   会把用户其它还没准备好的改动一起落盘。
+   *
+   * 这也是"执行后立即 commit"的正确实现：不是无条件 COMMIT，
+   * 而是"不要把 DDL 的生效悬在无人负责的事务里"。
+   *
+   * ===== 错误翻译 =====
+   *
+   * SQLite 的原始错误是英文且带引擎味道（`table users already exists`），
+   * 直接抛给用户不友好。这里按错误特征匹配成中文提示，
+   * 但仍保留原始错误文本作为补充，方便排查。
+   */
+  #runDdl(
+    db: DatabaseSync,
+    sql: string,
+    hints: {
+      readonly action: string
+      readonly target: string
+      readonly alreadyExists?: RegExp
+      readonly alreadyExistsMessage?: string
+      readonly missing?: RegExp
+      readonly missingMessage?: string
+    }
+  ): void {
+    const selfManaged = !db.isTransaction
+    if (selfManaged) {
+      this.#execTransaction(db, 'BEGIN IMMEDIATE')
+    }
+    try {
+      db.exec(sql)
+      if (selfManaged) {
+        // DDL 生效即提交：不能让新表停在未提交事务里
+        this.#execTransaction(db, 'COMMIT')
+      }
+    } catch (thrown) {
+      // 自己开的事务要自己收拾，否则会留下一个"半失败"的空事务
+      if (selfManaged && db.isTransaction) {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          // 回滚失败也无法再补救
+        }
+      }
+      const raw = describeThrown(thrown)
+      if (hints.alreadyExists !== undefined && hints.alreadyExists.test(raw)) {
+        throw new SqliteAdapterError(
+          'bad_params',
+          hints.alreadyExistsMessage ?? `${hints.action}失败：「${hints.target}」已存在（already exists）。原始错误：${raw}`,
+          thrown
+        )
+      }
+      if (hints.missing !== undefined && hints.missing.test(raw)) {
+        throw new SqliteAdapterError(
+          'object_not_found',
+          hints.missingMessage ?? `${hints.action}失败：「${hints.target}」不存在。原始错误：${raw}`,
+          thrown
+        )
+      }
+      throw new SqliteAdapterError('query_failed', `${hints.action}「${hints.target}」失败（原始错误：${raw}）`, thrown)
     }
   }
 

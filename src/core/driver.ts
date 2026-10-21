@@ -18,7 +18,7 @@
  */
 
 import type { ConnectionConfig, SqlDialect } from './dialect'
-import type { DriverCapabilities, ObjectRef, TableDescription } from './model'
+import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type {
   CellValue,
@@ -191,6 +191,40 @@ export interface DriverAdapter {
    * 这个接口按需重取单格，返回值**不应被截断**（完整内容）。
    */
   fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue>
+
+  // ---- DDL（第六阶段） ----
+  //
+  // 五个方法都涉及**标识符与类型名拼接**（DDL 不支持参数绑定），
+  // 因此实现方必须严格校验 + 转义，不能把用户输入直接拼进语句。
+  //
+  // 关于 `connectionId` 形参：adapter 实例本就只服务一个连接（一个宿主一连接），
+  // 所以它**用不到**这个参数。保留它只为与 `DbStudioApi` 的参数顺序对齐，
+  // 实现方可直接忽略。
+
+  /**
+   * 建表。**必须保证 DDL 真正生效**（autocommit 或显式 COMMIT），
+   * 使紧随其后的 `listChildren` 能看到新表。
+   *
+   * 为什么要强调：DDL 若落在未提交事务里，"建表成功"的返回值与
+   * "目录里看不到新表"会同时成立，用户完全无法理解。这是 DDL 最常见的坑。
+   */
+  createTable(connectionId: string, spec: TableCreateSpec): Promise<void>
+
+  /**
+   * 删表。`nodeId` 是**完整 adapterId**（如 `table:users`），
+   * 由 adapter 解析自己的 id 编码——主进程不猜 `table:` 后面的内容。
+   * 对象不存在时应报错，不静默成功。
+   */
+  dropTable(nodeId: string): Promise<void>
+
+  /** 建视图。`selectSql` 是视图定义体（`CREATE VIEW x AS <selectSql>`）。 */
+  createView(connectionId: string, viewName: string, selectSql: string): Promise<void>
+
+  /** 删视图。`nodeId` 是完整 adapterId（如 `view:v`）。不存在时同样报错。 */
+  dropView(nodeId: string): Promise<void>
+
+  /** 重命名表。`nodeId` 是完整 adapterId（如 `table:users`）。 */
+  renameTable(nodeId: string, newName: string): Promise<void>
 }
 
 /** 方言的展示信息，UI 用它渲染「新建连接」的下拉框。 */
@@ -295,7 +329,12 @@ export const RPC_METHODS = [
   'insertRow',
   'deleteRows',
   'countRows',
-  'fetchCellValue'
+  'fetchCellValue',
+  'createTable',
+  'dropTable',
+  'createView',
+  'dropView',
+  'renameTable'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

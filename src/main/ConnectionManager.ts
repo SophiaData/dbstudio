@@ -19,7 +19,7 @@ import type { ConnectionConfig } from '../core/dialect'
 import type { DialectInfo, TestConnectionResult } from '../core/driver'
 import { quoteIdentifierWith } from '../core/driver'
 import { NodeId, type ConnectionSummary } from '../core/api'
-import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
+import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type {
   CellValue,
   EditApplyResult,
@@ -299,7 +299,8 @@ export class ConnectionManager {
         connected: live !== undefined,
         capabilities: live?.capabilities ?? null,
         persisted: true,
-        secretStored: this.#secretStoredFor(saved)
+        secretStored: this.#secretStoredFor(saved),
+        options: { ...saved.config.options }
       })
     }
     return out
@@ -447,7 +448,9 @@ export class ConnectionManager {
       connected: live !== undefined,
       capabilities: live?.capabilities ?? null,
       persisted: true,
-      secretStored: this.#secretStoredFor(saved)
+      secretStored: this.#secretStoredFor(saved),
+      // 编辑连接时要把原配置回填到表单，没有这个字段用户就是"盲改"。
+      options: { ...saved.config.options }
     }
   }
 
@@ -570,6 +573,13 @@ export class ConnectionManager {
           //   UI 应据此区分"无需密码"与"需要但没存上"。
           persisted: c.persisted,
           secretStored: c.secretStored,
+          // 把配置参数拍平成 `options.<key>` 放进 meta，供「编辑连接」对话框回填。
+          // 为什么拍平而不是嵌套对象：ObjectRef.meta 的值域是
+          // `string | number | boolean | null`（要能结构化克隆跨进程），
+          // 放嵌套对象会破坏这个约定。
+          ...Object.fromEntries(
+            Object.entries(c.options).map(([k, v]) => [`options.${k}`, v])
+          ),
           ...(c.capabilities ? { inlineEdit: c.capabilities.supportsInlineEdit } : {})
         }
       }))
@@ -849,6 +859,146 @@ export class ConnectionManager {
   ): Promise<CellValue> {
     const { conn, rawCursorId } = this.#resolveCursor(cursorId)
     return conn.host.fetchCellValue(rawCursorId, rowIndex, columnIndex)
+  }
+
+  // ---- DDL 与编辑连接（第六阶段） ----
+
+  /**
+   * 建表。`connectionId` 可以是 `connection:c1` 也可以是裸 `c1`——统一用
+   * `NodeId.parse` 归一：有前缀就解析，没有就当作裸 id。这样 UI 传节点 id
+   * 或连接 id 都能工作，减少一类"参数形态不对"的隐 bug。
+   */
+  async createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
+    const { conn } = this.#resolveConnectionLike(connectionId)
+    // adapter 层用不到 connectionId，但仍按契约传（见 DriverAdapter 注释）。
+    return conn.host.createTable(conn.id, spec)
+  }
+
+  /**
+   * 删表。
+   *
+   * ===== 主进程只做连接解析，不解析表名 =====
+   *
+   * `tableNodeId` 形如 `connection:c1|table:users`。主进程用 NodeId.parse 拆出
+   * `{ connectionId, adapterId }`，然后把**完整 adapterId**（`table:users`）原样
+   * 传给宿主。为什么不自己切出 `users`：
+   *   - 驱动私有 id 编码可能带转义（sqlite 的 column id 就有 `\.` 转义），
+   *     主进程猜规则迟早猜错；
+   *   - 这与 applyEdits / insertRow 的处理方式完全一致，"id 由生成它的驱动解析"
+   *     是一条统一的边界规则。
+   */
+  async dropTable(tableNodeId: string): Promise<void> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) throw new Error('连接节点不能删除，请选择具体的表')
+    return conn.host.dropTable(adapterId)
+  }
+
+  async createView(connectionId: string, viewName: string, selectSql: string): Promise<void> {
+    const { conn } = this.#resolveConnectionLike(connectionId)
+    return conn.host.createView(conn.id, viewName, selectSql)
+  }
+
+  async dropView(viewNodeId: string): Promise<void> {
+    const { conn, adapterId } = this.#resolveConnection(viewNodeId)
+    if (adapterId === null) throw new Error('连接节点不能删除，请选择具体的视图')
+    return conn.host.dropView(adapterId)
+  }
+
+  async renameTable(tableNodeId: string, newName: string): Promise<void> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    if (adapterId === null) throw new Error('连接节点不能重命名，请选择具体的表')
+    return conn.host.renameTable(adapterId, newName)
+  }
+
+  /**
+   * 编辑已保存的连接。
+   *
+   * ===== 三步，顺序不能反 =====
+   *
+   * 1. **先落盘新配置**（+ 密码若给了）。这样即使第 3 步重连失败，
+   *    配置也已经更新——用户看到"连不上"但打开详情是最新参数，能改错重试。
+   *    反过来先重连再落盘，重连失败会留下"内存里是新配置、磁盘是旧配置"的分裂。
+   * 2. 若当前**有活动会话**，先关掉它（`disconnectConnection` 保留配置但关宿主）。
+   * 3. 用新配置重连 —— **只有原本就连着的才自动重连**。原本断开的状态，
+   *    更新后仍保持断开（尊重用户"我只是改个名字"的意图，不要擅自连库）。
+   *
+   * `Partial<ConnectionConfig>` 与现有配置合并：只覆盖传入的字段，
+   * 未传的保留原值（尤其 `options` 要浅合并——用户可能只改 file 一个键）。
+   */
+  async updateConnection(
+    connectionId: string,
+    config: Partial<ConnectionConfig>,
+    secret?: string
+  ): Promise<ConnectionSummary> {
+    const { conn, saved } = this.#resolveSaved(connectionId)
+    const wasConnected = conn !== undefined
+
+    // ---- 合并配置 ----
+    // options 必须**浅合并**而不是整体替换：UI 编辑表单可能只提交被改动的
+    // 字段（比如只传 { file }），整体替换会把其它 option 丢掉。
+    const mergedConfig: ConnectionConfig = {
+      dialectId: config.dialectId ?? saved.config.dialectId,
+      name: config.name ?? saved.config.name,
+      options: { ...saved.config.options, ...(config.options ?? {}) }
+    }
+
+    // 方言若改了，要重新查 DialectInfo（previewTable/secretStored 依赖它）。
+    const info = this.#dialects.find((d) => d.id === mergedConfig.dialectId)
+    if (!info) {
+      throw new Error(
+        `未知方言 "${mergedConfig.dialectId}"，可用方言: ${this.#dialects.map((d) => d.id).join(', ')}`
+      )
+    }
+
+    // 1) 落盘新配置；密码给了就一并更新（走 store 的加密通道）。
+    this.#store.saveConnection(connectionId, mergedConfig)
+    if (secret !== undefined) {
+      // setSecret 在 cipher 不可用时会抛 SecretStorageUnavailableError。
+      // 这里**不吞**它：用户明确要改密码，存不了必须让他知道（否则又是一次
+      // "以为存了其实没存"）。但配置已经落盘，不会白改。
+      this.#store.setSecret(connectionId, secret)
+    }
+    this.#saved.set(connectionId, { id: connectionId, config: mergedConfig, info })
+    this.#log('info', `[manager] 已更新连接 ${connectionId}（${mergedConfig.name}）的配置`)
+
+    // 2) 原本连着 → 先断（保留配置）。断开会回滚未提交事务并关宿主。
+    if (wasConnected) {
+      await this.disconnectConnection(connectionId)
+    }
+
+    // 3) 原本连着才重连，让新配置立刻生效。
+    if (wasConnected) {
+      return this.connectConnection(connectionId)
+    }
+    // 原本断开：不擅自连接，返回更新后的（未连接）summary。
+    const after = this.#saved.get(connectionId)
+    if (!after) throw new Error(`连接在更新过程中消失: ${connectionId}`)
+    return this.#toSummary(after, undefined)
+  }
+
+  /**
+   * 接受「节点 id（connection:c1）或裸连接 id（c1）」两种形态，归一成连接。
+   * 用于 createTable / createView —— 它们的入参是 connectionId，
+   * 但 UI 手上往往把它包成节点 id，两种都认更省事也更不易出错。
+   */
+  #resolveConnectionLike(connectionIdOrNodeId: string): { conn: LiveConnection } {
+    const parsed = NodeId.parse(connectionIdOrNodeId)
+    const realId = parsed ? parsed.connectionId : connectionIdOrNodeId
+    const conn = this.#connections.get(realId)
+    if (!conn) throw new Error(`连接不存在或已断开: ${realId}`)
+    return { conn }
+  }
+
+  /** 取「已保存配置」+「可选的活动会话」。updateConnection 用。 */
+  #resolveSaved(connectionId: string): {
+    conn: LiveConnection | undefined
+    saved: SavedConnection
+  } {
+    const parsed = NodeId.parse(connectionId)
+    const realId = parsed ? parsed.connectionId : connectionId
+    const saved = this.#saved.get(realId)
+    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    return { conn: this.#connections.get(realId), saved }
   }
 
   /** 登记一个游标到账本。 */

@@ -28,6 +28,28 @@
 
 import type { ObjectRef } from '../core/model'
 import type { DbStudioApi } from '../core/api'
+import {
+  asDdlApi,
+  dropTableWithConfirm,
+  dropViewWithConfirm,
+  openCreateTableDialog,
+  openCreateViewDialog,
+  openRenameTableDialog,
+  showDdlError,
+  type DdlApi
+} from './ddl'
+import { NodeId } from '../core/api'
+
+/**
+ * 一组 DDL 菜单项描述。为什么拆成 create/rename/drop 三槽而不是一个数组：
+ * 顺序与分组在菜单里是固定的（新建在最上、删除在最下且用危险色），
+ * 用命名槽位比"往数组里按顺序 push"更难出错。
+ */
+interface DdlMenuTarget {
+  create?: { label: string; run: (api: DdlApi) => void }
+  rename?: { label: string; run: (api: DdlApi) => void }
+  drop?: { label: string; run: (api: DdlApi) => void }
+}
 
 /**
  * 刷新/连接/断开需要调 API，但本类的构造签名只接收 `listChildren`——
@@ -714,6 +736,197 @@ export class MetadataTree {
    * 菜单是**单例**（#menuEl），每次打开先移除旧的。挂 document 级监听
    * 在打开时注册、关闭时移除——避免常驻监听泄漏。
    */
+  /**
+   * 编辑已保存连接的对话框。
+   *
+   * 为什么放在 tree.ts 而不是新文件：它属于「连接节点的操作」，
+   * 与右键菜单同源；单独开文件反而要在两个模块间传 node 与刷新回调。
+   * （`ddl.ts` 已经承担了表/视图的 DDL 对话框，职责不同，不混在一起。）
+   */
+  #openEditConnection(node: NodeState): void {
+    const api = optionalApi() as
+      | (ReturnType<typeof optionalApi> & {
+          updateConnection?: (
+            id: string,
+            cfg: Record<string, unknown>,
+            secret?: string
+          ) => Promise<unknown>
+          listDialects?: () => Promise<Array<{ id: string; fields: ReadonlyArray<{ key: string; label: string; kind: string; required: boolean; placeholder?: string; default?: string | number }> }>>
+        })
+      | null
+    if (!api || typeof api.updateConnection !== 'function') {
+      globalThis.alert('编辑连接接口尚未就绪（updateConnection）')
+      return
+    }
+
+    const connId = node.ref.id.startsWith('connection:') && !node.ref.id.includes('|')
+      ? node.ref.id.slice('connection:'.length)
+      : null
+    if (!connId) {
+      globalThis.alert('无法解析连接 id')
+      return
+    }
+
+    const overlay = document.createElement('div')
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;' +
+      'justify-content:center;background:rgba(0,0,0,.45)'
+    const panel = document.createElement('div')
+    panel.style.cssText =
+      'background:var(--bg);color:var(--fg);border:1px solid var(--border);' +
+      'border-radius:8px;padding:16px;min-width:380px;max-width:min(560px,90vw);' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.35);font-size:13px'
+
+    const h = document.createElement('div')
+    h.textContent = `编辑连接「${node.ref.name}」`
+    h.style.cssText = 'font-weight:600;margin-bottom:10px'
+    panel.appendChild(h)
+
+    const nameLabel = document.createElement('div')
+    nameLabel.textContent = '连接名'
+    nameLabel.style.cssText = 'color:var(--fg-dim);margin-bottom:4px'
+    const nameInput = document.createElement('input')
+    nameInput.type = 'text'
+    nameInput.value = node.ref.name
+    nameInput.setAttribute('aria-label', '连接名')
+    nameInput.style.cssText = inputStyleLocal()
+    panel.appendChild(nameLabel)
+    panel.appendChild(nameInput)
+
+    // 连接参数：从方言元数据动态生成（与「新建连接」一致），
+    // 但这里只填可改的文本类字段；密码单独一栏。
+    const paramHost = document.createElement('div')
+    paramHost.style.cssText = 'margin-top:10px;display:flex;flex-direction:column;gap:6px'
+    panel.appendChild(paramHost)
+
+    const hint = document.createElement('p')
+    hint.setAttribute('role', 'alert')
+    hint.style.cssText = 'margin:10px 0 0;color:var(--danger);font-size:12px;min-height:1.2em'
+    panel.appendChild(hint)
+
+    const footer = document.createElement('div')
+    footer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:14px'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.textContent = '取消'
+    const save = document.createElement('button')
+    save.type = 'button'
+    save.textContent = '保存'
+    // ★ 初始禁用：参数输入框是异步（等 listDialects）建出来的。
+    //   如果在建好之前就能点保存，收集到的 options 是空的，用户以为改了其实没改
+    //   （实测踩到的 bug：对话框里 file 显示 placeholder 而非回填值，点保存后配置不变）。
+    save.disabled = true
+    save.title = '正在准备表单…'
+    footer.append(cancel, save)
+    panel.appendChild(footer)
+    overlay.appendChild(panel)
+    document.body.appendChild(overlay)
+
+    const close = (): void => overlay.remove()
+    cancel.addEventListener('click', close)
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close()
+    })
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        document.removeEventListener('keydown', onKey)
+        close()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+
+    // 密码栏（可选：留空表示不修改）
+    const pwdLabel = document.createElement('div')
+    pwdLabel.textContent = '密码（留空表示不修改）'
+    pwdLabel.style.cssText = 'color:var(--fg-dim);margin:10px 0 4px'
+    const pwdInput = document.createElement('input')
+    pwdInput.type = 'password'
+    pwdInput.setAttribute('aria-label', '密码')
+    pwdInput.placeholder = '不修改则留空'
+    pwdInput.style.cssText = inputStyleLocal()
+    panel.appendChild(pwdLabel)
+    panel.appendChild(pwdInput)
+
+    void (async () => {
+      // 拉方言元数据以生成参数输入框
+      try {
+        const dialects = (await api.listDialects?.()) ?? []
+        const dialectId = String(node.ref.meta?.['dialect'] ?? '')
+        const d = dialects.find((x) => x.id === dialectId)
+        if (d) {
+          for (const f of d.fields) {
+            if (f.kind === 'password') continue // 密码单独一栏，已在上面
+            const lab = document.createElement('div')
+            lab.textContent = f.label
+            lab.style.cssText = 'color:var(--fg-dim);font-size:12px'
+            const inp = document.createElement('input')
+            inp.type = f.kind === 'number' ? 'number' : 'text'
+            inp.dataset['key'] = f.key
+            // ★ 回填当前值。没有这一步，对话框只显示空框，用户不知道现在配的是什么，
+            //   一改就可能把能用的配置覆盖成错的（实测发现的 bug）。
+            const cur = node.ref.meta?.['options.' + f.key]
+            if (cur !== undefined && cur !== null) inp.value = String(cur)
+            if (f.placeholder) inp.placeholder = f.placeholder
+            inp.style.cssText = inputStyleLocal()
+            const wrap = document.createElement('div')
+            wrap.append(lab, inp)
+            paramHost.appendChild(wrap)
+          }
+        }
+      } catch {
+        /* 拿不到元数据时只允许改名字，不影响主流程 */
+      } finally {
+        // 表单已就绪（或确认拿不到参数只能改名）→ 允许保存
+        save.disabled = false
+        save.title = ''
+      }
+    })()
+
+    save.addEventListener('click', () => {
+      void (async () => {
+        hint.textContent = ''
+        save.disabled = true
+        try {
+          const cfg: Record<string, unknown> = {}
+          const newName = nameInput.value.trim()
+          if (newName !== '' && newName !== node.ref.name) cfg['name'] = newName
+
+          const opts: Record<string, unknown> = {}
+          const paramInputs = paramHost.querySelectorAll<HTMLInputElement>('input[data-key]')
+          for (const inp of paramInputs) {
+            const key = inp.dataset['key']
+            const raw = inp.value.trim()
+            if (key && raw !== '') {
+              opts[key] = inp.type === 'number' ? Number(raw) : raw
+            }
+          }
+          // 防御：表单里一个参数框都没有，却提交了「修改」——这会静默丢掉配置。
+          // 与其让用户以为改了，不如明确报错。
+          if (paramInputs.length === 0) {
+            throw new Error('参数表单尚未就绪，请稍候重试（若持续如此，说明读取方言元数据失败）')
+          }
+          if (Object.keys(opts).length > 0) cfg['options'] = opts
+
+          const secret = pwdInput.value.trim()
+          const fn = api.updateConnection
+          if (typeof fn !== 'function') throw new Error('updateConnection 不可用')
+          await fn(connId, cfg, secret === '' ? undefined : secret)
+
+          close()
+          document.removeEventListener('keydown', onKey)
+          this.#cb.onStatus(`已更新连接「${node.ref.name}」${node.ref.meta?.['connected'] === true ? '（已重连）' : ''}`)
+          // 配置改了，刷新根层让名字/状态同步
+          await this.loadRoots()
+        } catch (e) {
+          hint.textContent = e instanceof Error ? e.message : String(e)
+        } finally {
+          save.disabled = false
+        }
+      })()
+    })
+  }
+
   #openMenu(x: number, y: number, node: NodeState): void {
     this.#closeMenu()
     const isConn = node.ref.kind === 'connection'
@@ -727,7 +940,7 @@ export class MetadataTree {
       'background:var(--bg);border:1px solid var(--border);border-radius:6px;' +
       'box-shadow:0 6px 24px rgba(0,0,0,.18);font-size:12px;user-select:none;'
 
-    const items: Array<{ label: string; run: () => void; disabled?: boolean }> = [
+    const items: Array<{ label: string; run: () => void; disabled?: boolean; danger?: boolean }> = [
       { label: '刷新此节点', run: () => void this.refreshNode(node) },
       { label: '复制名称', run: () => void this.#copyName(node.ref.name) }
     ]
@@ -747,19 +960,78 @@ export class MetadataTree {
               run: () => void this.#toggleConnection(node, true)
             }
       )
+
+      // 编辑连接：改配置 / 改密码。
+      //
+      // 为什么必须有这个入口：加了持久化之后，连接配置是**落盘**的。
+      // 路径填错、库文件搬家、密码改了，用户只能「删掉重建」——
+      // 而删除会丢掉 id，也丢掉已保存的其它设置。
+      items.push({
+        label: '编辑连接…',
+        disabled: !api || typeof (api as { updateConnection?: unknown }).updateConnection !== 'function',
+        run: () => this.#openEditConnection(node)
+      })
     }
 
+    // ---- DDL 入口 ----
+    //
+    // 按节点类型挂不同操作。注意「表」「视图」这两个**分组节点**（folder）
+    // 才提供「新建…」，因为新建必须知道目标连接与分组；详见 core/api.ts 的 id 规则
+    // （`folder:tables` / `folder:views`，经 scoped 后是 `connection:c1|folder:tables`）。
+    //
+    // DDL 是否会真正生效取决于 core/preload 是否已接入这五个方法——用 asDdlApi
+    // 探测；未接入时菜单项 disabled，并在点击时给出明确原因，而不是静默失败。
+    const ddlEntry = this.#ddlTargetFor(node.ref)
+    if (ddlEntry) {
+      const ddlApi = this.#tryDdlApi()
+      if (ddlEntry.create) {
+        items.push({
+          label: ddlEntry.create.label,
+          disabled: ddlApi === null,
+          run: () => {
+            if (ddlApi === null) return this.#reportDdlUnavailable(ddlEntry.create?.label)
+            ddlEntry.create?.run(ddlApi)
+          }
+        })
+      }
+      if (ddlEntry.rename) {
+        items.push({
+          label: ddlEntry.rename.label,
+          disabled: ddlApi === null,
+          run: () => {
+            if (ddlApi === null) return this.#reportDdlUnavailable(ddlEntry.rename?.label)
+            ddlEntry.rename?.run(ddlApi)
+          }
+        })
+      }
+      if (ddlEntry.drop) {
+        items.push({
+          // 删除项用危险色标记，让用户在点之前就意识到后果。
+          label: ddlEntry.drop.label,
+          disabled: ddlApi === null,
+          danger: true,
+          run: () => {
+            if (ddlApi === null) return this.#reportDdlUnavailable(ddlEntry.drop!.label)
+            ddlEntry.drop!.run(ddlApi)
+          }
+        })
+      }
+    }
     for (const item of items) {
       const el = document.createElement('div')
       el.setAttribute('role', 'menuitem')
       el.setAttribute('tabindex', '-1')
       el.textContent = item.label
       if (item.disabled) el.setAttribute('aria-disabled', 'true')
+      // 危险项（删除）用 --danger 着色；disabled 时统一降透明度。
+      const isDanger = (item as { danger?: boolean }).danger === true
       el.style.cssText =
         'padding:6px 12px;white-space:nowrap;' +
         (item.disabled
           ? 'color:var(--fg-dim);opacity:.55;cursor:default;'
-          : 'cursor:pointer;color:var(--fg);')
+          : isDanger
+            ? 'cursor:pointer;color:var(--danger);'
+            : 'cursor:pointer;color:var(--fg);')
       if (!item.disabled) {
         el.addEventListener('mouseenter', () => {
           el.style.background = 'var(--bg-alt)'
@@ -878,6 +1150,147 @@ export class MetadataTree {
     }
   }
 
+  // ===========================================================================
+  // DDL 入口
+  // ===========================================================================
+
+  /**
+   * 取 DDL API；不可用返回 null。
+   *
+   * 为什么不直接 `asDdlApi(optionalApi())` 让它抛：菜单是**长生命周期**的构建过程，
+   * 在 core/preload 尚未接入 DDL 的过渡期，抛异常会连菜单都打不开。
+   * 所以这里做软探测——菜单项标 disabled，用户点的时候才给明确原因。
+   */
+  #tryDdlApi(): DdlApi | null {
+    const api = optionalApi()
+    if (!api) return null
+    try {
+      return asDdlApi(api)
+    } catch {
+      return null
+    }
+  }
+
+  #reportDdlUnavailable(label: string | undefined): void {
+    // 状态栏 + 阻塞提示各一份：状态栏会被后续消息冲掉，DDL 这类事必须让用户看见。
+    this.#cb.onStatus(`「${label ?? 'DDL 操作'}」不可用：DDL 尚未接入`, true)
+    showDdlError('DDL 功能不可用', '当前版本的主进程/预加载层尚未接入 DDL，无法执行该操作。')
+  }
+
+  /**
+   * 依据节点类型给出 DDL 菜单项。返回 null 表示该节点没有 DDL 操作。
+   *
+   * 关键：从带连接归属的节点 id（`connection:c1|table:users`）里拆出
+   * - connectionId（建表/建视图要的是它）
+   * - 以及把**整条节点 id** 原样交给 dropTable / dropView / renameTable
+   *   （core/api.ts 约定这些方法收 nodeId，含连接归属）。
+   */
+  #ddlTargetFor(ref: ObjectRef): DdlMenuTarget | null {
+    const parsed = NodeId.parse(ref.id)
+    if (!parsed) return null
+    const { connectionId, adapterId } = parsed
+    // adapterId 形如 `table:users` / `view:v` / `folder:tables` / `folder:views`。
+    const folder = adapterId?.startsWith('folder:') ? adapterId.slice('folder:'.length) : null
+
+    const refreshParent = (): void => {
+      // 新建对象后刷新它的父分组；找不到父节点就退化为刷新当前节点。
+      const parent = this.#findParentOf(ref)
+      if (parent) void this.refreshNode(parent)
+    }
+
+    switch (ref.kind) {
+      case 'table':
+        return {
+          rename: {
+            label: '重命名表…',
+            run: (api) =>
+              openRenameTableDialog(api, ref.id, ref.name, () => {
+                // 重命名后原节点 id（含旧表名）已失效 → 刷新父分组让新名字出现。
+                refreshParent()
+              })
+          },
+          drop: {
+            label: '删除表…',
+            run: (api) => {
+              void (async () => {
+                const ok = await dropTableWithConfirm(api, ref.id, ref.name)
+                if (ok) {
+                  this.#cb.onStatus(`已删除表「${ref.name}」`)
+                  refreshParent()
+                }
+              })()
+            }
+          }
+        }
+      case 'view':
+        return {
+          drop: {
+            label: '删除视图…',
+            run: (api) => {
+              void (async () => {
+                const ok = await dropViewWithConfirm(api, ref.id, ref.name)
+                if (ok) {
+                  this.#cb.onStatus(`已删除视图「${ref.name}」`)
+                  refreshParent()
+                }
+              })()
+            }
+          }
+        }
+      case 'folder':
+        if (folder === 'tables') {
+          return {
+            create: {
+              label: '新建表…',
+              run: (api) =>
+                openCreateTableDialog(api, connectionId, () => {
+                  this.#cb.onStatus('已创建表')
+                  // 新建后必须展开该分组并重取，否则用户看不到新表。
+                  const parent = this.#findParentOf(ref)
+                  if (parent) void this.refreshNode(parent)
+                })
+            }
+          }
+        }
+        if (folder === 'views') {
+          return {
+            create: {
+              label: '新建视图…',
+              run: (api) =>
+                openCreateViewDialog(api, connectionId, () => {
+                  this.#cb.onStatus('已创建视图')
+                  const parent = this.#findParentOf(ref)
+                  if (parent) void this.refreshNode(parent)
+                })
+            }
+          }
+        }
+        return null
+      default:
+        return null
+    }
+  }
+
+  /** 在已加载的树里找某 ref 的父节点（按 parentId 匹配）。找不到返回 null。 */
+  #findParentOf(ref: ObjectRef): NodeState | null {
+    if (!ref.parentId) {
+      // 顶层（连接）没有可刷新的父节点 → 退化为刷新自身。
+      return this.#findNodeByKey(keyOf(ref))
+    }
+    return this.#findNodeByKey(ref.parentId)
+  }
+
+  #findNodeByKey(key: string): NodeState | null {
+    const stack: NodeState[] = [...this.#roots]
+    while (stack.length > 0) {
+      const cur = stack.pop()
+      if (!cur) continue
+      if (keyOf(cur.ref) === key) return cur
+      if (cur.children) stack.push(...cur.children)
+    }
+    return null
+  }
+
   /** 资源清理：移除常驻监听（菜单是临时的，关闭时自清）。 */
   dispose(): void {
     this.#closeMenu()
@@ -932,4 +1345,12 @@ function metaText(ref: ObjectRef): string {
   if (m['nullable'] === false) parts.push('NOT NULL')
   if (typeof m['dialect'] === 'string') parts.push(m['dialect'])
   return parts.join(' · ')
+}
+
+/** 与缓存区一致的输入框内联样式（不改 style.css）。 */
+function inputStyleLocal(): string {
+  return (
+    'font:inherit;font-size:12px;padding:4px 6px;box-sizing:border-box;' +
+    'border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg)'
+  )
 }

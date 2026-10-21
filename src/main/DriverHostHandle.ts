@@ -28,7 +28,7 @@ import type {
   TestConnectionResult
 } from '../core/driver'
 import { isRpcResponse } from '../core/driver'
-import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
+import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { QueryOptions, QueryResult, ResultPage } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
@@ -401,6 +401,41 @@ export class DriverHostHandle {
     )
   }
 
+  // ---- DDL（第六阶段）：涉及改表结构，可能因锁等待而慢，沿用 60s ----
+
+  createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
+    return this.#requestWithTimeout<void>(
+      'createTable',
+      { connectionId, spec },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
+  /** `nodeId` 是完整 adapterId（不含连接前缀），由 adapter 解析。 */
+  dropTable(nodeId: string): Promise<void> {
+    return this.#requestWithTimeout<void>('dropTable', { nodeId }, RESULT_SET_TIMEOUT_MS)
+  }
+
+  createView(connectionId: string, viewName: string, selectSql: string): Promise<void> {
+    return this.#requestWithTimeout<void>(
+      'createView',
+      { connectionId, viewName, selectSql },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
+  dropView(nodeId: string): Promise<void> {
+    return this.#requestWithTimeout<void>('dropView', { nodeId }, RESULT_SET_TIMEOUT_MS)
+  }
+
+  renameTable(nodeId: string, newName: string): Promise<void> {
+    return this.#requestWithTimeout<void>(
+      'renameTable',
+      { nodeId, newName },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
   /** 优雅关闭：先 disconnect，再关 stdin 让宿主自行退出；超时则强杀。 */
   async close(): Promise<void> {
     if (this.#closed) return
@@ -462,6 +497,11 @@ export type RemoteAdapterShape = Pick<
   | 'deleteRows'
   | 'countRows'
   | 'fetchCellValue'
+  | 'createTable'
+  | 'dropTable'
+  | 'createView'
+  | 'dropView'
+  | 'renameTable'
 >
 
 export type { DialectInfo }

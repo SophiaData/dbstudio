@@ -221,18 +221,18 @@ await win.evaluate(() => {
   if (target) target.click()
 })
 await win.waitForFunction(
-  () => document.querySelectorAll('#result-grid .grid-row').length > 0,
+  () => document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row').length > 0,
   { timeout: 15000 }
 )
 const gridInfo = await win.evaluate(() => {
-  const header = [...document.querySelectorAll('#result-grid .grid-col-header')].map(
+  const header = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-col-header')].map(
     (e) => e.textContent
   )
-  const rows = [...document.querySelectorAll('#result-grid .grid-row')].map((r) =>
+  const rows = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row')].map((r) =>
     [...r.querySelectorAll('.grid-cell')].map((c) => c.textContent)
   )
-  const editable = document.getElementById('result-grid')?.dataset['editable']
-  const banner = document.querySelector('#result-grid .grid-banner')
+  const editable = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root')?.dataset['editable']
+  const banner = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-banner')
   return { header, rows, editable, bannerHidden: banner?.hidden ?? null }
 })
 check('列头正确（# / id / name / city）',
@@ -249,18 +249,18 @@ check('有唯一键 → 可编辑', gridInfo.editable === 'true', String(gridInf
 // 这里直接量尺寸，比肉眼看截图可靠。
 const metrics = await win.evaluate(() => {
   const pane = document.getElementById('detail-pane')
-  const hdr = document.querySelector('#result-grid .grid-header')
+  const hdr = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-header')
   // 必须限定在**单行内**取单元格。早先写成全局选择器
   // `#result-grid .grid-row .grid-cell`，它会把所有行的格子加起来
   // （2 行 × 4 列 = 8），于是拿 8 和表头的 4 比较，误报成「列数不一致」。
-  const row = document.querySelector('#result-grid .grid-row')
+  const row = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-row')
   const cellsIn = (root) => (root ? root.querySelectorAll('.grid-cell').length : 0)
   return {
     paneW: Math.round(pane.getBoundingClientRect().width),
     hdrW: Math.round(hdr.getBoundingClientRect().width),
     hdrCells: cellsIn(hdr),
     rowCells: cellsIn(row),
-    rowCount: document.querySelectorAll('#result-grid .grid-row').length
+    rowCount: document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row').length
   }
 })
 check('表头与数据行列数一致（不会错位）',
@@ -275,7 +275,7 @@ await win.screenshot({ path: join(shotDir, '06-结果集.png') })
 console.log('\n[4] 双击单元格 → 输入 → 应用 → 提交（完整编辑流程）')
 // 双击第 1 行的 name 列（列序：# id name city → index 2）
 const dblClicked = await win.evaluate(() => {
-  const row = document.querySelector('#result-grid .grid-row')
+  const row = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root .grid-row')
   if (!row) return false
   const cells = [...row.querySelectorAll('.grid-cell')]
   const target = cells[2]
@@ -284,16 +284,16 @@ const dblClicked = await win.evaluate(() => {
   return true
 })
 check('双击进入编辑态', dblClicked)
-await win.waitForSelector('#result-grid .grid-cell-editor', { state: 'attached', timeout: 5000 })
+await win.waitForSelector('.tab-pane:not([hidden]) .tab-grid-root .grid-cell-editor', { state: 'attached', timeout: 5000 })
 check('出现单元格输入框', true)
 await win.screenshot({ path: join(shotDir, '07-编辑中.png') })
 
-const editor = await win.$('#result-grid .grid-cell-editor')
+const editor = await win.$('.tab-pane:not([hidden]) .tab-grid-root .grid-cell-editor')
 await editor.fill('Alice-EDITED')
 await editor.press('Enter')
 // 编辑器关闭且单元格标脏
 await win.waitForFunction(
-  () => document.querySelectorAll('#result-grid .grid-cell.is-dirty').length > 0,
+  () => document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-cell.is-dirty').length > 0,
   { timeout: 5000 }
 )
 check('改动被标记为脏（is-dirty）', true)
@@ -301,7 +301,7 @@ await win.screenshot({ path: join(shotDir, '08-脏标记.png') })
 
 // 点「应用修改」
 const applied = await win.evaluate(() => {
-  const btns = [...document.querySelectorAll('#result-grid button')]
+  const btns = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root button')]
   const b = btns.find((x) => x.textContent?.includes('应用修改'))
   if (!b || b.disabled) return false
   b.click()
@@ -310,7 +310,7 @@ const applied = await win.evaluate(() => {
 check('点击「应用修改」', applied)
 await win.waitForFunction(
   () => {
-    const btns = [...document.querySelectorAll('#result-grid button')]
+    const btns = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root button')]
     const c = btns.find((x) => x.textContent?.trim() === '提交')
     return c ? !c.disabled : false
   },
@@ -320,7 +320,7 @@ check('事务已建立（「提交」按钮可用）', true)
 
 // 点「提交」
 await win.evaluate(() => {
-  const btns = [...document.querySelectorAll('#result-grid button')]
+  const btns = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root button')]
   const c = btns.find((x) => x.textContent?.trim() === '提交'); if (c) c.click()
 })
 await win.waitForTimeout(1500)
@@ -338,15 +338,15 @@ console.log('\n[6] 用 SQL 输入框执行查询')
 await win.fill('#sql-input', 'SELECT COUNT(*) AS total FROM customers')
 await win.click('#btn-run-sql')
 await win.waitForFunction(
-  () => document.querySelector('#result-grid')?.hidden === false,
+  () => document.querySelector('.tab-pane:not([hidden]) .tab-grid-root') !== null,
   { timeout: 10000 }
 )
 await win.waitForTimeout(1200)
 const sqlResult = await win.evaluate(() => {
-  const rows = [...document.querySelectorAll('#result-grid .grid-row')].map((r) =>
+  const rows = [...document.querySelectorAll('.tab-pane:not([hidden]) .tab-grid-root .grid-row')].map((r) =>
     [...r.querySelectorAll('.grid-cell')].map((c) => c.textContent)
   )
-  const editable = document.getElementById('result-grid')?.dataset['editable']
+  const editable = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root')?.dataset['editable']
   return { rows, editable }
 })
 check('SQL 查询有结果', JSON.stringify(sqlResult.rows).includes('2'), JSON.stringify(sqlResult.rows))

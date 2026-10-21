@@ -45,7 +45,13 @@ import type {
   TestConnectionResult
 } from '../core/driver'
 import { isRpcResponse, RPC_METHODS } from '../core/driver'
-import type { DriverCapabilities, ObjectRef, TableDescription } from '../core/model'
+import type {
+  ColumnCreateSpec,
+  DriverCapabilities,
+  ObjectRef,
+  TableCreateSpec,
+  TableDescription
+} from '../core/model'
 import { DriverRegistry } from '../core/registry'
 import type {
   EditApplyResult,
@@ -415,6 +421,105 @@ function parseDeleteKeys(raw: unknown, method: RpcMethod): Record<string, CellVa
   })
 }
 
+/**
+ * 校验 `TableCreateSpec` 的**结构**。
+ *
+ * ===== 协议层只验形状，不验 SQL 安全 =====
+ *
+ * `typeName` / `defaultValue` 是 SQL 注入面（DDL 不能用参数绑定）。但
+ * "某个类型名是否合法、是否含 `;`" 是**方言知识**——只有 adapter 知道自己的
+ * 类型系统。协议层若在这里做字符白名单，会既挡不准（不同方言规则不同），
+ * 又会让 adapter 的安全校验变成第二套重复规则。
+ *
+ * 所以这里只做**与方言无关的结构校验**（非空、类型正确、列名不重复），
+ * 安全校验（拒绝 `TEXT; DROP ...`）明确交给 adapter，e2e 会在 adapter 层验证。
+ */
+function parseTableCreateSpec(raw: unknown, method: RpcMethod): TableCreateSpec {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new RpcFailure('bad_params', `${method}: spec 必须是对象`)
+  }
+  const spec = raw as { name?: unknown; columns?: unknown }
+
+  if (typeof spec.name !== 'string' || spec.name.trim().length === 0) {
+    throw new RpcFailure('bad_params', `${method}: spec.name 必须是非空字符串`)
+  }
+  if (!Array.isArray(spec.columns)) {
+    throw new RpcFailure('bad_params', `${method}: spec.columns 必须是数组`)
+  }
+  if (spec.columns.length === 0) {
+    throw new RpcFailure(
+      'bad_params',
+      `${method}: spec.columns 不能为空——没有任何列的表没有意义`
+    )
+  }
+
+  const seen = new Set<string>()
+  const columns = spec.columns.map((col: unknown, i: number): ColumnCreateSpec => {
+    if (typeof col !== 'object' || col === null || Array.isArray(col)) {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}] 必须是对象`)
+    }
+    const c = col as {
+      name?: unknown
+      typeName?: unknown
+      nullable?: unknown
+      primaryKeyOrdinal?: unknown
+      defaultValue?: unknown
+      autoIncrement?: unknown
+    }
+    if (typeof c.name !== 'string' || c.name.trim().length === 0) {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}].name 必须是非空字符串`)
+    }
+    if (typeof c.typeName !== 'string' || c.typeName.trim().length === 0) {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}].typeName 必须是非空字符串`)
+    }
+    // 列名重复是纯结构错误（不依赖方言），在这里挡掉比让数据库报
+    // "duplicate column name" 更早、更清楚。
+    const key = c.name.toLowerCase()
+    if (seen.has(key)) {
+      throw new RpcFailure('bad_params', `${method}: 列名重复 "${c.name}"`)
+    }
+    seen.add(key)
+
+    if (c.nullable !== undefined && typeof c.nullable !== 'boolean') {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}].nullable 必须是布尔值`)
+    }
+    if (c.primaryKeyOrdinal !== undefined) {
+      if (
+        typeof c.primaryKeyOrdinal !== 'number' ||
+        !Number.isInteger(c.primaryKeyOrdinal) ||
+        c.primaryKeyOrdinal <= 0
+      ) {
+        throw new RpcFailure(
+          'bad_params',
+          `${method}: spec.columns[${i}].primaryKeyOrdinal 必须是正整数`
+        )
+      }
+    }
+    if (c.defaultValue !== undefined && typeof c.defaultValue !== 'string') {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}].defaultValue 必须是字符串`)
+    }
+    if (c.autoIncrement !== undefined && typeof c.autoIncrement !== 'boolean') {
+      throw new RpcFailure('bad_params', `${method}: spec.columns[${i}].autoIncrement 必须是布尔值`)
+    }
+
+    return {
+      name: c.name,
+      typeName: c.typeName,
+      ...(c.nullable !== undefined ? { nullable: c.nullable } : {}),
+      ...(c.primaryKeyOrdinal !== undefined ? { primaryKeyOrdinal: c.primaryKeyOrdinal } : {}),
+      ...(c.defaultValue !== undefined ? { defaultValue: c.defaultValue } : {}),
+      // ⚠️ 这一行曾经漏过：协议层用「白名单式构造」重组对象，
+      // 新增字段若不加在这里会被静默丢弃——表现为「UI 传了 autoIncrement:false，
+      // 建表却仍然带 AUTOINCREMENT」，而且不报任何错。
+      // 教训：凡是「逐字段重建」的解析函数，新增契约字段时**必须同步这里**，
+      // 否则字段在传输层就消失了。
+      ...(c.autoIncrement !== undefined ? { autoIncrement: c.autoIncrement } : {})
+    }
+  })
+
+  return { name: spec.name, columns }
+}
+
 /** 极简参数解析：只认 `--dialect <id>` 与 `--dialect=<id>`。 */
 function parseDialectArg(argv: readonly string[]): string | null {
   for (let i = 0; i < argv.length; i += 1) {
@@ -630,6 +735,50 @@ class DriverHost {
         const columnIndex = parseNonNegativeInt(params.columnIndex, 'columnIndex', req.method)
         const value: CellValue = await this.#adapter.fetchCellValue(cursorId, rowIndex, columnIndex)
         return value
+      }
+
+      // ---- DDL（第六阶段） ----
+
+      case 'createTable': {
+        this.#requireConnected(req.method)
+        // connectionId 在宿主里用不到（一个宿主服务一个连接），但协议里带着；
+        // 仍校验它是个字符串，避免上层传了 undefined 却无人察觉。
+        const connectionId = parseObjectId(params.connectionId, req.method, 'connectionId')
+        const spec = parseTableCreateSpec(params.spec, req.method)
+        await this.#adapter.createTable(connectionId, spec)
+        return null
+      }
+
+      case 'dropTable': {
+        this.#requireConnected(req.method)
+        // 收到的是完整 adapterId（如 `table:users`），原样交给 adapter 解析。
+        const nodeId = parseObjectId(params.nodeId, req.method, 'nodeId')
+        await this.#adapter.dropTable(nodeId)
+        return null
+      }
+
+      case 'createView': {
+        this.#requireConnected(req.method)
+        const connectionId = parseObjectId(params.connectionId, req.method, 'connectionId')
+        const viewName = parseObjectId(params.viewName, req.method, 'viewName')
+        const selectSql = parseSql(params.selectSql, req.method)
+        await this.#adapter.createView(connectionId, viewName, selectSql)
+        return null
+      }
+
+      case 'dropView': {
+        this.#requireConnected(req.method)
+        const nodeId = parseObjectId(params.nodeId, req.method, 'nodeId')
+        await this.#adapter.dropView(nodeId)
+        return null
+      }
+
+      case 'renameTable': {
+        this.#requireConnected(req.method)
+        const nodeId = parseObjectId(params.nodeId, req.method, 'nodeId')
+        const newName = parseObjectId(params.newName, req.method, 'newName')
+        await this.#adapter.renameTable(nodeId, newName)
+        return null
       }
 
       default: {
