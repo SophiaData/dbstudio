@@ -20,18 +20,49 @@
  */
 
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 
+/**
+ * 找出当前平台的 Electron 可执行文件。
+ *
+ * ===== 这里曾经写错过，记录一下 =====
+ *
+ * 初版"为了避免硬编码"写了一组候选路径，但**只列了 macOS 的形状**：
+ *   node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
+ * 在 Linux CI 上直接 ENOENT（Linux 是 dist/electron，Windows 是 dist/electron.exe）。
+ * 注释说是避免硬编码，实际还是按 macOS 硬编码了——注释和实现不符，很难查。
+ *
+ * 正确做法：**问 electron 包自己要**。它的入口 index.js 导出的就是一个字符串，
+ * 内容是该平台可执行文件的绝对路径，内部已按 platform 分支处理好。
+ * 这样跨平台不用我们维护任何路径知识。
+ */
 function electronBinary() {
-  // 从已安装的 electron 包读取平台二进制路径，避免硬编码。
-  // electron 包导出的就是一个字符串路径。
-  const req = [
-    resolve(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
-    resolve(root, 'node_modules/electron/dist/electron')
-  ]
-  return req[0]
+  const require = createRequire(import.meta.url)
+  try {
+    // electron 的入口模块只做一件事：导出可执行文件路径。
+    const p = require('electron')
+    if (typeof p === 'string' && existsSync(p)) return p
+  } catch {
+    /* 落到下面的兜底 */
+  }
+  // 兜底：按平台猜（正常情况下走不到这里，除非 electron 包结构变了）
+  const candidates =
+    process.platform === 'darwin'
+      ? [resolve(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')]
+      : process.platform === 'win32'
+        ? [resolve(root, 'node_modules/electron/dist/electron.exe')]
+        : [resolve(root, 'node_modules/electron/dist/electron')]
+  for (const c of candidates) {
+    if (existsSync(c)) return c
+  }
+  throw new Error(
+    `找不到 Electron 可执行文件（平台 ${process.platform}）。` +
+      `请确认 pnpm install 时 electron 的 postinstall 已成功下载二进制。`
+  )
 }
 
 const args = process.argv.slice(2)
