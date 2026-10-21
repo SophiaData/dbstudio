@@ -1,6 +1,6 @@
 {
   "name": "@sophiadata/dbstudio-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "数据库驱动层 SDK：进程隔离的驱动宿主 + 方言抽象 + 游标分页。零 Electron 依赖，可在任何 Node 项目里复用。",
   "license": "MIT",
   "type": "module",

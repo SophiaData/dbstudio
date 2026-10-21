@@ -1,6 +1,6 @@
 {
   "name": "dbstudio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "数据库客户端（Electron + TypeScript）。架构源自对 DBeaver 源码的剖析：驱动进程隔离、虚拟化元数据树、游标分页结果集、参数化在线编辑。",
   "main": "out/main/index.js",
   "scripts": {
