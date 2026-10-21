@@ -14,6 +14,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # 允许 release.yml 用 `uses: ./.github/workflows/verify.yml` 复用本流程：
+  # 发版前必须先验证通过，避免把测试挂掉的版本发出去。
+  workflow_call:
 
 jobs:
   verify:

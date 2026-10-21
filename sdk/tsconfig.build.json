@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "files": [
+    "../src/core/dialect.ts",
+    "../src/core/model.ts",
+    "../src/core/resultset.ts",
+    "../src/core/driver.ts",
+    "src/index.ts",
+    "src/host.ts",
+    "src/quote.ts",
+    "src/contracts/dialect.ts",
+    "src/contracts/model.ts",
+    "src/contracts/resultset.ts",
+    "src/contracts/driver.ts"
+  ]
+}

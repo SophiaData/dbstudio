@@ -1,0 +1,44 @@
+{
+  "name": "@sophiadata/dbstudio-sdk",
+  "version": "0.1.0",
+  "description": "数据库驱动层 SDK：进程隔离的驱动宿主 + 方言抽象 + 游标分页。零 Electron 依赖，可在任何 Node 项目里复用。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/sdk/src/index.js",
+  "types": "./dist/sdk/src/index.d.ts",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "keywords": [
+    "database",
+    "sqlite",
+    "driver",
+    "metadata",
+    "process-isolation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SophiaData/dbstudio.git",
+    "directory": "sdk"
+  },
+  "files": [
+    "dist/**/*",
+    "driver-host/**/*",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/sdk.e2e.mjs",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "dependencies": {},
+  "exports": {
+    ".": {
+      "types": "./dist/sdk/src/index.d.ts",
+      "import": "./dist/sdk/src/index.js"
+    },
+    "./driver-host/index.js": "./dist/driver-host/index.js",
+    "./driver-host/package.json": "./dist/driver-host/package.json",
+    "./package.json": "./package.json"
+  }
+}

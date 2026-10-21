@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    // 允许从外部（../src/core）引入类型；这些文件的声明不会 emit，
+    // 生成的 d.ts 里会保留相对引用——发布时把 core 一起带上即可。
+    // 这是刻意取舍：SDK 与主仓库共用同一份类型定义，绝不复制。
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "include": ["src/**/*.ts"]
+}

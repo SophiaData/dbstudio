@@ -24,3 +24,8 @@ tests/fixtures/*.db-*
 .env
 .env.*
 release/
+
+# SDK 构建产物
+sdk/dist/
+sdk/.tmp-js/
+sdk/*.tgz

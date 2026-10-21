@@ -1,0 +1,87 @@
+# 发布构建：打 tag 时自动为三个平台出安装包并上传到 GitHub Release
+#
+# ===== 为什么必须用 CI 而不是本地打 =====
+#
+# electron-builder 可以跨平台打包，但**不可靠**：
+#   - Windows 的 NSIS 安装器在 macOS 上打需要 wine
+#   - macOS 的签名/公证只能在 macOS 上做
+#   - Linux 的 AppImage 在 macOS 上打容易缺库
+# 官方明确建议「每个平台在各自的 runner 上打」。
+#
+# 所以这里用 matrix：每个平台跑在自己的原生 runner 上。
+#
+# 触发方式：推送形如 v0.1.0 的 tag。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 允许手动触发，便于先验证流程而不发版
+  workflow_dispatch:
+
+jobs:
+  # 发版前先跑一遍验证，避免把测试不过的版本发出去
+  verify:
+    uses: ./.github/workflows/verify.yml
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 每个条目跑在一个原生 runner 上。
+          # macOS 的 electron-builder 一次会同时产出 dmg 与 zip，
+          # 所以一个平台只需一条，不要按产物拆成两条（会重复构建、白烧 runner 时间）。
+          - os: macos-latest
+            platform: mac
+            artifacts: 'release/*.dmg release/*.zip'
+          - os: windows-latest
+            platform: win
+            artifacts: 'release/*.exe'
+          - os: ubuntu-latest
+            platform: linux
+            artifacts: 'release/*.AppImage'
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建
+        run: pnpm run build
+
+      - name: 打包（macOS）
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --config electron-builder.config.mjs --mac --publish never
+
+      - name: 打包（Windows）
+        if: matrix.platform == 'win'
+        run: npx electron-builder --config electron-builder.config.mjs --win --publish never
+
+      - name: 打包（Linux）
+        if: matrix.platform == 'linux'
+        run: npx electron-builder --config electron-builder.config.mjs --linux --publish never
+
+      - name: 上传产物到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifacts }}
+          draft: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
