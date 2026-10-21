@@ -119,6 +119,51 @@ tests/
 
 ---
 
+## 安装（普通用户）
+
+从 [Releases](https://github.com/SophiaData/dbstudio/releases) 下载对应平台的安装包：
+
+| 平台 | 文件 |
+|---|---|
+| macOS (Apple Silicon) | `dbstudio-x.y.z-arm64.dmg` |
+| macOS (Intel) | `dbstudio-x.y.z-x64.dmg` |
+| Windows | `dbstudio-x.y.z-setup.exe` |
+| Linux | `dbstudio-x.y.z.AppImage` |
+
+> ⚠️ **macOS 首次打开会被 Gatekeeper 拦**：当前版本未做代码签名与公证
+> （需要苹果开发者账号，$99/年）。两个绕过办法：
+> - 右键点 app → 「打开」→ 再点「打开」
+> - 或执行 `xattr -dr com.apple.quarantine /Applications/dbstudio.app`
+
+## 从源码运行（开发者）
+
+```bash
+pnpm install
+pnpm dev            # 开发模式
+```
+
+### 自己打包安装包
+
+```bash
+pnpm build:app        # 打当前平台
+pnpm build:app:mac    # 或 :linux / :win
+```
+
+产物在 `release/`。
+
+**打包有一个必须注意的点**：驱动宿主是 `child_process.spawn` 拉起的独立脚本，
+而 `app.asar` 内的文件**无法被执行**。所以 `electron-builder.config.mjs` 里必须有：
+
+```js
+asarUnpack: ['out/driver-host/**']
+```
+
+漏了这行，应用能启动、界面正常，但**连不上任何数据库**——症状很有迷惑性。
+`src/main/DriverHostHandle.ts` 的路径候选列表里预留了
+`app.asar.unpacked/out/driver-host/index.js`，与此配置对应。
+
+---
+
 ## 验证
 
 ```bash
