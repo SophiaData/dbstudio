@@ -30,7 +30,8 @@
     "test:gui-round3": "node tests/gui-round3.mjs",
     "test:postgres": "node tests/e2e-postgres.mjs",
     "test:cancel": "node tests/e2e-cancel.mjs",
-    "test:gui-layout": "node tests/gui-layout.mjs"
+    "test:gui-layout": "node tests/gui-layout.mjs",
+    "check:build": "bash scripts/check-build-fresh.sh"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
