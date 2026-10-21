@@ -335,8 +335,9 @@ check('★ 界面上的编辑已写入数据库文件', row?.name === 'Alice-EDI
 
 // ---------------------------------------------------------------------------
 console.log('\n[6] 用 SQL 输入框执行查询')
-await win.fill('#sql-input', 'SELECT COUNT(*) AS total FROM customers')
-await win.click('#btn-run-sql')
+// SQL 输入框已换成编辑器组件：定位其内部 textarea。
+await win.fill('.sql-editor-input', 'SELECT COUNT(*) AS total FROM customers')
+await win.keyboard.press('Control+Enter')
 await win.waitForFunction(
   () => document.querySelector('.tab-pane:not([hidden]) .tab-grid-root') !== null,
   { timeout: 10000 }

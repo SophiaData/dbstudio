@@ -1739,6 +1739,46 @@ export class ResultGrid {
     else if (bottom > viewBottom) this.#viewportEl.scrollTop = bottom - this.#viewportEl.clientHeight
   }
 
+  /**
+   * 导出「已加载的行」——即用户实际滚动过、页缓存里真实存在的行。
+   *
+   * ===== 为什么需要这个公开方法 =====
+   *
+   * `#pages` 和 `#cursorId` 都是私有的。外部（导出功能）想要"用户看到的那些行"，
+   * 早先只能重跑一次查询取第一页顶替——但那**语义是错的**：
+   * 用户滚到第 500 行点导出，拿到的却是第 1-500 行，且界面不会提示这一点。
+   * 这类"看起来导出了、其实导出的不是那批数据"的静默错误，比导出失败更糟。
+   *
+   * 所以这里开一个**受控的只读出口**：返回列定义 + 按行号排序的已加载行 + 游标 id。
+   * 只返回数据快照，不暴露可变的内部结构。
+   */
+  exportLoadedRows(): {
+    columns: readonly ResultColumn[]
+    rows: readonly ResultRow[]
+    /** 已加载的行数（可能远小于结果集总数）。 */
+    loadedCount: number
+    /** 是否还有更多行没加载。调用方应在导出文件名或提示里体现。 */
+    hasMore: boolean
+    cursorId: string | null
+  } {
+    const rows: ResultRow[] = []
+    const pageSize = 100
+    // 按页号顺序遍历，并把每页的行按 index 摊平——页缓存可能不连续
+    // （用户跳着滚过），所以直接按 index 排序更稳。
+    for (const [, page] of this.#pages) {
+      for (const r of page.rows) rows.push(r)
+    }
+    rows.sort((a, b) => a.index - b.index)
+    void pageSize
+    return {
+      columns: [...this.#columns],
+      rows,
+      loadedCount: rows.length,
+      hasMore: !this.#exhausted,
+      cursorId: this.#cursorId
+    }
+  }
+
   /** 页面卸载/切换时释放游标。 */
   async dispose(): Promise<void> {
     await this.#reset()

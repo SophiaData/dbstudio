@@ -14,12 +14,15 @@
  */
 
 import type { DriverRegistry } from '../core/registry'
+import { createPostgresAdapter, POSTGRESQL_INFO } from './postgresql'
 import { createSqliteAdapter, SQLITE_INFO } from './sqlite'
 
 /** 把本仓库自带的所有驱动注册进注册表。 */
 export function registerBuiltinDrivers(registry: DriverRegistry): void {
   registry.register(createSqliteAdapter, SQLITE_INFO)
+  // 第二个方言：PostgreSQL。注册即全链路生效（UI 下拉框 / 宿主加载 / 测试遍历）。
+  registry.register(createPostgresAdapter, POSTGRESQL_INFO)
 }
 
 /** 内置驱动的方言 id 清单，测试用它遍历所有方言做冒烟。 */
-export const BUILTIN_DIALECT_IDS = ['sqlite'] as const
+export const BUILTIN_DIALECT_IDS = ['sqlite', 'postgresql'] as const

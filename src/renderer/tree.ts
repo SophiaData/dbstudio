@@ -111,6 +111,14 @@ export interface TreeCallbacks {
    * 可选：未接线时退化为只重载该子树。
    */
   onRootsChanged?(): void
+  /**
+   * 连接节点右键「查看 ER 图」时触发（E1-C 追加）。
+   *
+   * 可选：ER 图的渲染依赖 main.ts 的容器与 openTable 路径，树自身只负责把
+   * "用户想对某连接看 ER 图"这个意图传出去，不直接持有渲染逻辑。
+   * 未接线时该菜单项 disabled，不静默失败。
+   */
+  onViewErDiagram?(connectionRef: ObjectRef): void
 }
 
 export class MetadataTree {
@@ -970,6 +978,24 @@ export class MetadataTree {
         label: '编辑连接…',
         disabled: !api || typeof (api as { updateConnection?: unknown }).updateConnection !== 'function',
         run: () => this.#openEditConnection(node)
+      })
+
+      // 查看 ER 图（E1-C 追加）。
+      //
+      // 为什么挂在连接节点：ER 图是"整库/整连接"的视角，不是单表的事。
+      // 只把意图转给 main.ts（onViewErDiagram），渲染与上限判断都在 er-diagram.ts；
+      // 未接线时 disabled，并在点击时说明原因，不静默失败。
+      const canEr = typeof this.#cb.onViewErDiagram === 'function'
+      items.push({
+        label: '查看 ER 图',
+        disabled: !canEr,
+        run: () => {
+          if (typeof this.#cb.onViewErDiagram !== 'function') {
+            this.#cb.onStatus('ER 图尚未接入（缺少 onViewErDiagram 回调）', true)
+            return
+          }
+          this.#cb.onViewErDiagram(node.ref)
+        }
       })
     }
 

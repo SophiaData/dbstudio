@@ -94,6 +94,26 @@ const REJECTED_KEYWORDS = new Set([
 const PAGINATABLE_KEYWORDS = new Set(['select', 'values'])
 
 /**
+ * `EXPLAIN` / `EXPLAIN QUERY PLAN` 的特殊处理。
+ *
+ * 为什么需要单独放行：`EXPLAIN QUERY PLAN SELECT ...` 返回的是**普通行集**
+ * （id / parent / notused / detail 四列），完全可以 `SELECT * FROM (...) LIMIT ? OFFSET ?`
+ * 包起来分页。它被拦只是因为首词不在 PAGINATABLE_KEYWORDS 里——
+ * 而那个白名单的用途是"能否包成子查询"，EXPLAIN 其实可以。
+ *
+ * 为什么要在这里做：执行计划是 SQL 客户端的常用功能（DBeaver 有），
+ * 只在 UI 侧"绕过"或"禁用"都不解决根本问题。
+ *
+ * 安全性：`EXPLAIN` 本身**不执行语句**，只返回计划，所以放行不引入写风险。
+ * 但 `EXPLAIN QUERY PLAN DELETE FROM t` 里的 DELETE 会被执行吗？不会——
+ * EXPLAIN 只生成计划。不过我们仍然**只允许 EXPLAIN 后面跟只读语句**，
+ * 双重保险（见下方校验）。
+ */
+function isExplainStatement(topLevelWords: readonly string[]): boolean {
+  return (topLevelWords[0] ?? '').toLowerCase() === 'explain'
+}
+
+/**
  * SQLite 认可、但**不能被包成子查询分页**的语句起始词（大写）。
  *
  * 用途：区分「语句类型合法但功能不支持」与「压根没认出来、八成是拼错」。
@@ -337,6 +357,38 @@ export function prepareReadOnlyStatement(rawSql: string): string {
     throw new SqliteAdapterError('query_failed', '本阶段的查询窗口是只读的：会修改设置或状态的 PRAGMA 不会被执行。')
   }
 
+  // EXPLAIN 放行：它返回普通行集，可正常分页；且 EXPLAIN 不执行语句本身。
+  if (isExplainStatement(analysis.topLevelWords)) {
+    /**
+     * 双重保险：EXPLAIN 后面的**目标语句**必须是只读的。
+     *
+     * 这里有个坑（实测踩到）：`EXPLAIN QUERY PLAN DELETE FROM t` 的词序列是
+     * `[explain, query, plan, delete, ...]`。如果直接取 `slice(1)` 的第一词，
+     * 拿到的是 `QUERY`（不是 `DELETE`），而 QUERY 不在拒绝清单里 → 误放行。
+     *
+     * 所以必须**先跳过 EXPLAIN 的修饰词**（QUERY / PLAN），再看真正的语句首词。
+     * 修饰词集合：SQLite 支持 `EXPLAIN [QUERY PLAN] <stmt>`。
+     */
+    const EXPLAIN_MODIFIERS = new Set(['query', 'plan'])
+    let i = 1
+    while (i < analysis.topLevelWords.length) {
+      const w = (analysis.topLevelWords[i] ?? '').toLowerCase()
+      if (!EXPLAIN_MODIFIERS.has(w)) break
+      i += 1
+    }
+    const innerWords = analysis.topLevelWords.slice(i)
+    const inner = statementKeyword(innerWords)
+    // 括号/正号等标点词也算"词"，先过滤掉再判断
+    const innerAlpha = innerWords.find((w) => /^[a-z_][a-z0-9_]*$/i.test(w))?.toLowerCase() ?? inner
+    if (inner !== '' && (REJECTED_KEYWORDS.has(inner) || REJECTED_KEYWORDS.has(innerAlpha))) {
+      throw new SqliteAdapterError(
+        'query_failed',
+        `执行计划只用于查看查询怎么执行，不能对 ${innerAlpha.toUpperCase()} 这类写语句生成计划。`
+      )
+    }
+    return analysis.statementSql
+  }
+
   if (!PAGINATABLE_KEYWORDS.has(keyword)) {
     /**
      * 这里要区分两种"首词不在白名单"的情形，否则用户会被误导：
@@ -400,7 +452,33 @@ export function normalizeOffset(value: number | undefined): number {
  * （占位符版本还得再解释一次"参数是什么"）。
  */
 export function buildPagedSql(statementSql: string, limit: number, offset: number): string {
+  /**
+   * ⚠️ `EXPLAIN` 不能包进子查询。
+   *
+   * SQLite 不允许 `SELECT * FROM (EXPLAIN ...)`——实测直接报
+   * `near "PLAN": syntax error`。所以执行计划类语句**不走分页包装**，原样执行。
+   *
+   * 为什么这样可以接受：EXPLAIN / EXPLAIN QUERY PLAN 返回的行数是**执行计划的节点数**，
+   * 通常是几行到几十行，根本不存在"需要分页"的场景。
+   */
+  if (isExplainSql(statementSql)) {
+    return statementSql
+  }
   return `SELECT * FROM (\n${statementSql}\n) LIMIT ${limit} OFFSET ${offset}`
+}
+
+/**
+ * 判断是否 EXPLAIN 类语句。
+ *
+ * 只看首个非空白/非注释词是不是 `explain`。这里刻意做得简单：
+ * 真正的语法校验在 `prepareReadOnlyStatement` 里已经做过（它会返回处理过的 statementSql），
+ * 这里只是决定"要不要包分页"。
+ */
+function isExplainSql(statementSql: string): boolean {
+  const stripped = statementSql
+    .replace(/^\s+/, '')
+    .replace(/^(--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*/g, '')
+  return /^explain\b/i.test(stripped)
 }
 
 // ---------------------------------------------------------------------------

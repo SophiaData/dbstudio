@@ -6,12 +6,28 @@
  * 这条边界就是剖析报告里「model 层无 UI / ui 层无数据库知识」在 Web 侧的对等物。
  */
 
-import type { ConnectionSummary, DbStudioApi } from '../core/api'
+import { NodeId, type ConnectionSummary, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
 import type { DialectField, DialectInfo } from '../core/driver'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs } from './tabs'
+import { SqlEditor } from './sql-editor'
+// E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
+import { renderErDiagram } from './er-diagram'
+import {
+  toCsv,
+  toJson,
+  toInsertSql,
+  toMarkdown,
+  buildExportFileName,
+  type ExportColumn,
+  type ExportRow
+} from './export-formats'
+import type { ResultGrid } from './grid'
+import { pickQuotingRules, quoteIdentifier } from './grid'
+import type { QuotingRules } from '../core/driver'
+import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
 
 declare global {
   interface Window {
@@ -72,10 +88,46 @@ async function boot(): Promise<void> {
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
 
-  const showPane = (which: 'detail' | 'grid' | 'empty'): void => {
+  // E1-C 追加：当前结果标签对应的表与 grid 实例。
+  // 为什么在 main.ts 记住 grid 而不是给 tabs 加 getter：tabs.ts 不在本轮写入范围，
+  // 而 openTable/runSql 本来就返回 ResultGrid，在这里留存是最小侵入的做法。
+  let activeGrid: ResultGrid | null = null
+  let activeTableRef: ObjectRef | null = null
+  /** 当前结果若是 SQL 来源，记住原 SQL（筛选要包一层子查询）。 */
+  let activeSql: string | null = null
+
+  /**
+   * 结果工具条的可见性：有活动结果才显示（导出/筛选都作用于"当前标签"）。
+   */
+  const syncToolsVisibility = (): void => {
+    el('result-tools').hidden = activeGrid === null
+  }
+
+
+
+  /**
+   * 取方言的标识符引用规则。
+   *
+   * 为什么不直接用 grid 内部缓存的规则：那是私有字段。这里按 grid 的同款逻辑
+   * 重取一次（`listDialects` + `pickQuotingRules`）：只有当**所有**已注册方言的
+   * 引用规则一致时才拼 SQL，否则返回 null 让调用方拒绝执行——
+   * 猜一个规则去拼标识符，比拒绝更危险。
+   */
+  const resolveQuoting = async (): Promise<QuotingRules | null> => {
+    try {
+      const dialects = await api.listDialects()
+      return pickQuotingRules(dialects)
+    } catch {
+      return null
+    }
+  }
+
+  const showPane = (which: 'detail' | 'grid' | 'empty' | 'er'): void => {
     el('detail-empty').hidden = which !== 'empty'
     el('detail-content').hidden = which !== 'detail'
     el('result-area').hidden = which !== 'grid'
+    // E1-C 追加：ER 面板与结果区互斥。注意 er 面板自身有 #er-area[hidden] 规则。
+    el('er-area').hidden = which !== 'er'
   }
 
   /** 选中表/视图 → **新开**一个结果标签（不再替换当前结果）。 */
@@ -84,7 +136,11 @@ async function boot(): Promise<void> {
     try {
       const desc = await api.describeTable(ref.id)
       // 来源（ref + desc）在调用点记下，tabs 会把它绑定到该标签，供「导出全部」重查。
-      await tabs.openTable(ref, desc)
+      const g = await tabs.openTable(ref, desc)
+      // E1-C 追加：记住当前结果所属的表与 grid，供「导出已加载行 / 筛选」使用。
+      activeTableRef = ref
+      activeGrid = g
+      syncToolsVisibility()
     } catch (e) {
       setStatus(`打开表失败：${errText(e)}`, true)
     }
@@ -119,37 +175,318 @@ async function boot(): Promise<void> {
       // 树面板左上角的摘要。原先这个元素写死在 HTML 里，连上库也显示「未连接」。
       onSummary: (t) => {
         el('tree-summary').textContent = t
+      },
+      // E1-C 追加：连接节点右键「查看 ER 图」→ 切到 ER 面板并生成。
+      onViewErDiagram: (connRef) => {
+        void openErDiagram(connRef)
       }
     }
   )
 
-  // ---- SQL 执行条 ----
-  const runSql = async (): Promise<void> => {
-    const input = el<HTMLInputElement>('sql-input')
-    const sql = input.value.trim()
-    if (!sql) return
+  // ---- SQL 编辑器（替换原来的单行 input）----
+  /** 执行一段 SQL（单条/全部同一条路径，区别只在传入内容）。 */
+  const executeSql = async (sql: string): Promise<void> => {
+    if (!sql.trim()) return
     if (!currentConnectionNodeId) {
       setStatus('请先在左侧选择一个连接再执行 SQL', true)
       return
     }
     showPane('grid')
     // 每次执行都**新开**一个标签（标签名取 SQL 前若干字符），而不是替换上次结果。
-    await tabs.runSql(currentConnectionNodeId, sql)
+    const g = await tabs.runSql(currentConnectionNodeId, sql)
+    // E1-C 追加：记录来源，供导出/筛选使用（SQL 来源没有表名）。
+    activeGrid = g
+    activeTableRef = null
+    activeSql = sql
+    syncToolsVisibility()
   }
 
-  el('btn-run-sql').addEventListener('click', () => void runSql())
-  el('sql-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') void runSql()
+  /**
+   * 补全候选：当前连接的表名/视图名。
+   *
+   * 只遍历「表/视图」两个分组的直接子节点（各一次 listChildren），
+   * 不做递归 —— 深度遍历在大库上会拉几百次请求，而补全只需要顶层对象名。
+   * 缓存 30s，避免每次按键都查库。失败时返回空数组，编辑器会退化为只补关键字。
+   */
+  let metaCandidatesCache: { at: number; items: string[] } | null = null
+  const sqlEditor = new SqlEditor(el('sql-editor-host'), {
+    onExecute: (sql) => void executeSql(sql),
+    onStatus: (t, isErr) => setStatus(t, isErr),
+    getMetadataCandidates: async () => {
+      const connId = currentConnectionNodeId
+      if (!connId) return []
+      const now = Date.now()
+      if (metaCandidatesCache && now - metaCandidatesCache.at < 30_000) {
+        return metaCandidatesCache.items
+      }
+      try {
+        const kids = await api.listChildren(connId)
+        const items: string[] = []
+        for (const folder of kids) {
+          if (folder.kind !== 'folder' || !folder.hasChildren) continue
+          const objs = await api.listChildren(folder.id)
+          for (const o of objs) items.push(o.name)
+        }
+        metaCandidatesCache = { at: now, items }
+        return items
+      } catch {
+        return []
+      }
+    },
+    runExplain: async (sql) => {
+      const connId = currentConnectionNodeId
+      if (!connId) throw new Error('未选择连接')
+      const r = await api.runQuery(connId, `EXPLAIN QUERY PLAN ${sql}`, { keepCursor: false })
+      return {
+        columns: r.columns.map((c) => c.name),
+        rows: r.rows.map((row) =>
+          row.cells.map((c) => {
+            if (c.kind === 'null') return null
+            if (c.kind === 'number') return c.value
+            if (c.kind === 'boolean') return c.value
+            if (c.kind === 'text') return c.text
+            return String(c)
+          })
+        )
+      }
+    }
   })
 
   el('btn-refresh').addEventListener('click', () => {
     void tree.loadRoots()
   })
   el('btn-new-connection').addEventListener('click', () => {
-    void openConnectionDialog(api, () => void tree.loadRoots())
+    void openConnectionDialog(api, (summary) => {
+      /**
+       * 建完连接立刻把它设为「当前连接」。
+       *
+       * 为什么必须这样：`currentConnectionNodeId` 原先只在点击树节点时才赋值，
+       * 于是最常见的操作序列 ——「新建连接 → 直接写 SQL → 执行」——
+       * 会撞上「请先在左侧选择一个连接再执行 SQL」。
+       * 用户刚连上、什么也没做错，却被要求再点一下树，纯属多余。
+       *
+       * 这个 bug 是真实点击测试抓到的，不是理论问题。
+       */
+      currentConnectionNodeId = NodeId.connection(summary.id)
+      void tree.loadRoots()
+    })
   })
 
+  // =====================================================================
+  // E1-C 追加：ER 图 + 结果工具条（多格式导出 / 筛选）
+  // 全部为新增块，不改动上面的既有接线。
+  // =====================================================================
+
+  /** 打开某连接的 ER 图。 */
+  const openErDiagram = async (connRef: ObjectRef): Promise<void> => {
+    showPane('er')
+    await renderErDiagram(
+      el('er-area'),
+      api,
+      connRef,
+      {
+        onStatus: (t, isErr) => setStatus(t, isErr),
+        // 点表框 → 走既有 openTable 路径（新开一个结果标签并切回结果区）。
+        onOpenTable: (ref) => {
+          showPane('grid')
+          void openTableGrid(ref)
+        }
+      },
+      () => showPane('grid') // 返回：回到结果区
+    )
+  }
+
+  // ---------------------------------------------------------------------
+  // 多格式导出（导出**已加载行**）
+  // ---------------------------------------------------------------------
+  //
+  // 与右上角「导出全部」的区别（必须在 UI 上也让用户看得见）：
+  //   - 这里：只导出 result-grid 页缓存里已加载的行，不重查，快；
+  //   - 「导出全部」：会重新执行一次查询把所有行拉回来，慢、有行数上限。
+  // 二者不可混为一谈，否则用户会以为"导出 = 全表"。
+  const exportSel = el<HTMLSelectElement>('btn-export-format')
+  exportSel.addEventListener('change', () => {
+    void doExport()
+  })
+
+  const doExport = async (): Promise<void> => {
+    const grid = activeGrid
+    const tableRef = activeTableRef
+    if (!grid) {
+      setStatus('没有可导出的结果', true)
+      return
+    }
+    try {
+      /**
+       * 取「用户真正加载过的那些行」。
+       *
+       * 早先的实现是「用相同来源重查一次、取第一页顶替已加载行」——那是**语义错误**：
+       * 用户滚到第 5000 行点导出，拿到的却是第 1-500 行，界面还不会有任何提示。
+       *
+       * 现在 grid 提供了 `exportLoadedRows()`（受控只读出口），
+       * 直接给出页缓存里真实存在的行。它同时告诉我们 `hasMore`，
+       * 导出时就能明确提示「共导出 N 行（结果集还有更多未加载）」。
+       *
+       * 为什么不用 DOM 读单元格文本：文本无法还原 number / NULL / boolean 的区别，
+       * 导出的 JSON/INSERT 类型会全错——这种静默错误比报错更糟。
+       */
+      const g = activeGrid
+      if (!g) {
+        setStatus('导出失败：没有活动结果集', true)
+        return
+      }
+      const loaded = g.exportLoadedRows()
+      if (loaded.loadedCount === 0) {
+        setStatus('导出失败：当前结果集还没有加载任何行', true)
+        return
+      }
+      const cols: ExportColumn[] = loaded.columns.map((c) => ({ name: c.name }))
+      const rows: ExportRow[] = loaded.rows.map((r) => r.cells)
+      const fmt = exportSel.value
+      let text = ''
+      let ext = 'txt'
+      let mime = 'text/plain;charset=utf-8'
+      if (fmt === 'csv') {
+        // 加 BOM：Excel 打开不带 BOM 的 UTF-8 CSV，中文会乱码。
+        text = '\uFEFF' + toCsv(cols, rows)
+        ext = 'csv'
+        mime = 'text/csv;charset=utf-8'
+      } else if (fmt === 'json') {
+        text = toJson(cols, rows)
+        ext = 'json'
+        mime = 'application/json;charset=utf-8'
+      } else if (fmt === 'insert') {
+        // INSERT 需要表名 + 标识符引用规则。任一拿不到就**拒绝**，
+        // 绝不拼接未转义的表名/列名。
+        if (!tableRef) {
+          setStatus('INSERT 导出需要"表"来源（自由 SQL 结果没有表名）', true)
+          return
+        }
+        const rules = await resolveQuoting()
+        if (!rules) {
+          setStatus('无法获取方言引号规则，已取消 INSERT 导出（不会拼接未转义的标识符）', true)
+          return
+        }
+        text = toInsertSql(tableRef.name, cols, rows, (n) => quoteIdentifier(n, rules))
+        ext = 'sql'
+        mime = 'text/plain;charset=utf-8'
+      } else {
+        text = toMarkdown(cols, rows)
+        ext = 'md'
+        mime = 'text/markdown;charset=utf-8'
+      }
+      download(text, buildExportFileName(ext), mime)
+      setStatus(`已导出 ${rows.length} 行（${fmt.toUpperCase()}，仅当前已渲染的行）`)
+    } catch (e) {
+      setStatus(`导出失败：${errText(e)}`, true)
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 筛选：**重新查询**，不是前端过滤
+  // ---------------------------------------------------------------------
+  //
+  // 为什么不能前端过滤：页缓存只有用户滚动看过的那部分行，前端过滤会得到
+  // 「只过滤了看得见的行」的结果——看起来对、实际全错、还不报错。
+  // 所以这里把条件拼成 WHERE，交给 grid 重新执行查询（清空页缓存、从偏移 0 取）。
+  const filterToggle = el<HTMLButtonElement>('btn-filter-toggle')
+  const filterBar = el('filter-bar')
+  const filterInput = el<HTMLInputElement>('filter-input')
+
+  filterToggle.addEventListener('click', () => {
+    filterBar.hidden = !filterBar.hidden
+    if (!filterBar.hidden) filterInput.focus()
+  })
+  filterInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void applyFilter()
+  })
+  el('btn-filter-apply').addEventListener('click', () => void applyFilter())
+  // 清除：把条件置空并**同样重查**——否则会停在筛选结果上，与输入框状态不符。
+  el('btn-filter-clear').addEventListener('click', () => {
+    filterInput.value = ''
+    void applyFilter()
+  })
+
+  const applyFilter = async (): Promise<void> => {
+    const grid = activeGrid
+    const tableRef = activeTableRef
+    if (!grid) {
+      setStatus('没有可筛选的结果', true)
+      return
+    }
+    const rules = await resolveQuoting()
+    if (!rules) {
+      setStatus('无法获取方言引号规则，已取消筛选（不会拼接未转义的列名）', true)
+      return
+    }
+    const quote = (n: string): string => quoteIdentifier(n, rules)
+
+    const parsed = parseFilter(filterInput.value, quote)
+    if (!parsed.ok) {
+      setStatus(describeFilterError(parsed.error), true)
+      return
+    }
+
+    // 依据来源拼带 WHERE 的完整 SQL：
+    //   表 → SELECT * FROM "t" WHERE ...
+    //   SQL → SELECT * FROM (<原SQL>) _dbstudio_filter WHERE ...（WHERE 作用于原查询结果）
+    //
+    // 为什么用 activeSql：自由 SQL 结果要包一层子查询，必须知道"原 SQL 是什么"。
+    // 表来源则由 tableRef 给出表名。
+    const base = activeSql
+      ? ({ sourceKind: 'sql', sql: activeSql } as const)
+      : tableRef
+        ? ({ sourceKind: 'table', tableName: tableRef.name } as const)
+        : null
+    if (!base) {
+      setStatus('当前结果不支持筛选（既不是表来源，也没有记住原 SQL）', true)
+      return
+    }
+    const sql = buildFilteredSql(base, parsed.conditions, quote)
+
+    setStatus(parsed.conditions.length === 0 ? '正在清除筛选（重新查询）…' : '正在按筛选重新查询…')
+    try {
+      // 关键：**重新查询**。走 tabs.runSql 新开一个标签（tabs.openTable/runSql 是
+      // 唯一能"重跑任意 SQL"的公开入口；grid.ts 不归本轮改，不能加方法）。
+      // 旧标签保留：用户可对比"筛选前/筛选后"，也符合多标签的设计初衷。
+      showPane('grid')
+      const connNodeId = currentConnectionNodeId
+      if (!connNodeId) {
+        setStatus('筛选失败：未知连接', true)
+        return
+      }
+      const newGrid = await tabs.runSql(connNodeId, sql)
+      activeGrid = newGrid
+      syncToolsVisibility()
+      // 筛选结果是 SQL 来源，不再对应单表 → 清掉表引用，避免 INSERT 导出用它。
+      activeTableRef = null
+      activeSql = sql
+      setStatus(
+        parsed.conditions.length === 0
+          ? '已清除筛选（重新查询）'
+          : `已按筛选重新查询（${parsed.conditions.length} 个条件）`
+      )
+    } catch (e) {
+      setStatus(`筛选失败：${errText(e)}`, true)
+    }
+  }
+
+
   await tree.loadRoots()
+}
+
+/** 触发浏览器下载（导出用）。 */
+function download(text: string, filename: string, mime: string): void {
+  const blob = new Blob([text], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 下载已开始，下一帧释放 object URL，避免内存泄漏。
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 /**
@@ -384,7 +721,10 @@ function actionButton(label: string, onClick: () => Promise<void>): HTMLButtonEl
 
 let cachedDialects: DialectInfo[] | null = null
 
-async function openConnectionDialog(api: DbStudioApi, onConnected: () => void): Promise<void> {
+async function openConnectionDialog(
+  api: DbStudioApi,
+  onConnected: (summary: ConnectionSummary) => void
+): Promise<void> {
   const dlg = el<HTMLDialogElement>('dlg-connection')
   const sel = el<HTMLSelectElement>('f-dialect')
   const dyn = el('f-dynamic')
@@ -487,7 +827,7 @@ async function openConnectionDialog(api: DbStudioApi, onConnected: () => void): 
         const summary: ConnectionSummary = await api.addConnection(config, secret)
         dlg.close()
         setStatus(`已连接：${summary.name}`)
-        onConnected()
+        onConnected(summary)
       } catch (err) {
         errP.textContent = errText(err)
         errP.hidden = false

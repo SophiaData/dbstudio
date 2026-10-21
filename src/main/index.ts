@@ -195,7 +195,9 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       // 否则会误报「界面坏了」——实际是断言过时（这次就是这么发现的）。
       const tabbar = document.getElementById('result-tabbar');
       const resultStack = document.getElementById('result-stack');
-      const sqlInput = document.getElementById('sql-input');
+      // SQL 输入框已升级为完整的编辑器组件（#sql-editor-host 由 SqlEditor 自建内部 DOM）。
+      const sqlHost = document.getElementById('sql-editor-host');
+      const sqlEditorArea = document.querySelector('.sql-editor-input');
       const api = window.dbstudio;
       // 结果集相关的 API 必须全部就位——白名单从 7 扩到 11 时，
       // 只要漏了任何一个，网格在真实点击时才会炸，自检要提前发现。
@@ -225,7 +227,8 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
         // 结果集区域必须存在（虽然初始 hidden）
         hasTabbar: !!tabbar,
         hasResultStack: !!resultStack,
-        hasSqlInput: !!sqlInput,
+        hasSqlEditorHost: !!sqlHost,
+        hasSqlEditorTextarea: !!sqlEditorArea,
         gridApiCount: gridApi.length,
         persistApiCount: persistApi.length,
         editApiCount: editApi.length,
@@ -250,7 +253,8 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       statusText: string | null
       hasTabbar: boolean
       hasResultStack: boolean
-      hasSqlInput: boolean
+      hasSqlEditorHost: boolean
+      hasSqlEditorTextarea: boolean
       gridApiCount: number
       persistApiCount: number
       editApiCount: number
@@ -265,7 +269,8 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       // 结果集：DOM 容器 + SQL 输入框 + 4 个新 API 必须齐全
       r.hasTabbar &&
       r.hasResultStack &&
-      r.hasSqlInput &&
+      r.hasSqlEditorHost &&
+      r.hasSqlEditorTextarea &&
       r.gridApiCount === 4 &&
       // 持久化：connectConnection / disconnectConnection 两个新方法必须注入
       r.persistApiCount === 2 &&

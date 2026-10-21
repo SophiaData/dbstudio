@@ -24,6 +24,7 @@
  */
 
 import type { DialectInfo } from '../core/driver'
+import { POSTGRESQL_INFO } from './postgresql/info'
 import { SQLITE_INFO } from './sqlite/info'
 
 /**
@@ -33,7 +34,7 @@ import { SQLITE_INFO } from './sqlite/info'
  * **绝不能** import `adapter.ts` 或驱动包的入口——那会连带拉进实现。
  * 新增方言时请遵守这条，否则隔离会以很隐蔽的方式失效。
  */
-export const BUILTIN_DIALECT_METADATA: readonly DialectInfo[] = [SQLITE_INFO]
+export const BUILTIN_DIALECT_METADATA: readonly DialectInfo[] = [SQLITE_INFO, POSTGRESQL_INFO]
 
 /** 内置方言 id 清单，供需要遍历的调用方使用。 */
 export const BUILTIN_DIALECT_IDS = BUILTIN_DIALECT_METADATA.map((d) => d.id)

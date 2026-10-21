@@ -248,14 +248,14 @@ const mkView = await treeContextMenu('视图', '新建视图')
 check('视图分组右键有「新建视图」', mkView.clicked)
 if (mkView.clicked) {
   await win.waitForTimeout(700)
+  // 用 aria-label 精确定位（ddl.ts 里给每个输入框都加了 aria-label，
+  //  比"取最后一个 text input"这种位置猜测稳得多——后者一旦对话框加字段就失效）。
   const fillView = await win.evaluate(() => {
-    const inputs = [...document.querySelectorAll('input[type="text"]')]
-    const ta = document.querySelector('textarea')
-    // 视图名输入：通常第一个 text input；SQL 在 textarea
-    const nameIn = inputs[inputs.length - 1]
-    if (!nameIn || !ta) return { ok: false, hasName: !!nameIn, hasTa: !!ta }
-    nameIn.value = 'v_gui'
-    ta.value = 'SELECT id, v FROM alpha'
+    const nameIn = document.querySelector('input[aria-label="视图名"]')
+    const sqlIn = document.querySelector('textarea[aria-label="视图的 SELECT 语句"]')
+    if (!nameIn || !sqlIn) return { ok: false, hasName: !!nameIn, hasTa: !!sqlIn }
+    ;(nameIn).value = 'v_gui'
+    ;(sqlIn).value = 'SELECT id, v FROM alpha'
     return { ok: true }
   })
   console.log('  [视图表单]', JSON.stringify(fillView))
@@ -317,25 +317,33 @@ if (editEntry.found) {
   await win.screenshot({ path: join(shotDir, 'r3-04-编辑连接.png') })
   // 断言回填：file 输入框应该已有当前值（不是空的）
   const backed = await win.evaluate(() => {
-    const overlay = [...document.querySelectorAll('div')].find((d) => d.style.zIndex === '10000')
-    const inp = overlay?.querySelector('input[data-key="file"]')
-    return { exists: !!inp, value: inp?.value ?? '' }
+    const all = [...document.querySelectorAll('input[data-key="file"]')]
+    const inp = all[all.length - 1]
+    return { exists: !!inp, value: inp?.value ?? '', count: all.length }
   })
   check('编辑对话框回填了当前配置（不是空框）', backed.exists && backed.value !== '', JSON.stringify(backed))
 
+  // 打印对话框里 file 输入框的实际值与上下文
+  // 直接按 aria-label 找输入框，不依赖 overlay 定位（那层包装随时可能变）
+  const beforeFill = await win.evaluate(() => ({
+    hasName: !!document.querySelector('input[aria-label="连接名"]'),
+    fileInputs: [...document.querySelectorAll('input[data-key="file"]')].map(i => i.value.slice(-24))
+  }))
   const changed = await win.evaluate((newFile) => {
     // ★ 必须限定在「编辑连接」这个 overlay 内！
     //   index.html 里的 #dlg-connection（新建连接对话框）是常驻 <dialog>，
     //   close() 只是隐藏，DOM 还在——里面也有 input[data-key="file"]。
     //   全局 querySelector 会命中那个旧输入框（值是 a.db），改了等于没改。
-    const overlay = [...document.querySelectorAll('div')].find(
-      (d) => d.style.zIndex === '10000'
-    )
-    const inp = overlay?.querySelector('input[data-key="file"]')
-    if (!inp) return { ok: false, reason: 'no file input in edit overlay' }
+    // 定位「编辑连接」overlay：用其中的 aria-label="连接名" 输入框往上找，
+    // 而不是靠 z-index 数值（那个值随时可能被调整）。
+    // 编辑对话框的 file 输入框是**最后一个** data-key="file"
+    // （新建连接对话框的常驻 DOM 里也有一个，值不同）。
+    const all = [...document.querySelectorAll('input[data-key="file"]')]
+    const inp = all[all.length - 1]
+    if (!inp) return { ok: false, reason: 'no file input' }
     inp.value = newFile
     inp.dispatchEvent(new Event('input', { bubbles: true }))
-    const saveBtn = [...(overlay?.querySelectorAll('button') ?? [])].find(
+    const saveBtn = [...document.querySelectorAll('button')].find(
       (x) => x.textContent?.trim() === '保存'
     )
     if (!saveBtn || saveBtn.disabled) return { ok: false, reason: 'save disabled' }

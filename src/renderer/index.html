@@ -60,16 +60,51 @@
             </div>
             <div id="result-stack"></div>
             <div id="result-tabs-empty">在左侧点击一张表，或执行 SQL，结果会以新标签打开。</div>
+
+            <!--
+              结果工具条（E1-C 追加）：作用于**当前标签**的已加载数据。
+              与右上角「导出全部」区分：这里导出"已加载行"，不重查；
+              筛选则相反——必须**重新查询**（拼 WHERE 重跑），
+              不能在前端过滤页缓存，否则只过滤了"看得见的行"，静默出错。
+            -->
+            <div id="result-tools" hidden>
+              <label class="result-tools-label" for="btn-export-format">导出（已加载行）</label>
+              <select id="btn-export-format"
+                      title="导出当前标签已加载的行；需要全量请用右上角「导出全部」">
+                <option value="csv">CSV</option>
+                <option value="json">JSON</option>
+                <option value="insert">INSERT SQL</option>
+                <option value="markdown">Markdown</option>
+              </select>
+              <button id="btn-filter-toggle" type="button" title="按条件筛选（会重新查询）">筛选…</button>
+              <div id="filter-bar" hidden>
+                <input id="filter-input" type="text" spellcheck="false"
+                       placeholder="例：status = 'active'（多条件用 AND 分隔）"
+                       aria-label="筛选条件" />
+                <button id="btn-filter-apply" type="button">应用筛选</button>
+                <button id="btn-filter-clear" type="button">清除</button>
+                <span id="filter-hint" class="result-tools-hint"
+                      title="筛选是在数据库端重新查询，不是在前端过滤已加载的行">筛选会重新查询整表</span>
+              </div>
+            </div>
           </div>
+
+          <!--
+            ER 图面板（E1-C 追加）：由 er-diagram.ts 接管内部 SVG。
+            与结果区互斥显示（靠 hidden 切换）；零依赖手绘 SVG。
+          -->
+          <div id="er-area" hidden></div>
         </section>
       </main>
 
       <!-- 顶部 SQL 输入条。执行结果进右侧结果集网格。 -->
-      <div id="sqlbar">
-        <input id="sql-input" type="text" spellcheck="false"
-               placeholder="输入 SQL 后回车执行，例如：SELECT * FROM users" />
-        <button id="btn-run-sql" type="button">执行</button>
-      </div>
+      <!--
+        SQL 编辑器容器。具体 DOM（高亮层 + textarea + 工具栏 + 补全浮层 + 计划面板）
+        全部由 SqlEditor 组件自己创建，这里只给一个挂载点。
+        为什么不在 HTML 里写死：编辑器的内部结构（pre/textarea 对齐、浮层定位）
+        与组件实现强耦合，放外面反而容易脱节。
+      -->
+      <div id="sql-editor-host"></div>
 
       <div id="status-bar" role="status" aria-live="polite"></div>
     </div>
