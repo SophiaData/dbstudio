@@ -1,8 +1,7 @@
 {
   "name": "dbstudio",
   "version": "0.1.0",
-  "private": true,
-  "description": "数据库客户端：元数据/方言抽象 + 连接管理。架构参考 DBeaver 剖析结论，实现走 Electron/TS 进程隔离路线。",
+  "description": "数据库客户端（Electron + TypeScript）。架构源自对 DBeaver 源码的剖析：驱动进程隔离、虚拟化元数据树、游标分页结果集、参数化在线编辑。",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "pnpm run build:driver-host && electron-vite dev",
@@ -17,13 +16,28 @@
     "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
     "test:gui": "node scripts/run-in-electron.mjs --gui",
     "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:electron && pnpm run test:gui",
-    "test:persist": "node tests/e2e-persist.mjs"
+    "test:persist": "node tests/e2e-persist.mjs",
+    "build:app": "pnpm run build && electron-builder --config electron-builder.config.mjs",
+    "build:app:mac": "pnpm run build && electron-builder --config electron-builder.config.mjs --mac",
+    "build:app:linux": "pnpm run build && electron-builder --config electron-builder.config.mjs --linux",
+    "build:app:win": "pnpm run build && electron-builder --config electron-builder.config.mjs --win"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
     "electron": "^45.0.0",
     "electron-vite": "^6.0.0",
     "typescript": "^5.9.0",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "author": "SophiaData",
+  "license": "MIT",
+  "homepage": "https://github.com/SophiaData/dbstudio",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SophiaData/dbstudio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SophiaData/dbstudio/issues"
   }
 }
