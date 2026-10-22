@@ -2,7 +2,7 @@
 #
 # 为什么值得加这一条：本地开发时 node_modules / out / fixtures 都是现成的，
 # 很容易出现「在我机器上能过」。这个 workflow 从零安装、重新生成夹具、
-# 跑全部 232 条断言 + Electron 内置 Node 验证 + GUI 自检，
+# 跑全部 555 条断言（含 Electron 内置 Node 验证，以及 6 段 GUI 里的 5 段真实点击），
 # 是「这个仓库克隆下来真的能跑」的唯一客观证据。
 #
 # 注意 GUI 自检需要显示环境；Linux CI 上用 xvfb 提供虚拟显示。
@@ -79,6 +79,8 @@ jobs:
           pnpm run test:resultset
           pnpm run test:edit
           pnpm run test:persist
+          pnpm run test:mutations
+          pnpm run test:ddl
           pnpm run test:electron
 
       - name: PostgreSQL 驱动端到端（真实 PG 17 服务容器）
@@ -95,6 +97,25 @@ jobs:
         env:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: node tests/e2e-cancel.mjs
+
+      - name: SDK 构建与外部用户视角测试
+        # SDK 不 import 源码，而是 import 构建后的 dist 产物，用 require.resolve
+        # 找驱动宿主——和 npm 用户完全一致。
+        # 为什么必须在 CI 里跑：这一步最容易出的问题是「源码能跑、发的包里是坏的」
+        # （路径推断错、d.ts 断链、driver-host 没被带进包），本地很难发现，
+        # 而它一旦坏了，影响的是所有外部使用者。
+        run: |
+          pnpm run build:sdk
+          pnpm run test:sdk
+
+      - name: 布局持久化 GUI 测试（xvfb 提供虚拟显示）
+        # 纯 Node 测不了这条：真正的功能是「拖宽列 → 关标签 → 重开表 → 列宽还在」，
+        # 链路里有 localStorage、网格实例重建、openTable 执行顺序。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-layout
 
       - name: GUI 自检（xvfb 提供虚拟显示）
         # --no-sandbox 的来历（Linux CI 常见坑）：

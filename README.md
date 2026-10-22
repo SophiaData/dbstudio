@@ -17,7 +17,7 @@
 │  虚拟化懒加载元数据树 · 详情面板 · 新建连接表单    │
 │  只知道 window.dbstudio，不知道 SQLite 是什么      │
 └─────────────────────┬───────────────────────────┘
-                      │ 7 个白名单方法（src/core/api.ts）
+                      │ 28 个白名单方法（src/core/api.ts）
 ┌─────────────────────▼───────────────────────────┐
 │  preload (src/preload)                           │
 │  contextBridge 显式枚举，多一个都不给              │
@@ -101,7 +101,7 @@ src/
     sqlite/          SQLite 适配器（node:sqlite，零原生依赖）
   driver-host/     驱动宿主进程（纯 Node，禁止 import electron）
   main/            Electron 主进程
-  preload/         白名单桥（11 个方法）
+  preload/         白名单桥（28 个方法）
   renderer/
     tree.ts         虚拟化懒加载元数据树
     grid.ts         结果集网格：虚拟滚动 + 按页取数
@@ -168,10 +168,10 @@ asarUnpack: ['out/driver-host/**']
 
 ```bash
 pnpm install
-pnpm verify      # 十六段全链（含 3 段真实 GUI 交互 + PG）
+pnpm verify      # 二十段全链（含 6 段 GUI：5 段真实交互 + 1 段自检；PG 无环境时自动跳过）
 ```
 
-`pnpm verify` 依次执行：
+`pnpm verify` 依次执行（顺序与 `package.json` 里的 `verify` 脚本一致）：
 
 | 阶段 | 命令 | 验证什么 |
 |---|---|---|
@@ -186,12 +186,15 @@ pnpm verify      # 十六段全链（含 3 段真实 GUI 交互 + PG）
 | 9 | `test:ddl` | DDL e2e **53/53**：建表/删表/视图/重命名/类型与默认值白名单 |
 | 10 | `test:postgres` | PG e2e **42/42**（真实 PG 17.11；无环境时自动跳过） |
 | 11 | `test:cancel` | 取消能力 **15/15**：PG 真取消（516ms 中断 10s 慢查询）/ SQLite 如实不支持 |
-| 12 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
-| 9 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
-| 13 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
-| 14 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
-| 15 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
-| 16 | `test:sdk` | SDK 构建 + **30/30**（从 dist 产物导入，模拟外部用户） |
+| 12 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
+| 13 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
+| 14 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
+| 15 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
+| 16 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
+| 17 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
+| 18 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
+| 19 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
+| 20 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
 
 单独跑：
 
