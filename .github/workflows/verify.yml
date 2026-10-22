@@ -21,6 +21,29 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    # ★ PostgreSQL 服务容器：让 PG 测试在 CI 里**真跑**，而不是被跳过。
+    #
+    # 为什么必须加这个：早先 CI 里虽然调用了 `pnpm run test:postgres`，但没设
+    # DBSTUDIO_PG_URL，于是每次走"缺环境→exit 0"的跳过分支。
+    # 结果是 CI 全绿，但 **PG 驱动从来没在 CI 里被真正验证过** ——
+    # 谁改坏了 PG，CI 照样绿，只有本地手动起过 PG 的人才会发现。
+    # 这种"绿得没有说服力"的 CI 比没有 CI 更危险。
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # 等健康检查通过再跑后续步骤，避免"连接被拒"的偶发失败。
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -56,8 +79,22 @@ jobs:
           pnpm run test:resultset
           pnpm run test:edit
           pnpm run test:persist
-          pnpm run test:postgres   # 无 PG 环境时自动跳过（exit 0）
           pnpm run test:electron
+
+      - name: PostgreSQL 驱动端到端（真实 PG 17 服务容器）
+        # 与上面的 SQLite e2e 分开列，失败时能一眼看出是 PG 的问题。
+        # 这里显式设 DBSTUDIO_PG_URL，测试因此**不会**走跳过分支。
+        env:
+          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: |
+          node scripts/build-driver-host.mjs
+          node scripts/make-fixture-pg.mjs
+          node tests/e2e-postgres.mjs
+
+      - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
+        env:
+          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: node tests/e2e-cancel.mjs
 
       - name: GUI 自检（xvfb 提供虚拟显示）
         # --no-sandbox 的来历（Linux CI 常见坑）：
