@@ -15,12 +15,27 @@
  *    electron-vite 已经把 main/preload/renderer 各自 bundle 成单文件，
  *    运行时不需要 src；`files` 白名单可以显著减小安装包体积。
  *
- * 3. **macOS 不做签名公证**
- *    本机没有开发者证书（`security find-identity` 为 0）。
- *    产物是"未签名"的：自己机器能直接跑，别人下载会被 Gatekeeper 拦，
+ * 3. **macOS 签名/公证：已就绪，但默认关闭**
+ *    本机没有开发者证书（`security find-identity` 为 0），所以**默认不签名**：
+ *    产物是"未签名"的，自己机器能直接跑，别人下载会被 Gatekeeper 拦，
  *    需要右键 → 打开（或 `xattr -dr com.apple.quarantine`）。
- *    这是刻意接受的取舍——拿到苹果开发者账号（$99/年）后加 `notarize` 即可。
+ *
+ *    === 拿到 Apple Developer 账号后怎么启用 ===
+ *    只需要在 CI/本机设置这几个环境变量（不需要改本文件）：
+ *      CSC_LINK                        base64 的 .p12 证书
+ *      CSC_KEY_PASSWORD                .p12 密码
+ *      APPLE_ID                        你的 Apple ID
+ *      APPLE_APP_SPECIFIC_PASSWORD     专用密码（不是登录密码）
+ *      APPLE_TEAM_ID                   Team ID
+ *    本文件检测到 CSC_LINK 时会自动切到签名+公证；没有就保持 identity: null。
+ *
+ *    为什么要用环境变量而不是写死在文件里：
+ *    证书是敏感凭据（见项目 AGENTS.md 的 A4），绝不能进 git。
+ *    electron-builder 原生就认这几个变量，写死反而要额外做 secret 注入。
  */
+
+// 有证书（CSC_LINK）才签名。没有就保持未签名行为，与本轮之前完全一致。
+const hasSigningIdentity = Boolean(process.env.CSC_LINK)
 
 /** @type {import('electron-builder').Configuration} */
 export default {
@@ -53,8 +68,20 @@ export default {
       { target: 'zip', arch: ['arm64', 'x64'] }
     ],
     icon: 'build/icon.png',
-    // 未签名（见文件头第 3 点）
-    identity: null
+    // 有证书才签名；没有则 identity: null（与应用内 Gatekeeper 提示一致）。
+    identity: hasSigningIdentity ? undefined : null,
+    // 以下三项只在签名时才有意义（未签名时 electron-builder 会忽略）。
+    hardenedRuntime: true,
+    gatekeeperAssess: false,
+    entitlements: 'build/entitlements.mac.plist',
+    entitlementsInherit: 'build/entitlements.mac.inherit.plist',
+    // 公证：electron-builder 检测到 APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+    // APPLE_TEAM_ID 时会自动公证。这里显式声明意图，缺凭据时它自己会跳过。
+    notarize: hasSigningIdentity
+      ? {
+          teamId: process.env.APPLE_TEAM_ID
+        }
+      : false
   },
 
   win: {

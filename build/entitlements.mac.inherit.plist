@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    子进程（驱动宿主）的 entitlements。
+
+    `com.apple.security.inherit` 让子进程继承父应用的签名上下文与沙箱设置。
+    没有它，electron-builder 签出来的 helper 进程在 hardened runtime 下会被
+    拒绝启动 —— 同样是「主应用能开、连不上数据库」这一种崩溃形态。
+
+    注意：继承型 entitlements **不能**再声明其它具体权限（苹果的规定），
+    所以这里只有 inherit 一项。
+  -->
+  <key>com.apple.security.inherit</key>
+  <true/>
+</dict>
+</plist>

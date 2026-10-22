@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    macOS 主应用的 entitlements（Hardened Runtime 下放行的能力清单）。
+
+    ===== 为什么这几项对本项目是必需的 =====
+
+    1. com.apple.security.cs.allow-jit
+       V8 需要 JIT 编译 JS。Electron 在 hardened runtime 下不开这项会直接崩。
+
+    2. com.apple.security.cs.allow-unsigned-executable-memory
+       Electron/V8 的一部分代码路径需要可写可执行内存，同上。
+
+    3. com.apple.security.cs.disable-library-validation
+       ★ 本项目尤其需要：驱动宿主是一个**独立子进程**（out/driver-host/index.js），
+       它会加载 node:sqlite / pg 等模块。开启库校验（默认开）会拒绝加载
+       签名不一致的 .node/.js，表现为「应用能开、但连不上任何数据库」。
+       这一项是踩过坑的必选项，不是抄模板。
+
+    4. com.apple.security.inherit（子进程用）
+       见 entitlements.mac.inherit.plist —— 子进程要靠它继承父进程的沙箱/签名上下文。
+
+    5. 网络客户端：应用要连数据库（本机或远端）。
+       注意：**不开** allow-unsigned-executable-memory 之外的额外宽权限，
+       能不开的就不开——entitlements 越少，公证通过率越高。
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+</dict>
+</plist>
