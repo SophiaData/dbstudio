@@ -1054,14 +1054,33 @@ export class MetadataTree {
             const lab = document.createElement('div')
             lab.textContent = f.label
             lab.style.cssText = 'color:var(--fg-dim);font-size:12px'
-            const inp = document.createElement('input')
-            inp.type = f.kind === 'number' ? 'number' : 'text'
+            /**
+             * `select` 型字段必须造 `<select>`（与 main.ts 的 buildField 一致）。
+             * 这两个对话框是分别实现的，改了其中一处就必须改另一处——
+             * 否则会出现「新建连接能选 SSL 模式、编辑连接却变回文本框」这种
+             * 只在一半路径上出现的退化。
+             */
+            const inp =
+              f.kind === 'select'
+                ? document.createElement('select')
+                : document.createElement('input')
+            if (inp instanceof HTMLInputElement) {
+              inp.type = f.kind === 'number' ? 'number' : 'text'
+            } else {
+              for (const c of f.choices ?? []) {
+                const opt = document.createElement('option')
+                opt.value = c.value
+                opt.textContent = c.label
+                inp.appendChild(opt)
+              }
+            }
             inp.dataset['key'] = f.key
             // ★ 回填当前值。没有这一步，对话框只显示空框，用户不知道现在配的是什么，
             //   一改就可能把能用的配置覆盖成错的（实测发现的 bug）。
             const cur = node.ref.meta?.['options.' + f.key]
             if (cur !== undefined && cur !== null) inp.value = String(cur)
-            if (f.placeholder) inp.placeholder = f.placeholder
+            else if (f.default !== undefined) inp.value = String(f.default)
+            if (f.placeholder && inp instanceof HTMLInputElement) inp.placeholder = f.placeholder
             inp.style.cssText = inputStyleLocal()
             const wrap = document.createElement('div')
             wrap.append(lab, inp)
@@ -1087,12 +1106,16 @@ export class MetadataTree {
           if (newName !== '' && newName !== node.ref.name) cfg['name'] = newName
 
           const opts: Record<string, unknown> = {}
-          const paramInputs = paramHost.querySelectorAll<HTMLInputElement>('input[data-key]')
+          // 必须同时收 `input` 与 `select`（select 也是参数控件，见上面的字段渲染）。
+          const paramInputs = paramHost.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+            'input[data-key], select[data-key]'
+          )
           for (const inp of paramInputs) {
             const key = inp.dataset['key']
             const raw = inp.value.trim()
             if (key && raw !== '') {
-              opts[key] = inp.type === 'number' ? Number(raw) : raw
+              // 只有 number 输入框才转数字；<select> 永远提交字符串。
+              opts[key] = inp instanceof HTMLInputElement && inp.type === 'number' ? Number(raw) : raw
             }
           }
           // 防御：表单里一个参数框都没有，却提交了「修改」——这会静默丢掉配置。

@@ -20,18 +20,64 @@ export const POSTGRESQL_INFO: DialectInfo = {
    * PG 是**服务端**数据库，连接需要网络地址与身份认证，与 SQLite 的"一个文件"完全不同。
    *
    * 字段设计取舍：
-   *   - `host` / `port` / `database` / `user` 是必需的五元组（port 给默认 5432）。
+   *   - `host` / `port` / `database` / `user` 是必需的四元组（port 给默认 5432）。
    *   - `password` 标记为 `password` 类型 —— 但注意：**它不会被写进 `ConnectionConfig.options`**，
    *     密码走独立的 secret 通道（见 `core/driver.ts` 的 `SecretValue` 注释）。
    *     这里声明它只是为了让 UI 知道"这个方言需要密码框"。
-   *   - 不提供 SSL 开关：本阶段用 `pg` 默认（不强制 SSL），SSL 属于后续阶段。
+   *
+   * ===== SSL 三个字段的来历与语义（重要，别简化） =====
+   *
+   * 云数据库（Supabase / Neon / RDS / 云厂商托管 PG）几乎都**强制 SSL**，
+   * 没有这几个字段就一个都连不上。所以它们不是"锦上添花"。
+   *
+   * `sslmode` 的取值直接沿用 libpq 的名字（`disable` / `allow` / `prefer` /
+   * `require` / `verify-ca` / `verify-full`）——用户从 psql、DBeaver 带过来的认知
+   * 在这里是**可迁移**的，不需要学一套新词。
+   *
+   * 但必须知道一个**与 libpq 不同的地方**（实测得出，见 adapter.ts 的 ssl.ts 注释）：
+   * `pg` 这个 Node 驱动**没有** `prefer` 的优雅降级能力，而且它的 `ssl: true`
+   * **会校验证书**（libpq 的 `require` 不校验）。所以取值到 `pg` 的映射
+   * 由我们这一层显式实现，而不是直接把字符串丢给 `pg`。
+   *
+   * 默认值取 `prefer`：对绝大多数库（本机/内网/云）都能连上，
+   * 且与 psql 不带参数时的默认行为一致——用户不该因为升级了本客户端就连不上库。
    */
   fields: [
     { key: 'host', label: '主机', kind: 'text', required: true, placeholder: '127.0.0.1', default: '127.0.0.1' },
     { key: 'port', label: '端口', kind: 'number', required: true, placeholder: '5432', default: 5432 },
     { key: 'database', label: '数据库', kind: 'text', required: true, placeholder: 'postgres' },
     { key: 'user', label: '用户名', kind: 'text', required: true, placeholder: 'postgres' },
-    { key: 'password', label: '密码', kind: 'password', required: false, placeholder: '（可为空）' }
+    { key: 'password', label: '密码', kind: 'password', required: false, placeholder: '（可为空）' },
+    {
+      key: 'sslmode',
+      label: 'SSL 模式',
+      kind: 'select',
+      required: false,
+      default: 'prefer',
+      choices: [
+        { value: 'disable', label: 'disable — 不使用 SSL' },
+        { value: 'allow', label: 'allow — 优先明文，服务端要求时才用 SSL' },
+        { value: 'prefer', label: 'prefer — 优先 SSL，服务端不支持则回退明文（默认）' },
+        { value: 'require', label: 'require — 必须 SSL，但不校验证书' },
+        { value: 'verify-ca', label: 'verify-ca — 必须 SSL，且证书须由指定 CA 签发' },
+        { value: 'verify-full', label: 'verify-full — 必须 SSL，且校验 CA 与主机名' }
+      ]
+    },
+    {
+      /**
+       * CA 证书路径。只在 `verify-ca` / `verify-full` 下被读取。
+       *
+       * 为什么是路径而不是把证书内容粘进来：证书是多行 PEM（几 KB），
+       * 粘进表单既难维护也会进 `connections.json`；路径更符合"引用本机文件"的直觉。
+       * 代价是配置文件**不可移植**（换台机器路径就失效）——这是有意的取舍，
+       * 换机时用户需要重新选一次 CA，比默默用错的证书更安全。
+       */
+      key: 'sslrootcert',
+      label: 'CA 证书路径',
+      kind: 'file',
+      required: false,
+      placeholder: 'verify-ca / verify-full 时需要，如 /path/to/ca.pem'
+    }
   ],
   /**
    * 引号规则，供主进程/UI 拼 SQL 时使用。

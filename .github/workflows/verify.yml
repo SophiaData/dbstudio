@@ -98,6 +98,88 @@ jobs:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: node tests/e2e-cancel.mjs
 
+      - name: PostgreSQL SSL/TLS 语义（加密真生效 / 错误 CA 真被拒）
+        # ===== 为什么这里要自己起两个容器，而不是复用上面的 service =====
+        #
+        # 这个测试要同时观察**两种服务端形态**：
+        #   - 开了 SSL 的：验证 require / verify-ca / verify-full 真的加密并校验证书
+        #   - 没开 SSL 的：验证 prefer 真的回退明文（而不是报错，也不是假成功）
+        #
+        # GitHub 的 service 容器无法在测试中途改配置，所以两个实例各起一个。
+        #
+        # ===== 为什么必须真的起服务端，不能用 mock =====
+        #
+        # 我们要验的是"TLS 握手 + 证书链校验"，这整条链路发生在 OpenSSL 里。
+        # mock 掉之后，测的就只剩"我们把自己写的配置传给了 pg"，而真正会出错的
+        # 恰恰是"这个配置在真实握手时是什么语义"（比如 pg 的 ssl:true 会校验证书，
+        # 与 libpq 的 require 不等价——这个差异只有真握手才测得出来）。
+        env:
+          DBSTUDIO_PG_SSL_URL: postgres://postgres:postgres@127.0.0.1:55433/postgres
+          DBSTUDIO_PG_PLAIN_URL: postgres://postgres:postgres@127.0.0.1:55432/postgres
+        run: |
+          set -euo pipefail
+
+          # 无论测试成败都要清理：否则失败的容器会占着端口，
+          # 让后面本来独立的步骤因为"连接被拒"而连锁失败，把真正原因埋在噪音里。
+          cleanup() {
+            docker rm -f dbstudio-pg-plain dbstudio-pg-ssl >/dev/null 2>&1 || true
+            docker volume rm dbstudio-certs >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # 1) 生成自签证书 + 一张无关证书（后者用来反证"链校验真的生效"）
+          pnpm run ssl-fixture
+
+          # 2) 未开 SSL 的实例
+          docker run -d --name dbstudio-pg-plain \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            -p 55432:5432 postgres:17
+
+          # 3) 开 SSL 的实例。
+          #
+          # ===== 为什么证书要先经过一个 volume，而不是直接 bind mount =====
+          #
+          # 直接 -v 挂宿主目录会遇到两个必踩的坑：
+          #   a. 属主不匹配：宿主文件是 uid 501，容器里 PG 以 postgres(999) 运行，
+          #      读不了 600 的私钥 → 启动后连接一律失败。
+          #   b. 只读挂载：容器内若尝试 chmod 会失败；而 PG 又**要求**私钥
+          #      不能有 group/world 权限，否则拒绝启动。
+          #
+          # 所以先用一个临时 alpine 把证书复制进 named volume，并显式 chown/chmod，
+          # 让权限在容器视角下是"postgres 拥有 + 600"。这一步把两个坑都绕开了。
+          docker volume create dbstudio-certs >/dev/null
+          docker run --rm \
+            -v dbstudio-certs:/certs \
+            -v "$PWD/tests/.ssl-fixture:/src:ro" \
+            alpine:3.20 \
+            sh -c 'cp /src/server.crt /src/server.key /certs/ &&
+                   chown 999:999 /certs/server.crt /certs/server.key &&
+                   chmod 644 /certs/server.crt && chmod 600 /certs/server.key'
+
+          docker run -d --name dbstudio-pg-ssl \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            -v dbstudio-certs:/certs:ro \
+            -p 55433:5432 postgres:17 \
+            -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+
+          # 4) 等两个实例就绪（容器里的 pg_isready 比从宿主机连更可靠）
+          for i in $(seq 1 60); do
+            docker exec dbstudio-pg-plain pg_isready -U postgres >/dev/null 2>&1 && \
+            docker exec dbstudio-pg-ssl   pg_isready -U postgres >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+          # 就绪循环到点后要显式确认，否则测试会拿到一个"连接被拒"的误导性失败。
+          docker exec dbstudio-pg-plain pg_isready -U postgres
+          docker exec dbstudio-pg-ssl   pg_isready -U postgres
+
+          # 关键时刻：确认服务端真的开了 SSL，而不是默默降级成明文。
+          # 若这里为 off，后面的 require/verify-* 断言会全部变红且原因难查。
+          docker exec dbstudio-pg-ssl psql -U postgres -tAc "show ssl" | grep -qx on
+
+          # 5) 跑测试
+          node tests/e2e-postgres-ssl.mjs
+
       - name: SDK 构建与外部用户视角测试
         # SDK 不 import 源码，而是 import 构建后的 dist 产物，用 require.resolve
         # 找驱动宿主——和 npm 用户完全一致。
@@ -165,3 +247,14 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui-sql
+
+      - name: SSL 表单 GUI 测试（select 控件 / 默认值 / 提交值）
+        # 这条测的是渲染层的新控件类型（`kind: 'select'`）。
+        # 纯 Node 测不出来：若它退化回文本框，collect() 照样能读到值、
+        # 类型检查也照样过，但用户看到的是个空框。默认值那条更关键——
+        # 落成首项 `disable` 会让"没填"变成"明文连接"，属于静默降级。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-ssl-form

@@ -45,6 +45,14 @@ import { POSTGRESQL_INFO } from './info'
 import { cancelPostgresBackend, isCancelError } from './query-cancel'
 import { PostgresAdapterError, describeThrown, wrapPgError } from './errors'
 import {
+  DEFAULT_SSL_MODE,
+  isPgSslMode,
+  openClient,
+  planAttempts,
+  type PgSslMode,
+  type SslAttempt
+} from './ssl'
+import {
   SCHEMAS_FOLDER_ID,
   columnObjectId,
   parseObjectId,
@@ -111,6 +119,15 @@ interface PgConnectionInfo {
   readonly database: string
   readonly user: string
   readonly password: string | undefined
+  /**
+   * SSL 策略展开后的尝试列表。
+   *
+   * 之所以存"展开后的列表"而不是原始 `sslmode` 字符串：取消查询需要
+   * **另开一条连接**（见 query-cancel.ts），它必须与主连接用**完全相同**的 SSL 策略。
+   * 若那时再解析一次，就可能出现"主连接走回退明文、取消连接却试 SSL"的偏差；
+   * 而且 CA 文件会被重复读取。这里一次算好，主连接与取消连接共用。
+   */
+  readonly sslAttempts: readonly SslAttempt[]
 }
 
 interface EditableTarget {
@@ -151,7 +168,30 @@ function resolveConnectionInfo(config: ConnectionConfig, secret: SecretValue): P
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new PostgresAdapterError('connection_failed', `连接「${config.name}」的端口非法：${portRaw}（应为 1-65535 的整数）。`)
   }
-  return { host, port, database, user, password: secret }
+  /**
+   * SSL 模式解析。缺省 `prefer`（与 psql 一致），非法值明确报错而不是静默降级——
+   * 静默降级会把"我想要 verify-full"变成"其实没校验"，这是安全问题而非体验问题。
+   */
+  const sslModeRaw = readOptionString(config, 'sslmode')
+  const sslMode: PgSslMode =
+    sslModeRaw === '' ? DEFAULT_SSL_MODE : isPgSslMode(sslModeRaw) ? sslModeRaw : invalidSslMode(sslModeRaw)
+  const caPath = readOptionString(config, 'sslrootcert')
+  let sslAttempts: SslAttempt[]
+  try {
+    sslAttempts = planAttempts(sslMode, caPath === '' ? undefined : caPath)
+  } catch (thrown) {
+    // 把 CA 缺失/不可读包装成连接错误，让 UI 能看到可读的中文提示。
+    throw new PostgresAdapterError('connection_failed', describeThrown(thrown))
+  }
+  return { host, port, database, user, password: secret, sslAttempts }
+}
+
+/** 非法 sslmode 的报错（单独拆出来只是为了让上面的三元表达式读得下去）。 */
+function invalidSslMode(raw: string): never {
+  throw new PostgresAdapterError(
+    'connection_failed',
+    `不支持的 SSL 模式：${raw}（可选 disable / allow / prefer / require / verify-ca / verify-full）`
+  )
 }
 
 export class PostgresDriverAdapter implements DriverAdapter {
@@ -193,26 +233,26 @@ export class PostgresDriverAdapter implements DriverAdapter {
       throw new PostgresAdapterError('already_connected', '该适配器实例已持有一个连接，请先 disconnect 再重新连接。')
     }
     const info = resolveConnectionInfo(config, secret)
-    const client = new Client({
-      host: info.host,
-      port: info.port,
-      database: info.database,
-      user: info.user,
-      password: info.password,
-      // 连接超时：与 SQLite 的 BUSY_TIMEOUT 不同，PG 必须防"TCP 连不上挂死"
-      connectionTimeoutMillis: 10_000,
-      // 应用名，方便 DBA 在 pg_stat_activity 里认出是本客户端
-      application_name: 'dbstudio'
-    })
+    let client: Client
     try {
-      await client.connect()
+      /**
+       * 建连走 `openClient`，而不是直接 `new Client()`：
+       * sslmode 的尝试/回退逻辑（尤其 prefer/allow）在那一层实现。
+       * 见 ssl.ts 文件头「为什么不直接把 sslmode 丢给 pg」。
+       */
+      client = await openClient({
+        host: info.host,
+        port: info.port,
+        database: info.database,
+        user: info.user,
+        password: info.password,
+        attempts: info.sslAttempts,
+        // 连接超时：与 SQLite 的 BUSY_TIMEOUT 不同，PG 必须防"TCP 连不上挂死"
+        connectionTimeoutMillis: 10_000,
+        // 应用名，方便 DBA 在 pg_stat_activity 里认出是本客户端
+        applicationName: 'dbstudio'
+      })
     } catch (thrown) {
-      // 建连失败：确保句柄不残留（Client 内部已 end，但仍要清引用）
-      try {
-        await client.end()
-      } catch {
-        // ignore
-      }
       throw wrapPgError(thrown, 'connection_failed', `无法连接到 PostgreSQL ${info.host}:${info.port}/${info.database}`)
     }
     this.#client = client
@@ -273,16 +313,16 @@ export class PostgresDriverAdapter implements DriverAdapter {
     let client: Client | null = null
     try {
       info = resolveConnectionInfo(config, secret)
-      client = new Client({
+      client = await openClient({
         host: info.host,
         port: info.port,
         database: info.database,
         user: info.user,
         password: info.password,
+        attempts: info.sslAttempts,
         connectionTimeoutMillis: 10_000,
-        application_name: 'dbstudio'
+        applicationName: 'dbstudio'
       })
-      await client.connect()
       const versionResult = await client.query<{ version: string }>('SELECT version() AS version')
       const serverVersion = versionResult.rows[0]?.version
       return {

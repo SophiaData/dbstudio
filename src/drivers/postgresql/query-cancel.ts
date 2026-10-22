@@ -42,7 +42,9 @@
  * 上层应当把它识别成"用户取消了"，而不是显示成红色报错。
  */
 
-import { Client } from 'pg'
+import type { Client } from 'pg'
+
+import { openClient, type SslAttempt } from './ssl'
 
 /** 建立取消连接所需的参数。与主连接使用同一套连接信息。 */
 export interface PgCancelContext {
@@ -51,6 +53,16 @@ export interface PgCancelContext {
   readonly database: string
   readonly user: string
   readonly password: string | undefined
+  /**
+   * 主连接用的 SSL 策略。
+   *
+   * ===== 为什么取消连接必须复用同一套策略 =====
+   * 云数据库普遍要求 SSL（且常常只允许 hostssl）。若取消连接忘记带 SSL，
+   * 它会被 pg_hba 直接拒绝 —— 表现是"查询取消按钮点了没反应"，
+   * 而这个故障只在远端库上出现、本机永远复现不了。
+   * 所以这里把主连接展开好的 attempts 原样传进来，而不是重新解析 sslmode。
+   */
+  readonly sslAttempts: readonly SslAttempt[]
   /** 主连接的后端 PID（`SELECT pg_backend_pid()` 的结果）。 */
   readonly backendPid: number | null
 }
@@ -81,27 +93,24 @@ export async function cancelPostgresBackend(context: PgCancelContext): Promise<b
     return false
   }
 
-  const cancelClient = new Client({
+  const attemptOpen = openClient({
     host: context.host,
     port: context.port,
     database: context.database,
     user: context.user,
     password: context.password,
+    attempts: context.sslAttempts,
     // 取消连接必须是"短命"的：超时短一点，避免取消操作本身把用户卡住
     connectionTimeoutMillis: 5_000,
     // 在 pg_stat_activity 里能一眼看出这条连接是来取消的
-    application_name: 'dbstudio-cancel'
+    applicationName: 'dbstudio-cancel'
   })
 
+  let cancelClient: Client
   try {
-    await cancelClient.connect()
+    cancelClient = await attemptOpen
   } catch {
     // 连不上（网络/权限）就只能如实说取消失败
-    try {
-      await cancelClient.end()
-    } catch {
-      // ignore
-    }
     return false
   }
 

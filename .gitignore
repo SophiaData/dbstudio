@@ -9,6 +9,8 @@ dist/
 # （`pnpm fixture` / 各 e2e 会重新生成）
 tests/fixtures/*.db
 tests/fixtures/*.db-*
+# SSL 测试夹具是脚本生成的证书/私钥，绝不入库
+tests/.ssl-fixture/
 
 # 本地日志与临时文件
 *.log

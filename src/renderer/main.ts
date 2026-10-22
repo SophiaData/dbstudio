@@ -804,9 +804,12 @@ async function openConnectionDialog(
     const options: Record<string, string | number | boolean> = {}
     let secret: string | undefined
     for (const f of dialect.fields) {
-      const input = dyn.querySelector<HTMLInputElement>(`[data-key="${cssEscape(f.key)}"]`)
-      if (!input) continue
-      const raw = input.value.trim()
+      // `select` 与 `input` 都带 data-key，但类型不同：统一按"有 value 的控件"取。
+      const control = dyn.querySelector<HTMLInputElement | HTMLSelectElement>(
+        `[data-key="${cssEscape(f.key)}"]`
+      )
+      if (!control) continue
+      const raw = control.value.trim()
       if (raw === '') {
         if (f.required) throw new Error(`请填写「${f.label}」`)
         continue
@@ -877,7 +880,14 @@ async function openConnectionDialog(
   dlg.showModal()
 }
 
-/** 按 `DialectField.kind` 动态造一个表单行。四种 kind 都要支持。 */
+/**
+ * 按 `DialectField.kind` 动态造一个表单行。五种 kind 都要支持。
+ *
+ * `select` 是后加的（PostgreSQL 的 sslmode 是闭集，见 core/driver.ts 的
+ * `DialectField.choices`）。它必须造 `<select>` 而不是 `<input>`——
+ * 否则 `collect()` 里 `input.value` 能读到值，但用户看到的是一个空文本框，
+ * 会以为自己要手打 `verify-ca`。
+ */
 function buildField(f: DialectField): HTMLElement {
   const wrap = document.createElement('label')
   wrap.className = 'field'
@@ -885,6 +895,23 @@ function buildField(f: DialectField): HTMLElement {
   const label = document.createElement('span')
   label.textContent = f.required ? `${f.label} *` : f.label
   wrap.appendChild(label)
+
+  if (f.kind === 'select') {
+    const sel = document.createElement('select')
+    sel.dataset['key'] = f.key
+    for (const c of f.choices ?? []) {
+      const opt = document.createElement('option')
+      opt.value = c.value
+      opt.textContent = c.label
+      sel.appendChild(opt)
+    }
+    // 缺省值必须显式选中：`<select>` 不设时会默认第一项，
+    // 而 sslmode 的第一项是 `disable`——那会让"没填"变成"明文连接"。
+    if (f.default !== undefined) sel.value = String(f.default)
+    sel.required = f.required
+    wrap.appendChild(sel)
+    return wrap
+  }
 
   const input = document.createElement('input')
   input.dataset['key'] = f.key

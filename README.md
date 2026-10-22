@@ -168,7 +168,7 @@ asarUnpack: ['out/driver-host/**']
 
 ```bash
 pnpm install
-pnpm verify      # 二十段全链（含 6 段 GUI：5 段真实交互 + 1 段自检；PG 无环境时自动跳过）
+pnpm verify      # 二十二段全链（含 7 段 GUI；PG / SSL 无环境时自动跳过）
 ```
 
 `pnpm verify` 依次执行（顺序与 `package.json` 里的 `verify` 脚本一致）：
@@ -186,15 +186,17 @@ pnpm verify      # 二十段全链（含 6 段 GUI：5 段真实交互 + 1 段�
 | 9 | `test:ddl` | DDL e2e **53/53**：建表/删表/视图/重命名/类型与默认值白名单 |
 | 10 | `test:postgres` | PG e2e **42/42**（真实 PG 17.11；无环境时自动跳过） |
 | 11 | `test:cancel` | 取消能力 **15/15**：PG 真取消（516ms 中断 10s 慢查询）/ SQLite 如实不支持 |
-| 12 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
-| 13 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
-| 14 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
-| 15 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
-| 16 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
-| 17 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
-| 18 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
-| 19 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
-| 20 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
+| 12 | `test:postgres-ssl` | SSL **23/23**：6 种 sslmode 的加密/校验语义 + 错误 CA 真被拒 + SSL 连接上取消真生效 |
+| 13 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
+| 14 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
+| 15 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
+| 16 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
+| 17 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
+| 18 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
+| 19 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
+| 20 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
+| 21 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
+| 22 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
 
 单独跑：
 
@@ -276,6 +278,28 @@ commitTransaction → 落库
 
 ---
 
+## SSL：为什么不能把 sslmode 直接丢给 pg
+
+`sslmode` 的取值沿用 libpq 的名字，但 **`pg`（node-postgres）的实现与 libpq 不等价**。
+这三点是实测得出的（PG 17 + pg 8.23），不是文档推测：
+
+| 模式 | libpq 的语义 | `pg` 直接传时的实际行为 |
+|---|---|---|
+| `require` | 只要求加密，**不校验证书** | `ssl: true` 会校验证书 → 自签库直接连不上 |
+| `prefer` | 先试 SSL，服务端不支持就**回退明文** | 不回退，直接抛 `does not support SSL` |
+| `verify-ca` | 校验证书链，不校验主机名 | 需显式覆盖 `checkServerIdentity` 才不会误查主机名 |
+
+所以映射由 `src/drivers/postgresql/ssl.ts` 显式实现，回退逻辑也在那一层。
+两条刻意的保守选择：
+
+- **`prefer` 只在"服务端不支持 SSL"时回退**；若 TLS 握手成功但认证失败，
+  直接抛该错误——再试明文不会有不同结果，只会用第二个更难懂的错误盖掉真正原因。
+- **全部失败时抛第一个错误**，因为第一个尝试才对应你显式选的策略。
+
+取消查询**复用同一套 SSL 策略**：它要另开一条连接发 `pg_cancel_backend`，
+若那条连接忘了带 SSL，会被 `pg_hba` 拒绝，表现为"取消按钮点了没反应"——
+而这个 bug 只会在远端 SSL 库上出现，本机永远复现不了。
+
 ## 持久化：配置与凭据分两条通道
 
 ```
@@ -332,6 +356,7 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | **DDL** | 建表（列编辑器/类型白名单/主键/自增/默认值）、删表、建视图、删视图、重命名表 |
 | **ER 图** | SVG 手绘，30 张表上限，**明确标注不含外键关系**（元数据契约暂无外键字段） |
 | **查询取消** | PostgreSQL 真取消（`pg_cancel_backend`，实测 516ms 中断 10 秒慢查询）；**SQLite 如实不支持**（同步 API 无法中断） |
+| **SSL/TLS** | PostgreSQL 六种 libpq 语义的 sslmode（disable/allow/prefer/require/verify-ca/verify-full）+ CA 证书校验；**语义差异已实测核对**（见下方说明） |
 
 ### 还没做（与 DBeaver 的差距）
 
@@ -340,7 +365,7 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | 只有 2 个方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录） |
 | 无传输/导入导出向导 | DBeaver 的 data transfer 是独立子系统，支持跨库搬数据 |
 | 无数据库比较/同步 | 表结构与数据的 diff |
-| 无 SSH 隧道 / SSL 证书配置 | **连远端库必备**，这是下一个最该补的 |
+| 无 SSH 隧道 | 只能用可直连的库（含云库）；跳板机后面自建库连不上。**这是下一个最该补的**（需先扩展 secret 契约，见下） |
 | 无执行历史持久化 | 查过的 SQL 关掉就没了 |
 | ER 图无外键关系线 | 元数据契约缺外键字段，需先扩展 `TableDescription` |
 | SQLite 查询不可取消 | 同步 API 的硬限制 |

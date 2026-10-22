@@ -299,11 +299,36 @@ export function quoteIdentifierWith(name: string, rules: QuotingRules): string {
 export interface DialectField {
   readonly key: string
   readonly label: string
-  readonly kind: 'text' | 'number' | 'password' | 'file'
+  readonly kind: 'text' | 'number' | 'password' | 'file' | 'select'
   readonly required: boolean
   readonly placeholder?: string
   /** 默认值。 */
   readonly default?: string | number
+  /**
+   * `kind === 'select'` 时的候选值；其它 kind 忽略此字段。
+   *
+   * ===== 为什么需要它（而不是让用户手写字符串）=====
+   *
+   * 有些连接参数是**闭集**，典型就是 PostgreSQL 的 `sslmode`
+   * （disable / allow / prefer / require / verify-ca / verify-full）。
+   * 让用户自由输入会带来两类问题：
+   *   1. 拼错（`verify_full`、`required`）——错误只会到连接时才暴露，
+   *      而用户已经填完整个表单、点了「连接」，反馈链路很长；
+   *   2. 各取值之间的语义差别很细微（`require` 与 `verify-ca` 差在**要不要校验证书**），
+   *      纯输入框没有任何提示，用户只能靠猜。
+   *
+   * 用下拉框把「可选集合」变成**可枚举的契约**，UI 负责渲染成 select，
+   * adapter 仍然要校验（UI 不是唯一入口，SDK 用户可以绕过它）。
+   *
+   * 与 `fields` 一样是纯数据：可结构化克隆，能过 IPC / RPC。
+   */
+  readonly choices?: readonly DialectFieldOption[]
+}
+
+/** `select` 型字段的一个候选项。`value` 会作为 options 的值提交。 */
+export interface DialectFieldOption {
+  readonly value: string
+  readonly label: string
 }
 
 // ---------------------------------------------------------------------------
