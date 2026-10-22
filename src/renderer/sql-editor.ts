@@ -225,6 +225,10 @@ export class SqlEditor {
   setValue(v: string): void {
     this.textarea.value = v
     this.refreshHighlight()
+    // 填完内容后把滚动位置归零：否则长 SQL 会停在末尾，
+    // 用户看到的是最后几行，不知道自己在编辑什么（实测截图里就是这个症状）。
+    this.textarea.scrollTop = 0
+    this.textarea.scrollLeft = 0
     this.syncScroll()
     this.hideCompletions()
   }
@@ -473,12 +477,36 @@ export class SqlEditor {
     const value = this.textarea.value
     const html = highlightSqlHtml(value)
     this.highlight.innerHTML = html + (value.endsWith('\n') ? ' ' : '')
+    this.autoGrow()
+  }
+
+  /**
+   * 让编辑器跟着内容长高（上限 320px 后内部滚动）。
+   *
+   * 为什么需要：固定 84px 高度只能看 4 行 SQL，多语句查询根本写不开
+   * （实测截图里只能看到最后几行）。DBeaver 的编辑器会随内容增高。
+   *
+   * 注意必须同时设 textarea 与容器高度：高亮层是 absolute + inset:0，
+   * 跟随的是**容器**高度；textarea 若单独长高就会与高亮层错位。
+   */
+  private autoGrow(): void {
+    const MAX = 320
+    // 先归零，否则 scrollHeight 只增不减，删行后不会缩回
+    this.textarea.style.height = 'auto'
+    const next = Math.min(MAX, Math.max(84, this.textarea.scrollHeight))
+    this.textarea.style.height = `${next}px`
+    this.editorWrap.style.height = `${next}px`
+    this.syncScroll()
   }
 
   private syncScroll(): void {
     // pre 不单独滚动：让它跟随 textarea 的滚动位置（两层同尺寸，滚同样的量即对齐）
     this.highlight.scrollTop = this.textarea.scrollTop
     this.highlight.scrollLeft = this.textarea.scrollLeft
+    // 高度严格对齐 textarea 的客户端高度：
+    // 容器有 1px border，inset:0 铺的是 border-box（含边框），
+    // 而 textarea 的 height 是 content-box，两者差 2px 会让底部几行轻微错位。
+    this.highlight.style.height = `${this.textarea.clientHeight}px`
   }
 
   private onKeyDown(e: KeyboardEvent): void {
@@ -710,8 +738,21 @@ export class SqlEditor {
 // ---------------------------------------------------------------------------
 
 /** 供格式化前后比较：去掉所有空白字符。 */
+/**
+ * 归一化用于"格式化前后内容是否等价"的比较。
+ *
+ * ★ 必须忽略大小写：格式化器会把关键字大写（`select` → `SELECT`），
+ * 这是**预期行为**，不是内容改变。早先这里只去空白不忽略大小写，
+ * 导致每次格式化都被防御断言误判成"会改变内容"而拒绝执行——
+ * 功能形同失效（且只在真实点击时才暴露，纯函数测试测不到 format() 这层）。
+ *
+ * 但**大小写不能一概而论**：字符串字面量和标识符的大小写是有意义的
+ * （`'Paid'` ≠ `'paid'`）。所以只对"词"降级比较太复杂，这里采用
+ * 更保守的折中：整体忽略大小写 + 去空白。对"格式化器只动关键字大小写"
+ * 这一约定足够，且能挡住真正的字符增删。
+ */
 function stripForCompare(sql: string): string {
-  return sql.replace(/\s+/g, '')
+  return sql.replace(/\s+/g, '').toUpperCase()
 }
 
 /** 把旧光标位置（按非空白字符序号）映射到格式化后的新位置。 */

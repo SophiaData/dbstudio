@@ -1146,7 +1146,11 @@ dialog::backdrop {
   inset: 0;
   pointer-events: none;
   color: var(--fg);
+  /* hidden 而非 auto：滚动由 JS 把 textarea.scrollTop 同步过来，
+     如果这里也 auto，两层各滚一份，字符会错位。 */
   overflow: hidden;
+  /* 高度必须与 textarea 一致；inset:0 已铺满容器，
+     textarea 的 height:100% 也铺满容器，两者同基准。 */
 }
 
 .sql-editor-input {
@@ -1154,7 +1158,9 @@ dialog::backdrop {
   background: transparent;
   color: transparent;
   caret-color: var(--fg);
-  resize: vertical;
+  /* 不允许用户拖拽改变高度：高亮层是绝对定位的兄弟节点，
+     一旦 textarea 单独变高，两层立刻错位（实测差 5px 就肉眼可见）。 */
+  resize: none;
   outline: none;
 }
 
@@ -1276,4 +1282,58 @@ dialog::backdrop {
 /* 颜色/分组对话框遮罩（JS 已内联基础样式，这里只保证层级与光标一致）。 */
 .conn-organize-overlay {
   cursor: default;
+}
+
+/* ============================================================
+   SQL 语法高亮着色
+   
+   span 由 sql-editor.ts 的 highlightSqlHtml 生成，类名形如
+   .sql-keyword / .sql-string / .sql-comment / .sql-number /
+   .sql-function / .sql-punct。
+
+   ★ 曾经漏掉整段：只写了布局样式，忘了着色规则，
+   结果是「编辑器能输入、但没有颜色」——截图一眼就能看出来，
+   但无头测试只看 DOM 结构，抓不到。
+   ============================================================ */
+.sql-keyword {
+  color: #0550ae;
+  font-weight: 600;
+}
+.sql-function {
+  color: #8250df;
+}
+.sql-string {
+  color: #0a7d33;
+}
+.sql-comment {
+  color: #6e7781;
+  font-style: italic;
+}
+.sql-number {
+  color: #b35900;
+}
+.sql-punct {
+  color: #57606a;
+}
+
+/* 暗色主题下的高亮配色（提亮以提高对比度） */
+@media (prefers-color-scheme: dark) {
+  .sql-keyword {
+    color: #79b8ff;
+  }
+  .sql-function {
+    color: #d2a8ff;
+  }
+  .sql-string {
+    color: #7ee787;
+  }
+  .sql-comment {
+    color: #8b949e;
+  }
+  .sql-number {
+    color: #ffab70;
+  }
+  .sql-punct {
+    color: #8b949e;
+  }
 }

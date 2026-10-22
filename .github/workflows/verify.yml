@@ -100,3 +100,10 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui-round3
+
+      - name: SQL 编辑器 GUI 测试（高亮/多语句/执行计划/格式化）
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-sql

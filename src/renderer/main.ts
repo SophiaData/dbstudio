@@ -13,6 +13,7 @@ import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs } from './tabs'
 import { SqlEditor } from './sql-editor'
+import { splitStatements } from './sql-format'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
 import { renderErDiagram } from './er-diagram'
 import {
@@ -185,6 +186,17 @@ async function boot(): Promise<void> {
 
   // ---- SQL 编辑器（替换原来的单行 input）----
   /** 执行一段 SQL（单条/全部同一条路径，区别只在传入内容）。 */
+  /**
+   * 执行 SQL。**支持多语句**：按 `;` 切分后逐条执行，每条结果开一个新标签。
+   *
+   * ⚠️ 这里曾经是个真 bug：编辑器有「执行全部」按钮，但它把整段 SQL
+   * 原样传给 `runQuery`，而适配器只接受单条语句 —— 于是多语句 100% 失败
+   * （`bad_params: 一次只能执行一条语句`）。功能等于没做。
+   * 实测截图才发现，GUI 测试只测了单条 SQL 所以没暴露。
+   *
+   * 切分用 sql-format.ts 的 splitStatements —— 它能正确处理字符串/注释里的分号
+   * （`SELECT 'a;b'` 不会被切成两条）。
+   */
   const executeSql = async (sql: string): Promise<void> => {
     if (!sql.trim()) return
     if (!currentConnectionNodeId) {
@@ -192,13 +204,37 @@ async function boot(): Promise<void> {
       return
     }
     showPane('grid')
-    // 每次执行都**新开**一个标签（标签名取 SQL 前若干字符），而不是替换上次结果。
-    const g = await tabs.runSql(currentConnectionNodeId, sql)
-    // E1-C 追加：记录来源，供导出/筛选使用（SQL 来源没有表名）。
-    activeGrid = g
+
+    const statements = splitStatements(sql)
+    if (statements.length === 0) {
+      setStatus('没有可执行的语句', true)
+      return
+    }
+
+    // 单条：照旧（标签名用整条 SQL 的开头）。
+    // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
+    // 继续执行只会产生一堆连带错误，掩盖真正的问题。
+    let lastGrid: ResultGrid | null = null
+    for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i] as string
+      try {
+        lastGrid = await tabs.runSql(currentConnectionNodeId, stmt)
+      } catch (e) {
+        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+        setStatus(`${where}${errText(e)}`, true)
+        return
+      }
+    }
+
+    // 记录来源：多语句时 activeSql 置空（没有单一来源可重查），
+    // 但保留最后一个 grid 供导出/筛选使用。
+    activeGrid = lastGrid
     activeTableRef = null
-    activeSql = sql
+    activeSql = statements.length === 1 ? (statements[0] as string) : null
     syncToolsVisibility()
+    if (statements.length > 1) {
+      setStatus(`已执行 ${statements.length} 条语句`)
+    }
   }
 
   /**

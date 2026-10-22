@@ -15,7 +15,7 @@
     "test:edit": "node tests/e2e-edit.mjs",
     "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
     "test:gui": "node scripts/run-in-electron.mjs --gui",
-    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:mutations && pnpm run test:ddl && pnpm run test:postgres && pnpm run test:cancel && pnpm run test:gui-layout && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow && pnpm run test:gui-features && pnpm run test:gui-round3",
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:mutations && pnpm run test:ddl && pnpm run test:postgres && pnpm run test:cancel && pnpm run test:gui-layout && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow && pnpm run test:gui-features && pnpm run test:gui-round3 && pnpm run test:gui-sql",
     "test:persist": "node tests/e2e-persist.mjs",
     "build:app": "pnpm run build && electron-builder --config electron-builder.config.mjs",
     "build:app:mac": "pnpm run build && electron-builder --config electron-builder.config.mjs --mac",
@@ -31,7 +31,8 @@
     "test:postgres": "node tests/e2e-postgres.mjs",
     "test:cancel": "node tests/e2e-cancel.mjs",
     "test:gui-layout": "node tests/gui-layout.mjs",
-    "check:build": "bash scripts/check-build-fresh.sh"
+    "check:build": "bash scripts/check-build-fresh.sh",
+    "test:gui-sql": "node tests/gui-sql-editor.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
