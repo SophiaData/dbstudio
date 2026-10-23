@@ -51,6 +51,7 @@ mkdirSync(join(root, 'out/gui-flow'), { recursive: true })
 
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
+env.DBSTUDIO_TEST_HIDDEN = '1'
 
 const app = await electron.launch({
   executablePath: require('electron'),

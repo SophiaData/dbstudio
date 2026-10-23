@@ -44,6 +44,7 @@ const db = join(dir, 'library.db')
 const userDataDir = join(dir, 'ud')
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
+env.DBSTUDIO_TEST_HIDDEN = '1'
 
 async function launch() {
   const app = await electron.launch({

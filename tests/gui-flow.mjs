@@ -122,7 +122,12 @@ const app = await electron.launch({
   executablePath: electronBin,
   args: ['.', `--user-data-dir=${userDataDir}`, ...extraArgs],
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, DBSTUDIO_GUI_FLOW: '1' }
+  env: {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: undefined,
+    DBSTUDIO_GUI_FLOW: '1',
+    DBSTUDIO_TEST_HIDDEN: '1'
+  }
 })
 
 const win = await app.firstWindow()

@@ -170,7 +170,7 @@ Node 的模块查找不会跨回 `app.asar` 去加载 `pg` / `ssh2`。
 
 ```bash
 pnpm install
-pnpm verify      # 二十六段全链（含 9 段 GUI；PG / SSL / SSH 无环境时自动跳过）
+pnpm verify      # 二十七段全链（含 10 段 GUI；PG / SSL / SSH 无环境时自动跳过）
 ```
 
 `pnpm verify` 依次执行（顺序与 `package.json` 里的 `verify` 脚本一致）：
@@ -192,17 +192,18 @@ pnpm verify      # 二十六段全链（含 9 段 GUI；PG / SSL / SSH 无环境
 | 13 | `test:ssh-tunnel` | SSH **21/21**（真实 sshd + PG）：结构化分段诊断 / 首次指纹确认 / 指纹变化 / 未授权私钥 / 隧道 SQL / 取消 |
 | 14 | `test:sql-library` | SQL 历史与收藏 **20/20**：成功/失败记录、500 条配额不淘汰收藏、坏文件隔离、重启保留 |
 | 15 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
-| 16 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
-| 17 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
-| 18 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
-| 19 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
-| 20 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
-| 21 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
-| 22 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
-| 23 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
-| 24 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
-| 25 | `test:gui-ssh-form` | SSH 表单 **20/20**：三个独立密码框 / 指纹确认后自动重试 / 连接失败不假报成功 / 编辑时能清空 `sshHost` |
-| 26 | `test:gui-sql-library` | SQL 历史与收藏 GUI **15/15**：成功/失败历史、载入不执行、收藏重命名、清空历史不误删、重启保留 |
+| 16 | `test:gui-hidden` | 后台 GUI 模式 **9/9**：默认启动可见 / 测试模式窗口与 Dock 隐藏 / 隐藏时仍可点击截图 |
+| 17 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
+| 18 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
+| 19 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
+| 20 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
+| 21 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
+| 22 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
+| 23 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
+| 24 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
+| 25 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
+| 26 | `test:gui-ssh-form` | SSH 表单 **20/20**：三个独立密码框 / 指纹确认后自动重试 / 连接失败不假报成功 / 编辑时能清空 `sshHost` |
+| 27 | `test:gui-sql-library` | SQL 历史与收藏 GUI **15/15**：成功/失败历史、载入不执行、收藏重命名、清空历史不误删、重启保留 |
 
 单独跑：
 
@@ -212,7 +213,13 @@ pnpm test               # 元数据 e2e
 pnpm test:resultset     # 结果集 e2e
 pnpm test:electron      # Electron 内置 Node 验收
 pnpm test:gui           # GUI 冒烟
+pnpm test:gui:headless  # GUI 冒烟（隐藏窗口与 Dock）
+pnpm verify:headless    # 完整验证；GUI 段全程隐藏窗口
 ```
+
+`DBSTUDIO_TEST_HIDDEN=1` 会让测试用 Electron 窗口 `show: false`；macOS 上还会
+切成 accessory 激活策略并隐藏 Dock。Playwright 仍操作真实 DOM、preload、IPC
+并生成截图，只是不把窗口带到桌面。单独跑任意 `test:gui-*` 时也可显式设置该变量。
 
 ---
 

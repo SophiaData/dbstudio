@@ -29,6 +29,15 @@ let manager: ConnectionManager | null = null
 let sqlLibrary: SqlLibraryStore | null = null
 
 /**
+ * GUI 自动化测试是否以“完全后台”方式运行。
+ *
+ * `show: false` 让 Playwright 仍能操作真实 DOM、preload 与 IPC，但窗口不会
+ * 出现在桌面；macOS 还必须切换 activation policy，否则应用仍会短暂抢占
+ * Dock 和焦点。只认显式测试变量，正常启动不受影响。
+ */
+const hiddenTestMode = process.env['DBSTUDIO_TEST_HIDDEN'] === '1'
+
+/**
  * 生产环境的凭据加解密器：Electron `safeStorage`。
  *
  * ===== safeStorage 到底是什么 =====
@@ -127,6 +136,8 @@ function createWindow(): void {
     height: 760,
     minWidth: 820,
     minHeight: 520,
+    show: !hiddenTestMode,
+    skipTaskbar: hiddenTestMode,
     title: 'dbstudio',
     backgroundColor: '#1b1d21',
     webPreferences: {
@@ -544,6 +555,11 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  if (hiddenTestMode && process.platform === 'darwin') {
+    // accessory 应用没有 Dock 图标，也不会抢走当前应用的焦点。
+    app.setActivationPolicy('accessory')
+    app.dock?.hide()
+  }
   registerIpc()
   createWindow()
 

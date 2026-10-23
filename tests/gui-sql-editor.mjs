@@ -26,6 +26,7 @@ const db = join(dir, 't.db')
 { const d = new DatabaseSync(db); d.exec("CREATE TABLE u(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO u VALUES(1,'a'),(2,'b'),(3,'c')"); d.close() }
 
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
+env.DBSTUDIO_TEST_HIDDEN = '1'
 const app = await electron.launch({ executablePath: require('electron'), args: ['.', `--user-data-dir=${join(dir, 'ud')}`], cwd: root, env })
 const win = await app.firstWindow()
 win.on('dialog', d => void d.accept())
