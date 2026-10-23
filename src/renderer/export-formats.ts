@@ -22,6 +22,19 @@ export interface ExportColumn {
 /** 一行数据：与 columns 等长的 CellValue 数组。 */
 export type ExportRow = readonly CellValue[]
 
+/** M0 only exports complete cached values; fetching full values belongs to M2. */
+export function assertCompleteCell(cell: CellValue | undefined): void {
+  if (cell && (cell.kind === 'text' || cell.kind === 'blob') && cell.truncated) {
+    throw new Error('包含已截断的文本或 BLOB 预览，已中止导出；尚不支持完整字段导出，请使用数据库侧导出。')
+  }
+}
+
+export function assertCompleteRows(rows: readonly ExportRow[]): void {
+  for (const cells of rows) {
+    for (const cell of cells) assertCompleteCell(cell)
+  }
+}
+
 // ============================================================================
 // 值 → 文本（各格式共享的基础）
 // ============================================================================
@@ -59,6 +72,7 @@ function blobHex(cell: Extract<CellValue, { kind: 'blob' }>): string {
 
 /** 值 → 普通文本（用于 CSV / Markdown）。NULL 返回 null 由调用方决定怎么写。 */
 function cellToText(cell: CellValue | undefined): string | null {
+  assertCompleteCell(cell)
   if (isNull(cell)) return null
   switch (cell.kind) {
     case 'text':
@@ -87,6 +101,7 @@ function cellToText(cell: CellValue | undefined): string | null {
  * BOM 由调用方加（见文件头）。行分隔用 `\r\n`，与 grid.ts 现有行为一致。
  */
 export function toCsv(columns: readonly ExportColumn[], rows: readonly ExportRow[]): string {
+  assertCompleteRows(rows)
   const header = columns.map((c) => csvEscape(c.name)).join(',')
   const lines = [header]
   for (const cells of rows) {
@@ -114,6 +129,7 @@ export function toCsv(columns: readonly ExportColumn[], rows: readonly ExportRow
  * 手拼 JSON 是"看着能跑、遇到引号就崩"的典型。
  */
 export function toJson(columns: readonly ExportColumn[], rows: readonly ExportRow[]): string {
+  assertCompleteRows(rows)
   const objects: Record<string, unknown>[] = rows.map((cells) => {
     const obj: Record<string, unknown> = {}
     columns.forEach((col, i) => {
@@ -164,6 +180,7 @@ export function toJson(columns: readonly ExportColumn[], rows: readonly ExportRo
  * 字面量混为一谈是另一个常见错误——两者转义规则完全不同。
  */
 export function sqlLiteral(cell: CellValue | undefined): string {
+  assertCompleteCell(cell)
   if (isNull(cell)) return 'NULL'
   switch (cell.kind) {
     case 'number':
@@ -197,6 +214,7 @@ export function toInsertSql(
   rows: readonly ExportRow[],
   quote: (name: string) => string
 ): string {
+  assertCompleteRows(rows)
   if (columns.length === 0) return ''
   const table = quote(tableName)
   const colList = columns.map((c) => quote(c.name)).join(', ')
@@ -223,6 +241,7 @@ export function toMarkdown(
   columns: readonly ExportColumn[],
   rows: readonly ExportRow[]
 ): string {
+  assertCompleteRows(rows)
   const esc = (s: string): string => s.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
   const header = '| ' + columns.map((c) => esc(c.name)).join(' | ') + ' |'
   const sep = '| ' + columns.map(() => '---').join(' | ') + ' |'

@@ -23,7 +23,7 @@
  * 所以这里只借它的**思想**（O(可视) 而不是 O(总行数)），不用它的**手段**。
  */
 
-import type { DbStudioApi } from '../core/api'
+import { NodeId, type DbStudioApi } from '../core/api'
 import {
   clearLayoutPrefs,
   loadLayoutPrefs,
@@ -35,6 +35,11 @@ import {
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { CellValue, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
 import type { QuotingRules } from '../core/driver'
+import {
+  getTransactionController,
+  type TransactionController,
+  type TransactionParticipant
+} from './transaction-controller'
 
 /** 行高必须与 CSS `.grid-row { height }` 一致。 */
 const ROW_HEIGHT = 24
@@ -94,7 +99,7 @@ export interface SqlExecutionOutcome {
   readonly error: string | null
 }
 
-export class ResultGrid {
+export class ResultGrid implements TransactionParticipant {
   readonly #root: HTMLElement
   readonly #cb: GridCallbacks
   #api: GridApi | null = null
@@ -159,6 +164,9 @@ export class ResultGrid {
   /** 最近一次事务状态，用于按钮可用性与「有未提交改动」提示。 */
   #txActive = false
   #pendingAffected = 0
+  #txController: TransactionController | null = null
+  #txUnregister: (() => void) | null = null
+  readonly #transactionParticipantId = `grid-${Math.random().toString(36).slice(2)}`
   /** 表结构（含主键列名），编辑时要用它把行还原成 keyValues。 */
   #desc: TableDescription | null = null
   /** 正在编辑的单元格位置；null 表示没有输入框打开。 */
@@ -263,6 +271,82 @@ export class ResultGrid {
 
   attachApi(api: DbStudioApi): void {
     this.#api = api as GridApi
+  }
+
+  get transactionParticipantId(): string {
+    return this.#transactionParticipantId
+  }
+
+  get connectionNodeId(): string {
+    const source = this.#source
+    if (!source) throw new Error('网格尚未绑定连接')
+    const nodeId = source.kind === 'table' ? source.ref.id : source.nodeId
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) throw new Error(`节点缺少连接归属：${nodeId}`)
+    return NodeId.connection(parsed.connectionId)
+  }
+
+  get transactionNodeId(): string {
+    const source = this.#source
+    if (!source) throw new Error('网格尚未绑定事务节点')
+    return source.kind === 'table' ? source.ref.id : source.nodeId
+  }
+
+  getLocalDirtySummary(): { rows: number; cells: number } {
+    return {
+      rows: this.#dirty.size,
+      cells: [...this.#dirty.values()].reduce((total, row) => total + row.size, 0)
+    }
+  }
+
+  setTransactionStateFromController(state: { active: boolean; pendingAffected: number }): void {
+    this.#txActive = state.active
+    this.#pendingAffected = state.pendingAffected
+    this.#renderEditToolbar()
+  }
+
+  reportTransactionControllerStatus(text: string, isError = false): void {
+    this.#cb.onStatus(text, isError)
+  }
+
+  async applyLocalEditsFromController(): Promise<boolean> {
+    return this.#applyEditsDirect()
+  }
+
+  discardLocalEditsFromController(): void {
+    this.#dirty.clear()
+    this.#editing = null
+    this.#renderEditToolbar()
+    this.#render()
+  }
+
+  async refreshFromTransactionController(): Promise<void> {
+    await this.#reloadUnchecked(true)
+  }
+
+  /** Called by tabs before disposing a result tab. */
+  async prepareToLeave(action: string): Promise<boolean> {
+    if (!this.#txController) return this.getLocalDirtySummary().rows === 0
+    return this.#txController.prepareToLeave(this, action)
+  }
+
+  /** Exposed for main/index lifecycle hooks through a registered grid. */
+  async guardTransaction(action: string): Promise<boolean> {
+    return this.#txController?.guardAll(action) ?? true
+  }
+
+  #attachTransactionController(nodeId: string): void {
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) return
+    const connectionId = parsed.connectionId
+    const current = this.#txController
+    if (current?.connectionId === connectionId) return
+    this.#txUnregister?.()
+    this.#txUnregister = null
+    const api = this.#api
+    if (!api) return
+    this.#txController = getTransactionController(connectionId)
+    this.#txUnregister = this.#txController.register(api, this)
   }
 
   /**
@@ -390,9 +474,22 @@ export class ResultGrid {
    * 我们把它提前到打开时判定，而不是等用户改完再报错。
    */
   async openTable(ref: ObjectRef, desc: TableDescription): Promise<void> {
+    if (this.#source && this.getLocalDirtySummary().rows > 0 && this.#txController) {
+      const canLeave = await this.#txController.prepareToReload(this)
+      if (!canLeave) return
+    }
+    await this.#openTableUnchecked(ref, desc, false)
+  }
+
+  async #openTableUnchecked(
+    ref: ObjectRef,
+    desc: TableDescription,
+    preserveLocalDirty: boolean
+  ): Promise<void> {
     const api = this.#requireApi()
     this.#source = { kind: 'table', ref, desc }
     this.#desc = desc
+    this.#attachTransactionController(ref.id)
     // 打开新对象时排序三态复位：不同表的列不可比，保留上一次的排序箭头会误导
     // 用户（看起来排了，其实新表没排）。列宽同理，按列名区分、换了表就清空。
     this.#sort = { col: -1, dir: null }
@@ -418,7 +515,7 @@ export class ResultGrid {
       this.#layoutScope = { dialect: '', connectionId: parsedNode.connectionId }
     }
     this.#layoutTableName = parsedNode?.tableName ?? null
-    await this.#openCursor(() => api.previewTable(ref.id))
+    await this.#openCursor(() => api.previewTable(ref.id), preserveLocalDirty)
     // 必须在 openCursor 之后：那时 #columns 才就绪，才能校验列名是否还存在
     this.#applyPersistedLayout()
     if (this.#sort.col >= 0) {
@@ -444,15 +541,31 @@ export class ResultGrid {
 
   /** 执行自由 SQL（只读）。 */
   async runSql(nodeId: string, sql: string): Promise<SqlExecutionOutcome> {
+    if (this.#source && this.getLocalDirtySummary().rows > 0 && this.#txController) {
+      const canLeave = await this.#txController.prepareToReload(this)
+      if (!canLeave) return { result: null, error: '重新加载已取消' }
+    }
+    return this.#runSqlUnchecked(nodeId, sql, false)
+  }
+
+  async #runSqlUnchecked(
+    nodeId: string,
+    sql: string,
+    preserveLocalDirty: boolean
+  ): Promise<SqlExecutionOutcome> {
     const api = this.#requireApi()
     // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
     this.#source = { kind: 'sql', sql, nodeId }
     this.#desc = null
+    this.#attachTransactionController(nodeId)
     this.#sort = { col: -1, dir: null }
     this.#colWidths.clear()
     // 自由 SQL 不持久化：列不固定，存下来的偏好下次几乎必然失效
     this.#layoutTableName = null
-    const outcome = await this.#openCursor(() => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }))
+    const outcome = await this.#openCursor(
+      () => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }),
+      preserveLocalDirty
+    )
     this.#applyEditability()
     await this.#refreshTransactionState()
     // 自由 SQL 同样可能跑很久，取消能力也要同步
@@ -465,16 +578,10 @@ export class ResultGrid {
     return this.#api
   }
 
-  /** 重置所有会话状态。切换查询时必须调用，否则旧游标会泄漏。 */
-  async #reset(): Promise<void> {
+  /** 重置游标状态。它从不回滚连接事务；事务由 controller 统一管理。 */
+  async #reset(preserveLocalDirty = false): Promise<void> {
     const api = this.#api
     const old = this.#cursorId
-
-    // 切换查询前若有未提交改动，必须回滚——否则那些改动会挂在一个
-    // 用户已经离开的事务里，后续操作看到的是"幽灵状态"。
-    if (this.#dirty.size > 0 && this.#source) {
-      await this.#rollbackQuietly()
-    }
 
     this.#cursorId = null
     this.#pages.clear()
@@ -484,7 +591,7 @@ export class ResultGrid {
     this.#columns = []
     this.#selectedRow = -1
     this.#selectedCol = -1
-    this.#dirty.clear()
+    if (!preserveLocalDirty) this.#dirty.clear()
     this.#editing = null
     this.#txActive = false
     this.#pendingAffected = 0
@@ -504,8 +611,11 @@ export class ResultGrid {
     }
   }
 
-  async #openCursor(exec: () => Promise<QueryResult>): Promise<SqlExecutionOutcome> {
-    await this.#reset()
+  async #openCursor(
+    exec: () => Promise<QueryResult>,
+    preserveLocalDirty = false
+  ): Promise<SqlExecutionOutcome> {
+    await this.#reset(preserveLocalDirty)
     this.#cb.onStatus('正在执行查询…')
     let result: QueryResult
     try {
@@ -1265,21 +1375,30 @@ export class ResultGrid {
 
   /** 把脏数据提交到事务（不 commit）。 */
   async applyEdits(): Promise<void> {
+    if (this.#txController) {
+      await this.#txController.apply(this)
+      return
+    }
+    await this.#applyEditsDirect()
+  }
+
+  /** Controller-only implementation of applying this grid's local buffer. */
+  async #applyEditsDirect(): Promise<boolean> {
     const api = this.#requireApi()
     const src = this.#source
     const desc = this.#desc
     if (!src || src.kind !== 'table' || !desc) {
       this.#cb.onStatus('当前结果集不可编辑', true)
-      return
+      return false
     }
-    if (this.#dirty.size === 0) return
+    if (this.#dirty.size === 0) return true
 
     const keyCols = desc.columns
       .filter((c) => c.primaryKeyOrdinal !== null)
       .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
     if (keyCols.length === 0) {
       this.#cb.onStatus('该表没有主键，无法定位行', true)
-      return
+      return false
     }
 
     const updates: RowUpdate[] = []
@@ -1287,7 +1406,7 @@ export class ResultGrid {
       const row = this.#rowAt(rowIndex)
       if (!row) {
         this.#cb.onStatus(`第 ${rowIndex + 1} 行已不在缓存中，请重新加载后再改`, true)
-        return
+        return false
       }
       // 用**主键值**定位行，而不是下标——下标会漂移，改错行且无声。
       const keyValues: Record<string, CellValue> = {}
@@ -1295,12 +1414,12 @@ export class ResultGrid {
         const ci = this.#columns.findIndex((c) => c.name === kc.name)
         if (ci < 0) {
           this.#cb.onStatus(`主键列「${kc.name}」不在结果集中，无法定位行`, true)
-          return
+          return false
         }
         const cell = row.cells[ci]
         if (!cell || cell.kind === 'null') {
           this.#cb.onStatus(`主键列「${kc.name}」值为 NULL，无法定位行`, true)
-          return
+          return false
         }
         keyValues[kc.name] = cell
       }
@@ -1316,78 +1435,56 @@ export class ResultGrid {
           `部分行失败（共 ${failed.length} 行），已保留在事务中，可回滚：${failed[0]?.error ?? ''}`,
           true
         )
+        await this.#refreshTransactionState()
+        return false
       } else {
         this.#cb.onStatus(`已应用 ${res.affected} 行到事务，尚未提交`)
         // 应用成功的改动从脏池清掉；视觉上改由「事务未提交」提示承载。
         this.#dirty.clear()
       }
       this.#txActive = res.inTransaction
-      this.#pendingAffected += res.affected
+      this.#pendingAffected = Math.max(this.#pendingAffected, res.affected)
       await this.#refreshTransactionState()
-      this.#render()
+      this.#renderEditToolbar()
+      return true
     } catch (e) {
       this.#cb.onStatus(`应用失败：${errText(e)}`, true)
+      return false
     }
   }
 
   /** 提交事务。 */
   async commit(): Promise<void> {
-    const api = this.#requireApi()
-    const src = this.#source
-    // 事务只对有连接的会话有意义：自由 SQL 结果没有表节点，也就没有事务上下文。
-    if (!src || src.kind !== 'table') {
+    if (!this.#txController || !this.#source) {
       this.#cb.onStatus('自由 SQL 无事务上下文，无法提交', true)
       return
     }
-    const nodeId = src.ref.id
-    try {
-      const st = await api.commitTransaction(nodeId)
-      this.#txActive = st.active
-      this.#pendingAffected = st.pendingAffected
-      this.#cb.onStatus('已提交')
-      await this.#refreshTransactionState()
-      await this.reload()
-    } catch (e) {
-      this.#cb.onStatus(`提交失败：${errText(e)}`, true)
-    }
+    await this.#txController.commit(this)
   }
 
   /** 回滚事务。 */
   async rollback(): Promise<void> {
-    const api = this.#requireApi()
-    const src = this.#source
-    if (!src || src.kind !== 'table') return
-    try {
-      const st = await api.rollbackTransaction(src.ref.id)
-      this.#txActive = st.active
-      this.#pendingAffected = st.pendingAffected
-      this.#dirty.clear()
-      this.#cb.onStatus('已回滚')
-      await this.#refreshTransactionState()
-      await this.reload()
-    } catch (e) {
-      this.#cb.onStatus(`回滚失败：${errText(e)}`, true)
-    }
-  }
-
-  /** 静默回滚（切换查询时用，不打扰用户）。 */
-  async #rollbackQuietly(): Promise<void> {
-    const api = this.#api
-    const src = this.#source
-    if (!api || !src || src.kind !== 'table') return
-    try {
-      await api.rollbackTransaction(src.ref.id)
-    } catch {
-      /* 连接可能已断开，忽略 */
-    }
+    if (!this.#txController || !this.#source) return
+    await this.#txController.rollback(this)
   }
 
   /** 重新执行当前查询（提交/回滚后刷新数据用）。 */
   async reload(): Promise<void> {
+    if (this.#txController) {
+      const canReload = await this.#txController.prepareToReload(this)
+      if (!canReload) return
+    } else if (this.getLocalDirtySummary().rows > 0) {
+      this.#cb.onStatus('有未应用编辑，已取消重新加载', true)
+      return
+    }
+    await this.#reloadUnchecked(false)
+  }
+
+  async #reloadUnchecked(preserveLocalDirty: boolean): Promise<void> {
     const src = this.#source
     if (!src) return
     if (src.kind === 'table') {
-      await this.openTable(src.ref, src.desc)
+      await this.#openTableUnchecked(src.ref, src.desc, preserveLocalDirty)
     } else {
       // 自由 SQL 现在记住了 nodeId，可以真正重查（而不是只提示用户重执行）；
       // 若当前有排序，优先重查保持排序结果。
@@ -1398,7 +1495,7 @@ export class ResultGrid {
         await this.#requerySorted({ col: sort.col, dir: sort.dir, rules, colName })
         return
       }
-      await this.runSql(src.nodeId, src.sql)
+      await this.#runSqlUnchecked(src.nodeId, src.sql, preserveLocalDirty)
     }
   }
 
@@ -2113,6 +2210,9 @@ export class ResultGrid {
   /** 页面卸载/切换时释放游标。 */
   async dispose(): Promise<void> {
     await this.#reset()
+    this.#txUnregister?.()
+    this.#txUnregister = null
+    this.#txController = null
     this.#menuEl.remove()
     this.#modalEl.remove()
   }

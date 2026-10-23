@@ -26,12 +26,14 @@
  * 超过即中止并提示改用 SQL 导出——**明确告知限制，而不是让用户以为能导 100 万行**。
  */
 
-import type { DbStudioApi } from '../core/api'
+import { NodeId, type DbStudioApi } from '../core/api'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { QueryOptions, QueryResult, ResultColumn, ResultPage } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
 import { ResultGrid, type SqlExecutionOutcome } from './grid'
 import { csvEscape, buildCsvFileName } from './grid'
+import { assertCompleteCell, assertCompleteRows } from './export-formats'
+import type { FilterCondition } from './filter-sql'
 
 /**
  * 「导出全部」的硬上限。
@@ -57,6 +59,22 @@ export type TabSource =
   | { kind: 'table'; ref: ObjectRef; desc: TableDescription }
   | { kind: 'sql'; nodeId: string; sql: string }
 
+/** Snapshot for toolbar/connection-level controllers. Source is the executed query. */
+export interface ActiveTabContext {
+  readonly id: number
+  readonly connectionId: string
+  readonly connectionNodeId: string
+  readonly grid: ResultGrid
+  readonly source: TabSource
+  readonly baseSource: TabSource
+  readonly originalSql: string | null
+  readonly filterText: string
+  readonly filterConditions: readonly FilterCondition[]
+  readonly filterDraft: string
+  readonly filterVisible: boolean
+  readonly closing: boolean
+}
+
 /** 一个标签的完整状态。grid 实例与来源一起存，保证二者不脱节。 */
 interface Tab {
   id: number
@@ -68,13 +86,23 @@ interface Tab {
   pane: HTMLElement
   /** 导出全部时重新执行查询所需的信息。 */
   source: TabSource
+  baseSource: TabSource
+  filterText: string
+  filterConditions: readonly FilterCondition[]
+  filterDraft: string
+  filterVisible: boolean
+  closing: boolean
+  status: { text: string; isError: boolean } | null
   /** 是否正在导出（防止重复点）。 */
   exporting: boolean
+  exportProgress: string | null
 }
 
 export interface ResultTabsCallbacks {
   /** 状态栏输出。 */
   onStatus(text: string, isError?: boolean): void
+  /** Fires on activation, active close/fallback, and context changes; null means no tabs. */
+  onActiveChange?(context: ActiveTabContext | null): void
 }
 
 /**
@@ -96,6 +124,7 @@ export class ResultTabs {
   readonly #emptyEl: HTMLElement
   /** 「导出全部」按钮：作用于当前标签。 */
   readonly #exportAllBtn: HTMLButtonElement
+  readonly #exportAllLabel: string
 
   readonly #tabs: Tab[] = []
   #activeId: number | null = null
@@ -113,6 +142,7 @@ export class ResultTabs {
     this.#stackEl = stackEl
     this.#emptyEl = emptyEl
     this.#exportAllBtn = exportAllBtn
+    this.#exportAllLabel = exportAllBtn.textContent ?? '导出全部 CSV'
     this.#api = api
     this.#cb = cb
 
@@ -159,9 +189,17 @@ export class ResultTabs {
   /** 执行 SQL → 新开一个标签，标题取 SQL 前若干字符。 */
   async runSql(
     nodeId: string,
-    sql: string
+    sql: string,
+    filter?: Pick<ActiveTabContext, 'baseSource' | 'filterText' | 'filterConditions'>
   ): Promise<{ grid: ResultGrid; outcome: SqlExecutionOutcome }> {
     const tab = this.#createTab(sqlTitle(sql), { kind: 'sql', nodeId, sql })
+    if (filter) {
+      tab.baseSource = filter.baseSource
+      tab.filterText = filter.filterText
+      tab.filterConditions = filter.filterConditions.map((c) => ({ ...c }))
+      tab.filterDraft = filter.filterText
+      tab.filterVisible = true
+    }
     this.#activate(tab.id)
     let outcome: SqlExecutionOutcome = { result: null, error: '执行未完成' }
     try {
@@ -171,6 +209,36 @@ export class ResultTabs {
       outcome = { result: null, error: errText(e) }
     }
     return { grid: tab.grid, outcome }
+  }
+
+  get activeContext(): ActiveTabContext | null {
+    const tab = this.#tabs.find((t) => t.id === this.#activeId)
+    if (!tab) return null
+    const nodeId = tab.source.kind === 'table' ? tab.source.ref.id : tab.source.nodeId
+    const parsed = NodeId.parse(nodeId)
+    if (!parsed) throw new Error(`标签缺少连接归属：${nodeId}`)
+    return {
+      id: tab.id,
+      connectionId: parsed.connectionId,
+      connectionNodeId: NodeId.connection(parsed.connectionId),
+      grid: tab.grid,
+      source: { ...tab.source },
+      baseSource: { ...tab.baseSource },
+      originalSql: tab.baseSource.kind === 'sql' ? tab.baseSource.sql : null,
+      filterText: tab.filterText,
+      filterConditions: tab.filterConditions.map((c) => ({ ...c })),
+      filterDraft: tab.filterDraft,
+      filterVisible: tab.filterVisible,
+      closing: tab.closing
+    }
+  }
+
+  /** Keep unsubmitted input per tab as well as the applied conditions. */
+  setFilterDraft(text: string, visible: boolean): void {
+    const tab = this.#tabs.find((t) => t.id === this.#activeId)
+    if (!tab || tab.closing) return
+    tab.filterDraft = text
+    tab.filterVisible = visible
   }
 
   /** 造一个标签：建 DOM pane、new 一个独立 ResultGrid、接到栈里。 */
@@ -186,7 +254,12 @@ export class ResultTabs {
     this.#stackEl.appendChild(pane)
 
     const grid = new ResultGrid(gridRoot, {
-      onStatus: (t, isErr) => this.#cb.onStatus(t, isErr)
+      onStatus: (text, isError = false) => {
+        const tab = this.#tabById(id)
+        if (!tab || tab.closing) return
+        tab.status = { text, isError }
+        if (this.#activeId === id) this.#cb.onStatus(text, isError)
+      }
     })
     grid.attachApi(this.#api)
     // 网格顶部的「执行 SQL」条由外部提供。这里给一个薄占位，说明这是只读结果视图。
@@ -196,10 +269,30 @@ export class ResultTabs {
     notice.textContent = source.kind === 'table' ? `表：${source.ref.name}` : 'SQL 结果'
     grid.setToolbar(notice)
 
-    const tab: Tab = { id, title, grid, pane, source, exporting: false }
+    // grid.ts also has a legacy CSV button. Guard it in capture phase so it
+    // cannot bypass the same integrity check as the external format toolbar.
+    pane.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest('button')
+      if (!button?.textContent?.startsWith('导出 CSV')) return
+      try {
+        assertCompleteRows(grid.exportLoadedRows().rows.map((r) => r.cells))
+      } catch (e) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        this.#cb.onStatus(`导出失败：${errText(e)}`, true)
+      }
+    }, true)
+
+    const tab: Tab = {
+      id, title, grid, pane, source, baseSource: source,
+      filterText: '', filterConditions: [], filterDraft: '', filterVisible: false,
+      closing: false, status: null, exporting: false, exportProgress: null
+    }
     this.#tabs.push(tab)
     this.#renderBar()
     this.#syncChrome()
+    const status = this.#tabById(id)?.status
+    if (status) this.#cb.onStatus(status.text, status.isError)
     return tab
   }
 
@@ -232,7 +325,22 @@ export class ResultTabs {
     const idx = this.#tabs.findIndex((t) => t.id === id)
     if (idx < 0) return
     const tab = this.#tabs[idx]
-    if (!tab) return
+    if (!tab || tab.closing) return
+    tab.closing = true
+    this.#syncChrome()
+
+    try {
+      if (!(await tab.grid.prepareToLeave('关闭标签'))) {
+        tab.closing = false
+        this.#syncChrome()
+        return
+      }
+    } catch (e) {
+      tab.closing = false
+      this.#syncChrome()
+      this.#cb.onStatus(`关闭标签前检查编辑失败：${errText(e)}`, true)
+      return
+    }
 
     // 先释放游标，再摘 DOM。即使 dispose 抛错也要继续清理 DOM，否则会留下
     // "看不见但还在"的僵尸 pane。所以用 try/finally 把清理与释放分开。
@@ -243,15 +351,21 @@ export class ResultTabs {
       this.#cb.onStatus(`关闭标签时释放游标失败：${errText(e)}`, true)
     } finally {
       tab.pane.remove()
-      this.#tabs.splice(idx, 1)
+      // await dispose() 期间别的标签可能已经关掉了，所以按对象重新定位下标，
+      // 不能用 await 之前记下的那个位置。
+      const currentIndex = this.#tabs.indexOf(tab)
+      this.#tabs.splice(currentIndex, 1)
       if (this.#activeId === id) {
         // 关掉当前标签后，优先切到它左边那个；没有左边就切第一个。
-        const next = this.#tabs[idx - 1] ?? this.#tabs[idx] ?? null
+        const next = this.#tabs.slice(0, currentIndex).reverse().find((t) => !t.closing)
+          ?? this.#tabs.find((t) => !t.closing) ?? null
         this.#activeId = next ? next.id : null
         for (const t of this.#tabs) t.pane.hidden = t.id !== this.#activeId
       }
       this.#renderBar()
       this.#syncChrome()
+      const status = this.#tabs.find((t) => t.id === this.#activeId)?.status
+      if (status) this.#cb.onStatus(status.text, status.isError)
     }
   }
 
@@ -311,13 +425,15 @@ export class ResultTabs {
     this.#emptyEl.hidden = has
     this.#stackEl.hidden = !has
     const active = this.#activeId !== null ? this.#tabById(this.#activeId) : undefined
-    this.#exportAllBtn.disabled = !active || active.exporting
+    this.#exportAllBtn.disabled = !active || active.exporting || active.closing
+    this.#exportAllBtn.textContent = active?.exportProgress ?? this.#exportAllLabel
     if (active) {
       // tooltip 明确两件事：①只作用于当前标签 ②会重新查询一次 ③有上限。
       this.#exportAllBtn.title =
         `导出当前标签的全部行（会重新执行一次该查询）。` +
-        `最多 ${MAX_EXPORT_ALL_ROWS.toLocaleString()} 行，超过请改用 SQL 导出。`
+        `最多 ${MAX_EXPORT_ALL_ROWS.toLocaleString()} 行；含截断字段预览会拒绝导出。`
     }
+    this.#cb.onActiveChange?.(this.activeContext)
   }
 
   // -------------------------------------------------------------------------
@@ -339,17 +455,16 @@ export class ResultTabs {
     const id = this.#activeId
     if (id === null) return
     const tab = this.#tabById(id)
-    if (!tab || tab.exporting) return
+    if (!tab || tab.exporting || tab.closing) return
 
     tab.exporting = true
     this.#syncChrome()
-    const btn = this.#exportAllBtn
-    const originalLabel = btn.textContent
     let cursorId: string | null = null
     try {
       // 1) 重新执行查询，拿第一页 + 新游标。
       const first = await this.#runQueryForSource(tab.source)
       cursorId = first.cursorId
+      if (tab.closing || !this.#tabs.includes(tab)) return
       // previewTable/runQuery 若没保留游标（keepCursor=false）就没有 cursorId：
       // 这种情况只能导出第一页，明确告知，而不是假装导完了。
       if (!cursorId) {
@@ -360,8 +475,11 @@ export class ResultTabs {
       const columns = first.columns
       const rows: CellValue[][] = []
       let total = first.returned
+      if (total > MAX_EXPORT_ALL_ROWS) throw new Error(`数据量超过导出上限（${MAX_EXPORT_ALL_ROWS} 行）`)
+      assertCompleteRows(first.rows.map((r) => r.cells))
       rows.push(...first.rows.map((r) => [...r.cells]))
-      btn.textContent = `正在导出 ${total} 行…`
+      tab.exportProgress = `正在导出 ${total} 行…`
+      this.#syncChrome()
 
       // 2) 循环拉后续页，直到 hasMore=false 或超过上限。
       let page: ResultPage = first
@@ -381,10 +499,16 @@ export class ResultTabs {
           offset,
           Math.min(EXPORT_PAGE_SIZE, MAX_EXPORT_ALL_ROWS - total)
         )
-        if (next.returned === 0) break
+        if (tab.closing || !this.#tabs.includes(tab)) return
+        if (next.returned === 0) {
+          if (next.hasMore) throw new Error('分页未前进，已中止导出（不能确认结果完整）')
+          break
+        }
+        assertCompleteRows(next.rows.map((r) => r.cells))
         total += next.returned
         rows.push(...next.rows.map((r) => [...r.cells]))
-        btn.textContent = `正在导出 ${total} 行…`
+        tab.exportProgress = `正在导出 ${total} 行…`
+        this.#syncChrome()
         page = next
         // 到这里若已超上限，下一轮循环开头会中止。
         if (total > MAX_EXPORT_ALL_ROWS) {
@@ -420,12 +544,12 @@ export class ResultTabs {
       a.click()
       a.remove()
       globalThis.setTimeout(() => URL.revokeObjectURL(url), 0)
-      this.#cb.onStatus(`已导出全部 ${rows.length} 行到 ${a.download}`)
+      this.#cb.onStatus(`已导出全部 ${rows.length} 行到 ${a.download}（字段未截断；重新查询的结果）`)
     } catch (e) {
       this.#cb.onStatus(`导出全部失败：${errText(e)}`, true)
     } finally {
       tab.exporting = false
-      btn.textContent = originalLabel
+      tab.exportProgress = null
       this.#syncChrome()
       // 释放这次导出用的临时游标（与标签本身的长游标是两个不同的游标）。
       if (cursorId) {
@@ -466,6 +590,7 @@ export function sqlTitle(sql: string, maxLen = 40): string {
  * 这一个纯映射（不是复制 grid 的组件代码，只是同一份数据契约的取值规则）。
  */
 export function cellToCsvText(cell: CellValue | undefined): string {
+  assertCompleteCell(cell)
   if (!cell) return ''
   switch (cell.kind) {
     case 'null':
