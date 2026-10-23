@@ -49,6 +49,10 @@ export interface SqlEditorCallbacks {
    * 通过 runQuery 取数（组件不碰 api.ts，避免把渲染组件和 IPC 契约耦合）。
    */
   runExplain?(sql: string): Promise<{ readonly columns: readonly string[]; readonly rows: readonly unknown[][] }>
+  /** 打开历史与收藏面板。 */
+  onOpenLibrary?(): void
+  /** 把当前语句（没有则整段）保存为收藏。 */
+  onSaveCurrent?(sql: string): void
 }
 
 interface CompletionItemView {
@@ -375,6 +379,19 @@ export class SqlEditor {
       this.callbacks.onExecute(all)
     })
     makeBtn('执行计划', '对当前语句执行 EXPLAIN QUERY PLAN', () => void this.runExplain())
+    if (this.callbacks.onOpenLibrary) {
+      makeBtn('历史 / 收藏', '浏览 SQL 执行历史与收藏', () => this.callbacks.onOpenLibrary?.())
+    }
+    if (this.callbacks.onSaveCurrent) {
+      makeBtn('保存收藏', '把当前语句保存为收藏', () => {
+        const sql = this.getCurrentStatement() || this.textarea.value.trim()
+        if (!sql) {
+          this.callbacks.onStatus('编辑器为空，无法保存收藏', true)
+          return
+        }
+        this.callbacks.onSaveCurrent?.(sql)
+      })
+    }
   }
 
   private async runExplain(): Promise<void> {

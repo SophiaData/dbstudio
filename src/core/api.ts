@@ -21,6 +21,12 @@ import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription }
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
 import type { CellValue } from './resultset'
+import type {
+  RecordSqlHistoryInput,
+  SavedSql,
+  SqlHistoryEntry,
+  SqlLibrarySnapshot
+} from './sql-library'
 
 /** 连接在 UI 里的展示态。会话态（是否已连上）单独放，避免和配置混在一起。 */
 export interface ConnectionSummary {
@@ -235,6 +241,23 @@ export interface DbStudioApi {
     config: Partial<ConnectionConfig>,
     secret?: SecretInput
   ): Promise<ConnectionSummary>
+
+  // ---- SQL 历史与收藏（第八阶段） ----
+
+  /** 读取历史与收藏快照。历史按最新在前，收藏按最近保存在前。 */
+  listSqlLibrary(): Promise<SqlLibrarySnapshot>
+
+  /** 记录一条**实际执行过**的语句。成功与失败都记录。 */
+  recordSqlHistory(input: RecordSqlHistoryInput): Promise<SqlHistoryEntry>
+
+  /** 新增（`id === null`）或更新一条收藏。 */
+  saveSql(id: string | null, name: string, sql: string): Promise<SavedSql>
+
+  /** 删除收藏（幂等）。 */
+  removeSavedSql(id: string): Promise<void>
+
+  /** 清空执行历史，不动收藏。 */
+  clearSqlHistory(): Promise<void>
 }
 
 /** preload 注入到 window 上的全局名。 */
@@ -269,7 +292,12 @@ export const IPC = {
   dropView: 'dbstudio:dropView',
   renameTable: 'dbstudio:renameTable',
   cancelQuery: 'dbstudio:cancelQuery',
-  updateConnection: 'dbstudio:updateConnection'
+  updateConnection: 'dbstudio:updateConnection',
+  listSqlLibrary: 'dbstudio:listSqlLibrary',
+  recordSqlHistory: 'dbstudio:recordSqlHistory',
+  saveSql: 'dbstudio:saveSql',
+  removeSavedSql: 'dbstudio:removeSavedSql',
+  clearSqlHistory: 'dbstudio:clearSqlHistory'
 } as const
 
 /**

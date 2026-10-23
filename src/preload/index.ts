@@ -6,7 +6,7 @@
  * 直接暴露 `ipcRenderer` 等于把整个 IPC 面全开：页面里任何一段代码
  * （包括被注入的、或某个第三方脚本）都能调用任意通道。
  *
- * 这里显式枚举 **28 个**方法（第一~五阶段 21 + 第六阶段 DDL/编辑连接 6 + 第七阶段 1），
+ * 这里显式枚举 **33 个**方法（第一~五阶段 21 + 第六阶段 6 + 第七阶段 1 + 第八阶段 5），
  * 多一个都没有。这份清单与 `DbStudioApi` 是同一份类型：主进程实现它、
  * preload 转发它、渲染进程消费它、测试也验它，任何一边改了签名，`tsc` 会立刻报错。
  *
@@ -108,6 +108,12 @@ import type { SecretInput } from '../core/driver'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
 import type { CellValue, QueryOptions, QueryResult, ResultPage } from '../core/resultset'
+import type {
+  RecordSqlHistoryInput,
+  SavedSql,
+  SqlHistoryEntry,
+  SqlLibrarySnapshot
+} from '../core/sql-library'
 import type {
   EditApplyResult,
   RowUpdate,
@@ -251,7 +257,19 @@ const api: DbStudioApi = {
       connectionId,
       config,
       secret
-    ) as Promise<ConnectionSummary>
+    ) as Promise<ConnectionSummary>,
+
+  // ---- SQL 历史与收藏（第八阶段） ----
+
+  listSqlLibrary: () =>
+    ipcRenderer.invoke(IPC.listSqlLibrary) as Promise<SqlLibrarySnapshot>,
+  recordSqlHistory: (input: RecordSqlHistoryInput) =>
+    ipcRenderer.invoke(IPC.recordSqlHistory, input) as Promise<SqlHistoryEntry>,
+  saveSql: (id: string | null, name: string, sql: string) =>
+    ipcRenderer.invoke(IPC.saveSql, id, name, sql) as Promise<SavedSql>,
+  removeSavedSql: (id: string) =>
+    ipcRenderer.invoke(IPC.removeSavedSql, id) as Promise<void>,
+  clearSqlHistory: () => ipcRenderer.invoke(IPC.clearSqlHistory) as Promise<void>
 }
 
 contextBridge.exposeInMainWorld(API_GLOBAL, api)

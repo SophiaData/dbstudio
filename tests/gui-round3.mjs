@@ -256,14 +256,19 @@ if (mkView.clicked) {
     if (!nameIn || !sqlIn) return { ok: false, hasName: !!nameIn, hasTa: !!sqlIn }
     ;(nameIn).value = 'v_gui'
     ;(sqlIn).value = 'SELECT id, v FROM alpha'
+    // 必须限定在视图模态框内点「创建」。页面上还有编辑连接等异步模态，
+    // 全局找第一个 /创建|确定|保存/ 可能点到别的按钮（之前实际点到了
+    // 「编辑连接」的入口，导致视图模态一直遮住后续操作）。
+    const modal = nameIn.closest('[role="dialog"]')
+    const submit = modal
+      ? [...modal.querySelectorAll('button')].find((button) => button.textContent?.trim() === '创建')
+      : null
+    if (!submit) return { ok: false, reason: 'create button missing' }
+    submit.click()
     return { ok: true }
   })
   console.log('  [视图表单]', JSON.stringify(fillView))
   if (fillView.ok) {
-    await win.evaluate(() => {
-      const b = [...document.querySelectorAll('button')].find((x) => /创建|确定|保存/.test(x.textContent ?? ''))
-      b?.click()
-    })
     await win.waitForTimeout(1800)
     const db = new DatabaseSync(dbA)
     const v = db.prepare("SELECT name FROM sqlite_master WHERE type='view' AND name='v_gui'").get()
@@ -329,27 +334,22 @@ if (editEntry.found) {
     hasName: !!document.querySelector('input[aria-label="连接名"]'),
     fileInputs: [...document.querySelectorAll('input[data-key="file"]')].map(i => i.value.slice(-24))
   }))
-  const changed = await win.evaluate((newFile) => {
-    // ★ 必须限定在「编辑连接」这个 overlay 内！
-    //   index.html 里的 #dlg-connection（新建连接对话框）是常驻 <dialog>，
-    //   close() 只是隐藏，DOM 还在——里面也有 input[data-key="file"]。
-    //   全局 querySelector 会命中那个旧输入框（值是 a.db），改了等于没改。
-    // 定位「编辑连接」overlay：用其中的 aria-label="连接名" 输入框往上找，
-    // 而不是靠 z-index 数值（那个值随时可能被调整）。
-    // 编辑对话框的 file 输入框是**最后一个** data-key="file"
-    // （新建连接对话框的常驻 DOM 里也有一个，值不同）。
-    const all = [...document.querySelectorAll('input[data-key="file"]')]
-    const inp = all[all.length - 1]
-    if (!inp) return { ok: false, reason: 'no file input' }
-    inp.value = newFile
-    inp.dispatchEvent(new Event('input', { bubbles: true }))
-    const saveBtn = [...document.querySelectorAll('button')].find(
-      (x) => x.textContent?.trim() === '保存'
-    )
-    if (!saveBtn || saveBtn.disabled) return { ok: false, reason: 'save disabled' }
-    saveBtn.click()
-    return { ok: true }
-  }, dbB)
+  // 编辑连接不是原生 <dialog>，而是追加到 body 的 div overlay。
+  // 先按标题锁定该层，再在其中填值，避免误中新连接对话框里常驻的隐藏输入框。
+  await win.waitForFunction(
+    () =>
+      [...document.querySelectorAll('body > div')].some((element) =>
+        element.textContent?.includes('编辑连接「库A」')
+      ),
+    { timeout: 10000 }
+  )
+  const editPanel = win
+    .locator('body > div')
+    .filter({ hasText: '编辑连接「库A」' })
+    .last()
+  await editPanel.locator('input[data-key="file"]').fill(dbB)
+  await editPanel.getByRole('button', { name: '保存', exact: true }).click()
+  const changed = { ok: true }
   console.log('  [编辑提交]', JSON.stringify(changed))
   await win.waitForTimeout(2500)
   // 验证：重连后能查到库B 的 beta 表。

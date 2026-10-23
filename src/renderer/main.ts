@@ -20,6 +20,7 @@ import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs } from './tabs'
 import { SqlEditor } from './sql-editor'
+import { SqlLibraryPanel } from './sql-library'
 import { splitStatements } from './sql-format'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
 import { renderErDiagram } from './er-diagram'
@@ -191,6 +192,40 @@ async function boot(): Promise<void> {
     }
   )
 
+  // ---- SQL 历史与收藏 ----
+  let sqlLibrary: SqlLibraryPanel | null = null
+
+  /**
+   * 记录一条实际执行过的语句。
+   *
+   * 历史写入失败不能把一条已经成功的查询误报成失败，但也不能静默：
+   * 状态栏会明确说「查询已执行，但历史没存下」。
+   */
+  const recordSqlHistory = async (
+    sql: string,
+    connectionNodeId: string,
+    elapsedMs: number,
+    error: string | null,
+    returnedRows: number | null
+  ): Promise<void> => {
+    const connectionId = NodeId.parse(connectionNodeId)?.connectionId ?? connectionNodeId
+    try {
+      const connection = (await api.listConnections()).find((item) => item.id === connectionId)
+      await api.recordSqlHistory({
+        sql,
+        connectionId,
+        dialectId: connection?.dialectId ?? 'unknown',
+        elapsedMs,
+        status: error === null ? 'success' : 'error',
+        ...(error === null ? {} : { error }),
+        ...(returnedRows === null ? {} : { returnedRows })
+      })
+      void sqlLibrary?.reload()
+    } catch (historyError) {
+      setStatus(`查询已执行，但写入 SQL 历史失败：${errText(historyError)}`, true)
+    }
+  }
+
   // ---- SQL 编辑器（替换原来的单行 input）----
   /** 执行一段 SQL（单条/全部同一条路径，区别只在传入内容）。 */
   /**
@@ -222,11 +257,34 @@ async function boot(): Promise<void> {
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
     let lastGrid: ResultGrid | null = null
+    const connectionNodeId = currentConnectionNodeId
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i] as string
+      const startedAt = performance.now()
       try {
-        lastGrid = await tabs.runSql(currentConnectionNodeId, stmt)
+        const opened = await tabs.runSql(connectionNodeId, stmt)
+        lastGrid = opened.grid
+        await recordSqlHistory(
+          stmt,
+          connectionNodeId,
+          performance.now() - startedAt,
+          opened.outcome.error,
+          opened.outcome.result?.returned ?? null
+        )
+        if (opened.outcome.error !== null) {
+          const where =
+            statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+          setStatus(`${where}${opened.outcome.error}`, true)
+          return
+        }
       } catch (e) {
+        await recordSqlHistory(
+          stmt,
+          connectionNodeId,
+          performance.now() - startedAt,
+          errText(e),
+          null
+        )
         const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
         setStatus(`${where}${errText(e)}`, true)
         return
@@ -292,7 +350,22 @@ async function boot(): Promise<void> {
           })
         )
       }
-    }
+    },
+    onOpenLibrary: () => void sqlLibrary?.open('history'),
+    onSaveCurrent: (sql) => sqlLibrary?.saveCurrent(sql)
+  })
+
+  sqlLibrary = new SqlLibraryPanel({
+    list: () => api.listSqlLibrary(),
+    save: (id, name, sql) => api.saveSql(id, name, sql),
+    removeSaved: (id) => api.removeSavedSql(id),
+    clearHistory: () => api.clearSqlHistory(),
+    loadSql: (sql) => {
+      sqlEditor.setValue(sql)
+      sqlEditor.focus()
+    },
+    runSql: (sql) => void executeSql(sql),
+    onStatus: (text, isError) => setStatus(text, isError)
   })
 
   el('btn-refresh').addEventListener('click', () => {
@@ -498,8 +571,8 @@ async function boot(): Promise<void> {
         setStatus('筛选失败：未知连接', true)
         return
       }
-      const newGrid = await tabs.runSql(connNodeId, sql)
-      activeGrid = newGrid
+      const opened = await tabs.runSql(connNodeId, sql)
+      activeGrid = opened.grid
       syncToolsVisibility()
       // 筛选结果是 SQL 来源，不再对应单表 → 清掉表引用，避免 INSERT 导出用它。
       activeTableRef = null

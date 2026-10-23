@@ -30,7 +30,7 @@ import type { DbStudioApi } from '../core/api'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { QueryOptions, QueryResult, ResultColumn, ResultPage } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
-import { ResultGrid } from './grid'
+import { ResultGrid, type SqlExecutionOutcome } from './grid'
 import { csvEscape, buildCsvFileName } from './grid'
 
 /**
@@ -157,15 +157,20 @@ export class ResultTabs {
   }
 
   /** 执行 SQL → 新开一个标签，标题取 SQL 前若干字符。 */
-  async runSql(nodeId: string, sql: string): Promise<ResultGrid> {
+  async runSql(
+    nodeId: string,
+    sql: string
+  ): Promise<{ grid: ResultGrid; outcome: SqlExecutionOutcome }> {
     const tab = this.#createTab(sqlTitle(sql), { kind: 'sql', nodeId, sql })
     this.#activate(tab.id)
+    let outcome: SqlExecutionOutcome = { result: null, error: '执行未完成' }
     try {
-      await tab.grid.runSql(nodeId, sql)
+      outcome = await tab.grid.runSql(nodeId, sql)
     } catch (e) {
       this.#cb.onStatus(`执行 SQL 失败：${errText(e)}`, true)
+      outcome = { result: null, error: errText(e) }
     }
-    return tab.grid
+    return { grid: tab.grid, outcome }
   }
 
   /** 造一个标签：建 DOM pane、new 一个独立 ResultGrid、接到栈里。 */

@@ -88,6 +88,12 @@ type Source =
   | { kind: 'table'; ref: ObjectRef; desc: TableDescription }
   | { kind: 'sql'; sql: string; nodeId: string }
 
+/** 一次自由 SQL 的执行结果；失败时 error 给历史记录提供可读原因。 */
+export interface SqlExecutionOutcome {
+  readonly result: QueryResult | null
+  readonly error: string | null
+}
+
 export class ResultGrid {
   readonly #root: HTMLElement
   readonly #cb: GridCallbacks
@@ -437,7 +443,7 @@ export class ResultGrid {
   }
 
   /** 执行自由 SQL（只读）。 */
-  async runSql(nodeId: string, sql: string): Promise<void> {
+  async runSql(nodeId: string, sql: string): Promise<SqlExecutionOutcome> {
     const api = this.#requireApi()
     // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
     this.#source = { kind: 'sql', sql, nodeId }
@@ -446,11 +452,12 @@ export class ResultGrid {
     this.#colWidths.clear()
     // 自由 SQL 不持久化：列不固定，存下来的偏好下次几乎必然失效
     this.#layoutTableName = null
-    await this.#openCursor(() => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }))
+    const outcome = await this.#openCursor(() => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }))
     this.#applyEditability()
     await this.#refreshTransactionState()
     // 自由 SQL 同样可能跑很久，取消能力也要同步
     await this.#refreshCancelCapability()
+    return outcome
   }
 
   #requireApi(): GridApi {
@@ -497,16 +504,17 @@ export class ResultGrid {
     }
   }
 
-  async #openCursor(exec: () => Promise<QueryResult>): Promise<void> {
+  async #openCursor(exec: () => Promise<QueryResult>): Promise<SqlExecutionOutcome> {
     await this.#reset()
     this.#cb.onStatus('正在执行查询…')
     let result: QueryResult
     try {
       result = await exec()
     } catch (e) {
-      this.#cb.onStatus(`查询失败：${errText(e)}`, true)
-      this.#showError(errText(e))
-      return
+      const message = errText(e)
+      this.#cb.onStatus(`查询失败：${message}`, true)
+      this.#showError(message)
+      return { result: null, error: message }
     }
 
     this.#cursorId = result.cursorId
@@ -526,6 +534,7 @@ export class ResultGrid {
         (result.hasMore ? ' · 可继续滚动加载' : ' · 已全部返回')
     )
     if (result.rows.length === 0) this.#showEmpty()
+    return { result, error: null }
   }
 
   /** 可编辑性：只有「表 + 有唯一键」才可编辑。 */
@@ -1391,6 +1400,11 @@ export class ResultGrid {
       }
       await this.runSql(src.nodeId, src.sql)
     }
+  }
+
+  /** 当前结果集已经返回的行数（首屏/已加载），供执行历史记录使用。 */
+  get returnedRowCount(): number {
+    return this.#knownRows
   }
 
   // -------------------------------------------------------------------------

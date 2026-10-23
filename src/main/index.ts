@@ -18,12 +18,15 @@ import type { ConnectionConfig } from '../core/dialect'
 import type { SecretInput } from '../core/driver'
 import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
 import type { TableCreateSpec } from '../core/model'
+import type { RecordSqlHistoryInput } from '../core/sql-library'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
+import { SqlLibraryStore } from './SqlLibraryStore'
 
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
+let sqlLibrary: SqlLibraryStore | null = null
 
 /**
  * 生产环境的凭据加解密器：Electron `safeStorage`。
@@ -107,6 +110,15 @@ function getManager(): ConnectionManager {
       `；配置目录: ${app.getPath('userData')}`
   )
   return manager
+}
+
+function getSqlLibrary(): SqlLibraryStore {
+  if (sqlLibrary) return sqlLibrary
+  sqlLibrary = new SqlLibraryStore({
+    baseDir: app.getPath('userData'),
+    onLog: (level, msg) => console[level === 'error' ? 'error' : 'log'](msg)
+  })
+  return sqlLibrary
 }
 
 function createWindow(): void {
@@ -216,6 +228,8 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       const ddlApi = api ? ['createTable','dropTable','createView','dropView','renameTable']
         .filter(k => typeof api[k] === 'function') : [];
       const hasUpdateConnection = api && typeof api.updateConnection === 'function';
+      const sqlLibraryApi = api ? ['listSqlLibrary','recordSqlHistory','saveSql','removeSavedSql','clearSqlHistory']
+        .filter(k => typeof api[k] === 'function') : [];
       return {
         title: document.title,
         hasTree: !!tree,
@@ -234,7 +248,8 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
         persistApiCount: persistApi.length,
         editApiCount: editApi.length,
         ddlApiCount: ddlApi.length,
-        hasUpdateConnection: !!hasUpdateConnection
+        hasUpdateConnection: !!hasUpdateConnection,
+        sqlLibraryApiCount: sqlLibraryApi.length
       };
     })()`)
     // 把 safeStorage 探针结果合并进 SMOKE_RESULT：DOM 侧与主进程侧的信息
@@ -261,6 +276,7 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       editApiCount: number
       ddlApiCount: number
       hasUpdateConnection: boolean
+      sqlLibraryApiCount: number
     }
     const ok =
       r.hasTree &&
@@ -280,6 +296,7 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       // DDL 五件齐全 + 编辑连接可用
       r.ddlApiCount === 5 &&
       r.hasUpdateConnection &&
+      r.sqlLibraryApiCount === 5 &&
       // safeStorage 走不通时**不算自检失败**：Linux 无密钥服务是合法环境，
       // 此时功能降级为"不保存密码"而非崩溃。所以这里只要求探针真的跑过
       // （字段存在），可用性本身由 Lead 读 SMOKE_RESULT 判断。
@@ -413,7 +430,19 @@ function registerIpc(): void {
       connectionId: string,
       config: Partial<ConnectionConfig>,
       secret?: SecretInput
-    ) => getManager().updateConnection(connectionId, config, secret)
+    ) => getManager().updateConnection(connectionId, config, secret),
+    listSqlLibrary: async () => getSqlLibrary().snapshot(),
+    recordSqlHistory: async (input: RecordSqlHistoryInput) => {
+      const history = getSqlLibrary()
+      const manager = getManager()
+      const connection = manager.list().find((item) => item.id === input.connectionId)
+      const entry = history.record(input, connection?.name ?? '（已删除的连接）')
+      return entry
+    },
+    saveSql: async (id: string | null, name: string, sql: string) =>
+      getSqlLibrary().save(id, name, sql),
+    removeSavedSql: async (id: string) => getSqlLibrary().removeSaved(id),
+    clearSqlHistory: async () => getSqlLibrary().clearHistory()
   }
 
   // 逐个通道注册，而不是用一个万能通道 + 方法名字符串。
@@ -502,6 +531,16 @@ function registerIpc(): void {
     (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: SecretInput) =>
       api.updateConnection(connectionId, config, secret)
   )
+
+  ipcMain.handle(IPC.listSqlLibrary, () => api.listSqlLibrary())
+  ipcMain.handle(IPC.recordSqlHistory, (_e, input: RecordSqlHistoryInput) =>
+    api.recordSqlHistory(input)
+  )
+  ipcMain.handle(IPC.saveSql, (_e, id: string | null, name: string, sql: string) =>
+    api.saveSql(id, name, sql)
+  )
+  ipcMain.handle(IPC.removeSavedSql, (_e, id: string) => api.removeSavedSql(id))
+  ipcMain.handle(IPC.clearSqlHistory, () => api.clearSqlHistory())
 }
 
 app.whenReady().then(() => {

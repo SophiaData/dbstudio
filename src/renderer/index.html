@@ -170,6 +170,47 @@
       </div>
     </dialog>
 
+    <!-- SQL 历史与收藏 -->
+    <dialog id="dlg-sql-library" class="sql-library-dialog">
+      <div class="sql-library">
+        <header class="sql-library-head">
+          <div>
+            <h2>SQL 历史与收藏</h2>
+            <p>历史自动保留最近 500 条；收藏不会被历史配额淘汰。</p>
+          </div>
+          <button id="btn-sql-library-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="sql-library-tabs" role="tablist" aria-label="SQL 库分类">
+          <button id="tab-sql-history" type="button" role="tab" aria-selected="true">历史</button>
+          <button id="tab-sql-saved" type="button" role="tab" aria-selected="false">收藏</button>
+        </div>
+        <div class="sql-library-toolbar">
+          <input id="sql-library-search" type="search" placeholder="搜索 SQL、连接或收藏名"
+                 aria-label="搜索 SQL 库" spellcheck="false" />
+          <button id="btn-clear-sql-history" type="button">清空历史</button>
+        </div>
+        <div id="sql-library-list" class="sql-library-list" role="list"></div>
+        <p id="sql-library-empty" class="sql-library-empty" hidden></p>
+      </div>
+    </dialog>
+
+    <!-- 保存为收藏 / 重命名收藏 -->
+    <dialog id="dlg-save-sql" class="confirm-dialog">
+      <form id="form-save-sql" class="confirm-body" method="dialog">
+        <h2 id="save-sql-title">保存为收藏</h2>
+        <label class="field">
+          <span>名称</span>
+          <input id="f-save-sql-name" type="text" required maxlength="120"
+                 placeholder="例如：每日活跃用户" />
+        </label>
+        <p id="save-sql-error" class="error" hidden></p>
+        <menu>
+          <button id="btn-save-sql-cancel" type="button">取消</button>
+          <button id="btn-save-sql-submit" type="submit">保存</button>
+        </menu>
+      </form>
+    </dialog>
+
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

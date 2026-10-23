@@ -17,7 +17,7 @@
 │  虚拟化懒加载元数据树 · 详情面板 · 新建连接表单    │
 │  只知道 window.dbstudio，不知道 SQLite 是什么      │
 └─────────────────────┬───────────────────────────┘
-                      │ 28 个白名单方法（src/core/api.ts）
+                      │ 33 个白名单方法（src/core/api.ts）
 ┌─────────────────────▼───────────────────────────┐
 │  preload (src/preload)                           │
 │  contextBridge 显式枚举，多一个都不给              │
@@ -101,7 +101,7 @@ src/
     sqlite/          SQLite 适配器（node:sqlite，零原生依赖）
   driver-host/     驱动宿主进程（纯 Node，禁止 import electron）
   main/            Electron 主进程
-  preload/         白名单桥（28 个方法）
+  preload/         白名单桥（33 个方法）
   renderer/
     tree.ts         虚拟化懒加载元数据树
     grid.ts         结果集网格：虚拟滚动 + 按页取数
@@ -170,7 +170,7 @@ Node 的模块查找不会跨回 `app.asar` 去加载 `pg` / `ssh2`。
 
 ```bash
 pnpm install
-pnpm verify      # 二十四段全链（含 8 段 GUI；PG / SSL / SSH 无环境时自动跳过）
+pnpm verify      # 二十六段全链（含 9 段 GUI；PG / SSL / SSH 无环境时自动跳过）
 ```
 
 `pnpm verify` 依次执行（顺序与 `package.json` 里的 `verify` 脚本一致）：
@@ -190,17 +190,19 @@ pnpm verify      # 二十四段全链（含 8 段 GUI；PG / SSL / SSH 无环境
 | 11 | `test:cancel` | 取消能力 **15/15**：PG 真取消（516ms 中断 10s 慢查询）/ SQLite 如实不支持 |
 | 12 | `test:postgres-ssl` | SSL **23/23**：6 种 sslmode 的加密/校验语义 + 错误 CA 真被拒 + SSL 连接上取消真生效 |
 | 13 | `test:ssh-tunnel` | SSH **21/21**（真实 sshd + PG）：结构化分段诊断 / 首次指纹确认 / 指纹变化 / 未授权私钥 / 隧道 SQL / 取消 |
-| 14 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
-| 15 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
-| 16 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
-| 17 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
-| 18 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
-| 19 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
-| 20 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
-| 21 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
-| 22 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
-| 23 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
-| 24 | `test:gui-ssh-form` | SSH 表单 **20/20**：三个独立密码框 / 指纹确认后自动重试 / 连接失败不假报成功 / 编辑时能清空 `sshHost` |
+| 14 | `test:sql-library` | SQL 历史与收藏 **20/20**：成功/失败记录、500 条配额不淘汰收藏、坏文件隔离、重启保留 |
+| 15 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
+| 16 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
+| 17 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
+| 18 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
+| 19 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
+| 20 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
+| 21 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
+| 22 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
+| 23 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
+| 24 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
+| 25 | `test:gui-ssh-form` | SSH 表单 **20/20**：三个独立密码框 / 指纹确认后自动重试 / 连接失败不假报成功 / 编辑时能清空 `sshHost` |
+| 26 | `test:gui-sql-library` | SQL 历史与收藏 GUI **15/15**：成功/失败历史、载入不执行、收藏重命名、清空历史不误删、重启保留 |
 
 单独跑：
 
@@ -376,6 +378,7 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | 连接管理 | 配置落盘、密码经 OS 钥匙串加密；**连接颜色标记**（7 色，红=生产/绿=本地）；**连接分组**（真父节点，可重命名/删除，删组不删连接） |
 | 元数据浏览 | 虚拟化懒加载树；搜索过滤（明确标注「仅搜索已展开节点」）；右键刷新/复制/连接断开/查看 ER 图 |
 | **SQL 编辑器** | 语法高亮（textarea+pre 叠加，零依赖）、**自动补全**（关键字+表名列名）、**格式化**（Shift+Alt+F）、**多语句执行**（Ctrl+Enter 当前 / Ctrl+Shift+Enter 全部）、**执行计划**（EXPLAIN QUERY PLAN） |
+| **SQL 历史与收藏** | 成功/失败执行自动入历史（最近 500 条），支持搜索、载入或重跑；收藏独立持久化、可命名/重命名/删除，清空历史不会误删收藏 |
 | 结果集 | 游标分页 + 虚拟滚动；点列头排序（重新查询）；列宽拖拽/双击自适应；**排序与列宽持久化**（按表记忆） |
 | **多结果标签页** | 每标签独立网格（各自游标/排序/列宽/脏数据），关闭即释放游标 |
 | 数据编辑 | UPDATE / INSERT / DELETE（参数化、按主键定位、显式事务、删除二次确认） |
@@ -395,7 +398,6 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | 只有 2 个方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录） |
 | 无传输/导入导出向导 | DBeaver 的 data transfer 是独立子系统，支持跨库搬数据 |
 | 无数据库比较/同步 | 表结构与数据的 diff |
-| 无执行历史持久化 | 查过的 SQL 关掉就没了 |
 | ER 图无外键关系线 | 元数据契约缺外键字段，需先扩展 `TableDescription` |
 | SQLite 查询不可取消 | 同步 API 的硬限制 |
 
