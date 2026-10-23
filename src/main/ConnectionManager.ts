@@ -16,8 +16,8 @@
  */
 
 import type { ConnectionConfig } from '../core/dialect'
-import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
-import { isEmptySecret, mergeSecrets, quoteIdentifierWith } from '../core/driver'
+import type { DialectInfo, SecretInput, SecretMap, TestConnectionResult } from '../core/driver'
+import { isEmptySecret, mergeSecrets, normalizeSecret, quoteIdentifierWith } from '../core/driver'
 import { NodeId, type ConnectionSummary } from '../core/api'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type {
@@ -171,6 +171,11 @@ export class ConnectionManager {
    * 读会话的地方都要先判空，且很容易在"断开时忘了保留配置"上出错。
    */
   readonly #saved = new Map<string, SavedConnection>()
+  readonly #connecting = new Map<string, { host: DriverHostHandle; promise: Promise<ConnectionSummary> }>()
+  readonly #closing = new Map<string, Promise<void>>()
+  readonly #sessionTokens = new Map<string, object>()
+  readonly #sessionSecrets = new Map<string, SecretMap>()
+  #disposed = false
   readonly #store: ConnectionStore
   readonly #dialects: readonly DialectInfo[]
   #seq = 0
@@ -329,6 +334,7 @@ export class ConnectionManager {
    * 那"先存后连"就没意义了。
    */
   async add(config: ConnectionConfig, secret?: SecretInput): Promise<ConnectionSummary> {
+    if (this.#disposed) throw new Error('连接管理器已关闭')
     const info = this.#dialects.find((d) => d.id === config.dialectId)
     if (!info) {
       throw new Error(
@@ -348,6 +354,8 @@ export class ConnectionManager {
       this.#store.setSecret(id, secret)
     } catch (err) {
       secretError = err
+      const temporary = normalizeSecret(secret)
+      if (!isEmptySecret(temporary)) this.#sessionSecrets.set(id, temporary)
     }
     this.#saved.set(id, { id, config, info })
     this.#log(
@@ -378,73 +386,111 @@ export class ConnectionManager {
    * 按钮是很常见的操作。
    */
   async connectConnection(connectionId: string): Promise<ConnectionSummary> {
+    if (this.#disposed) throw new Error('连接管理器已关闭')
     const saved = this.#saved.get(connectionId)
     if (!saved) throw new Error(`连接不存在: ${connectionId}`)
-
-    const existing = this.#connections.get(connectionId)
-    if (existing) {
-      // 已连接：幂等返回，不重复建宿主。
-      return this.#toSummary(saved, existing)
+    const token = this.#sessionTokens.get(connectionId)
+    const closing = this.#closing.get(connectionId)
+    if (closing) {
+      await closing
+      if (this.#disposed || this.#saved.get(connectionId) !== saved ||
+          this.#sessionTokens.get(connectionId) !== token) {
+        return this.#toSummary(saved, undefined)
+      }
     }
     return this.#establishSession(connectionId)
   }
 
-  /**
-   * 关闭会话但**保留配置**。
-   *
-   * 与 `remove` 的区别是只关宿主、不动磁盘。用户点"断开"后
-   * 连接仍留在列表里，下次可以再连——这正是持久化的价值。
-   */
+  /** 关闭会话但保留配置；同步失效旧会话，再等待回滚和子进程退出。 */
   async disconnectConnection(connectionId: string): Promise<ConnectionSummary> {
     const saved = this.#saved.get(connectionId)
     if (!saved) throw new Error(`连接不存在: ${connectionId}`)
-
-    const live = this.#connections.get(connectionId)
-    if (live) {
-      // 断开前先回滚未提交事务：用户的意图是"结束这个会话"，
-      // 静默保留未提交改动会让数据进入一个悬空状态。
-      await this.#rollbackQuietly(live)
-      this.#connections.delete(connectionId)
-      this.#openCursors.delete(connectionId)
-      await live.host.close()
-    }
-    return this.#toSummary(saved, undefined)
+    await this.#stopSession(connectionId)
+    return this.#toSummary(this.#saved.get(connectionId) ?? saved, undefined)
   }
 
-  /**
-   * 真正 spawn 宿主并连接。`add` 与 `connectConnection` 共用。
-   *
-   * 失败时**不抛**，而是返回 `connected:false`：配置还在，用户能重试。
-   * 但必须回收子进程，否则每次失败都漏一个。
-   */
-  async #establishSession(connectionId: string): Promise<ConnectionSummary> {
+  #establishSession(connectionId: string): Promise<ConnectionSummary> {
     const saved = this.#saved.get(connectionId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) return Promise.reject(new Error(`连接不存在: ${connectionId}`))
+    const live = this.#connections.get(connectionId)
+    if (live) return Promise.resolve(this.#toSummary(saved, live))
+    const pending = this.#connecting.get(connectionId)
+    if (pending) return pending.promise
 
-    const secret = this.#store.getSecret(connectionId)
+    const token = {}
+    this.#sessionTokens.set(connectionId, token)
     const host = new DriverHostHandle({
       dialectId: saved.config.dialectId,
-      onLog: (level, msg) => this.#log(level, msg)
+      onLog: (level, msg) => this.#log(level, msg),
+      onExit: () => {
+        // 旧宿主的退出事件不能清掉已经重连的新会话。
+        if (this.#connections.get(connectionId)?.host === host) {
+          this.#connections.delete(connectionId)
+          this.#openCursors.delete(connectionId)
+          this.#sessionSecrets.delete(connectionId)
+        } else if (this.#connecting.get(connectionId)?.host === host) {
+          this.#sessionSecrets.delete(connectionId)
+        }
+      }
     })
+    const promise = this.#connectHost(saved, host, token).finally(() => {
+      if (this.#connecting.get(connectionId)?.host === host) {
+        this.#connecting.delete(connectionId)
+      }
+    })
+    this.#connecting.set(connectionId, { host, promise })
+    return promise
+  }
 
+  async #connectHost(
+    saved: SavedConnection,
+    host: DriverHostHandle,
+    token: object
+  ): Promise<ConnectionSummary> {
+    const secret = this.#sessionSecrets.get(saved.id) ?? this.#store.getSecret(saved.id)
     try {
       await host.handshake
       const capabilities = await host.connect(saved.config, secret)
-      const live: LiveConnection = {
-        id: saved.id,
-        config: saved.config,
-        capabilities,
-        host,
-        info: saved.info
+      if (host.closed || this.#disposed || this.#saved.get(saved.id) !== saved ||
+          this.#sessionTokens.get(saved.id) !== token) {
+        host.kill()
+        await host.close()
+        return this.#toSummary(saved, undefined)
       }
-      this.#connections.set(connectionId, live)
+      const live: LiveConnection = { ...saved, capabilities, host }
+      this.#connections.set(saved.id, live)
       return this.#toSummary(saved, live)
     } catch (err) {
-      // 失败：回收进程、不加进 #connections，但**配置保留**。
       host.kill()
-      this.#log('warn', `[manager] 连接 ${connectionId}（${saved.config.name}）失败: ${describeThrown(err)}`)
+      await host.close()
+      this.#log('warn', `[manager] 连接 ${saved.id}（${saved.config.name}）失败: ${describeThrown(err)}`)
       return this.#toSummary(saved, undefined)
     }
+  }
+
+  #stopSession(connectionId: string): Promise<void> {
+    this.#sessionTokens.set(connectionId, {})
+    this.#sessionSecrets.delete(connectionId)
+    this.#openCursors.delete(connectionId)
+    const pending = this.#connecting.get(connectionId)
+    this.#connecting.delete(connectionId)
+    const live = this.#connections.get(connectionId)
+    this.#connections.delete(connectionId)
+    pending?.host.kill()
+    const existing = this.#closing.get(connectionId)
+    if (existing) return existing
+
+    const closing = (async () => {
+      if (pending) await pending.host.close()
+      if (live) {
+        await this.#rollbackQuietly(live)
+        await live.host.close()
+      }
+    })().finally(() => {
+      if (this.#closing.get(connectionId) === closing) this.#closing.delete(connectionId)
+    })
+    this.#closing.set(connectionId, closing)
+    return closing
   }
 
   #toSummary(saved: SavedConnection, live: LiveConnection | undefined): ConnectionSummary {
@@ -462,51 +508,12 @@ export class ConnectionManager {
   }
 
   async remove(connectionId: string): Promise<void> {
-    const conn = this.#connections.get(connectionId)
-    const saved = this.#saved.get(connectionId)
-
-    // 既没有会话也没有配置 → 已经不存在，幂等返回。
-    // 只有配置没有会话（断开状态）时仍需删除配置，所以不能只看 conn。
-    if (!conn && !saved) return
-
-    if (conn) {
-      // ===== 先回滚，再关宿主 =====
-      //
-      // 顺序不能反。若先 close：宿主进程退出时连接被断开，SQLite 也会回滚，
-      // 但那属于「依赖底层实现的隐式行为」——换成别的数据库、或某个驱动在
-      // 关闭时先刷盘，就可能留下半提交状态。显式回滚让这件事有确定的语义：
-      // **移除连接 = 放弃该连接上所有未提交改动**。
-      //
-      // 三个防御，缺一个都会让 remove 变成一个可能抛错的操作：
-      //   1. try/catch：回滚失败不该阻止回收进程（否则连接删不掉、进程还漏着）
-      //   2. 超时竞速：宿主若正卡在慢写入上，回滚 RPC 会排 60s，
-      //      不能让「关一个连接」把界面卡住；超时就放弃回滚直接关
-      //      （关进程本身仍会回滚，只是不再是显式保证）
-      //   3. 放在 `#connections.delete` **之前**：回滚要通过 host 句柄做，
-      //      与是否还在 map 里无关，但先删会让人误以为顺序无所谓
-      await this.#rollbackQuietly(conn)
-
-      this.#connections.delete(connectionId)
-
-      // ---- 清理该连接的游标账本 ----
-      // 宿主进程马上会被 close() 掉，它内部的游标也随之消失；
-      // 但主进程这张账本必须同步清空，否则每删一个用过查询的连接就漏一堆 id，
-      // 长时间运行的应用会在这张表上慢慢涨上去（典型的映射表泄漏）。
-      //
-      // 刻意**不**在删除前逐个 closeCursor：宿主已经要被关了，
-      // 再发 N 条 RPC 只会拖慢关闭、并制造「关到一半进程没了」的竞态。
-      // 直接丢弃账本是正确且更简单的做法——这点与「资源必须显式释放」不冲突，
-      // 因为释放的实际执行者是宿主进程的退出。
-      this.#openCursors.delete(connectionId)
-
-      await conn.host.close()
-    }
-
-    // ---- 删磁盘状态：配置 + 凭据 ----
-    // 放在关主机之后：这样"关会话失败"（极端情况）时至少配置还在，
-    // 用户还能再试一次删除；反过来先删配置再关，会留下一个删不掉的活动会话。
+    const closing = this.#stopSession(connectionId)
+    // 先撤销可连接的配置，避免清理期间被另一个 connect 重新拉起。
     this.#saved.delete(connectionId)
+    this.#sessionTokens.delete(connectionId)
     this.#store.deleteConnection(connectionId)
+    await closing
     this.#log('info', `[manager] 已删除连接 ${connectionId}（配置与凭据已清除）`)
   }
 
@@ -522,8 +529,15 @@ export class ConnectionManager {
       // 没有事务时某些驱动会报错，这属于正常情况，不该污染日志以外的地方。
       this.#log('warn', `[${conn.id}] 移除连接前回滚事务失败（忽略）: ${describeThrown(err)}`)
     })
-    const timeout = new Promise<void>((res) => setTimeout(res, ROLLBACK_CLEANUP_TIMEOUT_MS))
-    await Promise.race([rollback, timeout])
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<void>((res) => {
+      timer = setTimeout(res, ROLLBACK_CLEANUP_TIMEOUT_MS)
+    })
+    try {
+      await Promise.race([rollback, timeout])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /**
@@ -620,11 +634,11 @@ export class ConnectionManager {
 
   /** 应用退出时统一回收所有宿主进程。 */
   async disposeAll(): Promise<void> {
-    const all = [...this.#connections.values()]
-    this.#connections.clear()
-    // 与 remove 同理：账本不能留，否则「退出过一次」就成了泄漏的隐藏来源。
-    this.#openCursors.clear()
-    await Promise.all(all.map((c) => c.host.close().catch(() => undefined)))
+    this.#disposed = true
+    await Promise.all([...this.#saved.keys()].map((id) => this.#stopSession(id)))
+    await Promise.all(this.#closing.values())
+    this.#sessionTokens.clear()
+    this.#sessionSecrets.clear()
   }
 
   // ---- 结果集（第二阶段） ----
@@ -639,6 +653,9 @@ export class ConnectionManager {
   async runQuery(nodeId: string, sql: string, options?: QueryOptions): Promise<QueryResult> {
     const { conn } = this.#resolveConnection(nodeId)
     const result = await conn.host.query(sql, options)
+    if (this.#connections.get(conn.id) !== conn) {
+      throw new Error(`查询所属的会话已断开: ${conn.id}`)
+    }
 
     // 把 adapter 的原生游标 id 包上连接归属后再交给 UI（理由见 CursorId 注释）。
     // 同时登记进账本，让「这个连接还有游标没关」在主进程侧可见。
