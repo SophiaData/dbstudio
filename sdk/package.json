@@ -31,7 +31,10 @@
     "test": "node test/sdk.e2e.mjs",
     "prepublishOnly": "npm run build && npm run test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "pg": "^8.23.1",
+    "ssh2": "^1.17.0"
+  },
   "exports": {
     ".": {
       "types": "./dist/sdk/src/index.d.ts",

@@ -1,7 +1,7 @@
 # @sophiadata/dbstudio-sdk
 
 数据库驱动层 SDK：**进程隔离的驱动宿主 + 方言抽象 + 游标分页**。
-零 Electron 依赖，零运行时依赖（只用 Node 内置模块），可在任何 Node 项目里复用。
+零 Electron 依赖；驱动宿主运行时依赖 `pg` 和 `ssh2`，可在任何满足 Node 版本要求的项目里复用。
 
 > 这是 [dbstudio](https://github.com/SophiaData/dbstudio) 的驱动层。
 > 桌面应用用它，但你不必用桌面应用才能用它。
@@ -21,7 +21,11 @@
 npm install @sophiadata/dbstudio-sdk
 ```
 
-**要求 Node ≥ 22.5**（依赖内置的 `node:sqlite`，无需 flag）。
+**要求 Node ≥ 22.5**（依赖内置的 `node:sqlite`，无需 flag）。较老运行时如果不支持按列
+返回，重复列名查询会明确报错，避免静默丢列。
+
+安装包会带上 SQLite、PostgreSQL 和 SSH 隧道所需的宿主依赖。包外交付验证会把
+tarball 安装到独立目录，再用包名导入、启动宿主和编译 TypeScript 声明。
 
 ## 快速开始
 
@@ -123,10 +127,40 @@ Node 没有 ClassLoader。多个驱动版本共存唯一可靠的办法是进程
 
 ## 局限（如实说明）
 
-- 目前只有 **SQLite** 一种驱动（`node:sqlite`，零原生依赖）
-- 编辑只支持 **UPDATE**，不含 INSERT / DELETE
+- 当前宿主注册 SQLite 与 PostgreSQL 两种驱动
+- **公开 API 只覆盖 UPDATE**（`applyEdits`）。桌面端的 INSERT / DELETE / DDL
+  （`insertRow` / `deleteRows` / `createTable` 等）走的是另一条 IPC 链路，
+  **没有**暴露在这个包里——别把桌面端的功能清单当成 SDK 的能力清单
 - 只读性靠关键词扫描护栏，**不是安全边界**——生产环境请用只读连接或数据库权限
 - 大字段（截断的 TEXT / BLOB）不在编辑支持范围
+- SSH 隧道需要本机 sshd 可用；SSL 语义按 libpq 的 `sslmode` 对齐
+
+## 三层能力的区别
+
+这个仓库里同时存在三层东西，别混用：
+
+| 层 | 位置 | 面向谁 | 稳定性 |
+|---|---|---|---|
+| **桌面应用** | `src/` | 最终用户 | 功能以 README「功能清单」为准 |
+| **公开 SDK** | `sdk/`（本包） | 你的 Node 项目 | 只暴露上面「API 概览」表里的方法 |
+| **内部协议** | NDJSON over stdio | 桌面应用 ↔ 驱动宿主 | **不是公开契约**，会随版本变化 |
+
+本包只承诺第二层。第一层会继续加功能；第三层随时可能改，
+请不要绕过 `DriverHost` 直接和宿主进程说话。
+
+## 已验收范围
+
+- **SQLite**：元数据浏览、查询与分页、参数化 UPDATE、显式事务与回滚。
+  包外交付已验证（`npm pack` → 空目录安装 → 按包名导入 → 起宿主 → 查询）。
+- **PostgreSQL**：驱动与隧道链路在 CI 中用真实 PG 17 与真实 sshd 验证；
+  但本机若未配置 `DBSTUDIO_PG_URL` 等环境变量，相关测试会**跳过**而不是假装通过。
+
+换句话说：**本地全绿不等于 PostgreSQL 被验证过**——它需要真实服务端。
+
+## Node 版本
+
+要求 Node ≥ 22.5（依赖内置 `node:sqlite`，无需 flag）。较老运行时如果不支持
+按列返回，重复列名查询会**明确报错**，而不是静默丢列。
 
 ## License
 
