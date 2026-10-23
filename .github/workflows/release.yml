@@ -53,6 +53,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 版本门禁：tag 必须与 package.json 一致
+        # ===== 为什么必须有这道门 =====
+        #
+        # 版本号只有一个真相来源：package.json。tag 只是它的镜像。
+        # 早先 tag 与 package.json 由两个人手工维护，漂移时**没有任何报错**——
+        # 用户拿到的是「v0.4.0」的 tag，装的却是别的东西。
+        #
+        # 这里在打包**之前**拦住：版本对不上就不产出任何安装包，
+        # 而不是产出一堆装不上的东西再让人去猜。
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          NORMALIZED="${TAG#v}"
+          echo "tag = $TAG，package.json version = $VERSION"
+          if [ "$NORMALIZED" != "$VERSION" ]; then
+            echo "::error::tag ($TAG) 与 package.json version ($VERSION) 不一致，拒绝打包"
+            exit 1
+          fi
+
       - uses: pnpm/action-setup@v4
         with:
           version: 11

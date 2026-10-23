@@ -67,31 +67,30 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: 类型检查 + 构建 + 全部 e2e（不含 GUI）
-        # 注意这里刻意**逐段列出**而不是直接 `pnpm verify`：
-        # `verify` 末尾包含 test:gui，而 GUI 需要显示环境。
-        # 在无头 CI 上直接跑 verify 会挂在 GUI 那一步（错误信息还很难懂）。
-        # 所以这里跑除 GUI 以外的全部，GUI 放到下一步用 xvfb 单独跑。
-        run: |
-          pnpm run typecheck
-          pnpm run build
-          pnpm run fixture
-          pnpm run test
-          pnpm run test:resultset
-          pnpm run test:edit
-          pnpm run test:persist
-          pnpm run test:mutations
-          pnpm run test:ddl
-          pnpm run test:electron
+        # 跑 `node` 分组——它就是清单里的纯 Node 步骤。
+        #
+        # ===== 为什么不直接 `pnpm verify` =====
+        #
+        # GUI 需要显示环境，在无头 runner 上会挂住且报错难懂；
+        # `external` 分组需要先起 PG/sshd（见后面的步骤）。
+        # 所以这里按分组跑，但**清单本身是同一份**
+        # （scripts/verify-manifest.mjs），不是在这里手抄一遍。
+        #
+        # 早先这里是手抄的步骤列表，加测试只改一边就会静默漏跑——
+        # 而且不报错，只是悄悄少验证了一件事。
+        run: pnpm run verify:node
 
       - name: PostgreSQL 驱动端到端（真实 PG 17 服务容器）
         # 与上面的 SQLite e2e 分开列，失败时能一眼看出是 PG 的问题。
         # 这里显式设 DBSTUDIO_PG_URL，测试因此**不会**走跳过分支。
         env:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        # 走清单里的同一组脚本，而不是直接调 node tests/xxx——
+        # 这样「清单声明了什么」和「实际跑了什么」永远一致。
         run: |
           node scripts/build-driver-host.mjs
           node scripts/make-fixture-pg.mjs
-          node tests/e2e-postgres.mjs
+          pnpm run verify:node --only test:postgres
 
       - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
         env:
@@ -223,27 +222,15 @@ jobs:
         run: |
           pnpm run build:sdk
           pnpm run test:sdk
+          pnpm run test:sdk-package
 
-      - name: 后台 GUI 模式（macOS 隐藏 / Linux Xvfb 可见）
-        # macOS 用户本地跑 GUI 回归时，隐藏窗口可以避免反复弹窗和抢焦点。
-        # Linux CI 已在 Xvfb 中运行，窗口保持可见才能让 Playwright 截图正常
-        # 完成；这条测试会明确锁定两个平台的策略，防止回退。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-hidden
-
-      - name: 布局持久化 GUI 测试（xvfb 提供虚拟显示）
-        # 纯 Node 测不了这条：真正的功能是「拖宽列 → 关标签 → 重开表 → 列宽还在」，
-        # 链路里有 localStorage、网格实例重建、openTable 执行顺序。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-layout
-
-      - name: GUI 自检（xvfb 提供虚拟显示）
+      - name: 全部 GUI 测试（xvfb 提供虚拟显示）
+        # ===== 为什么合成一步 =====
+        #
+        # 早先这里是 11 个手抄的 GUI 步骤。加一个 GUI 测试只改一边就会静默漏跑，
+        # 而且不报错——只是悄悄少验证了一件事。现在改成跑清单里的 `gui` 分组，
+        # 清单本身与本地 `pnpm verify` 用的是同一份（scripts/verify-manifest.mjs）。
+        #
         # --no-sandbox 的来历（Linux CI 常见坑）：
         # Electron 的 chrome-sandbox 需要 root 所有且权限为 4755 才能启用 SUID 沙箱。
         # GitHub Actions 的 runner 上安装出来的 chrome-sandbox 不满足这两个条件，
@@ -253,61 +240,11 @@ jobs:
         # 这里关掉沙箱是**测试环境的合理妥协**：我们只在 CI 里跑一次自检，
         # 加载的是自己刚构建的本地页面，不访问外部不受信内容。
         # 生产运行不经过这个脚本，不受影响。
+        #
+        # Linux 已在 Xvfb 中运行，窗口保持可见才能让 Playwright 截图正常完成；
+        # macOS 侧的隐藏窗口策略由 test:gui-hidden 自己断言锁定，防止回退。
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: |
           sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui
-
-      - name: GUI 真实交互测试（Playwright 驱动 Electron）
-        # 上一步只验证「界面起来了」；这一步像真人一样点击操作：
-        # 新建连接 → 展开树 → 点表看数据 → 双击改单元格 → 应用 → 提交 → 验证落库。
-        # 用 playwright-core（不下载浏览器），仅用它的 Electron 支持。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-flow
-
-      - name: 新功能 GUI 交互测试
-        # 覆盖本轮补齐的能力：树搜索 / 排序 / 列宽 / 统计行数 / CSV /
-        # 新增行 / 删除行 / 右键菜单。与上一步分开，失败时能一眼定位。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-features
-
-      - name: 第三轮功能 GUI 测试（标签页/DDL/编辑连接）
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-round3
-
-      - name: SQL 编辑器 GUI 测试（高亮/多语句/执行计划/格式化）
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-sql
-
-      - name: SSL 表单 GUI 测试（select 控件 / 默认值 / 提交值）
-        # 这条测的是渲染层的新控件类型（`kind: 'select'`）。
-        # 纯 Node 测不出来：若它退化回文本框，collect() 照样能读到值、
-        # 类型检查也照样过，但用户看到的是个空框。默认值那条更关键——
-        # 落成首项 `disable` 会让"没填"变成"明文连接"，属于静默降级。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-ssl-form
-
-      - name: SSH 表单 GUI 测试（多密码框 / 配置不泄漏 / 编辑回填）
-        # 纯 Node 测不出“三个密码框写进同一个变量”：类型检查会通过，
-        # 表单看起来也正常，只在真实测试连接时表现为“总有一个认证失败”。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm test:gui-ssh-form
+          xvfb-run --auto-servernum pnpm run verify:gui
