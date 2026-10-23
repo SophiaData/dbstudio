@@ -224,6 +224,16 @@ jobs:
           pnpm run build:sdk
           pnpm run test:sdk
 
+      - name: 后台 GUI 模式（macOS 隐藏 / Linux Xvfb 可见）
+        # macOS 用户本地跑 GUI 回归时，隐藏窗口可以避免反复弹窗和抢焦点。
+        # Linux CI 已在 Xvfb 中运行，窗口保持可见才能让 Playwright 截图正常
+        # 完成；这条测试会明确锁定两个平台的策略，防止回退。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-hidden
+
       - name: 布局持久化 GUI 测试（xvfb 提供虚拟显示）
         # 纯 Node 测不了这条：真正的功能是「拖宽列 → 关标签 → 重开表 → 列宽还在」，
         # 链路里有 localStorage、网格实例重建、openTable 执行顺序。

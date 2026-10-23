@@ -6,6 +6,7 @@
  *   - 显式测试变量才隐藏（两轮对照，防止生产启动被误隐藏）
  *   - 隐藏时窗口仍能加载、接受点击、截图
  *   - macOS 上 Dock 确实不可见
+ *   - Linux 上不启用隐藏（Xvfb 已避免打扰真实桌面，隐藏会卡住截图）
  */
 
 import { createRequire } from 'node:module'
@@ -74,9 +75,15 @@ console.log('\n[2] 隐藏模式不打扰桌面，但功能仍可用')
 {
   const { app, win, state } = await launch(true)
   check('2a. 仍只有一个真实窗口', state.windowCount === 1, JSON.stringify(state))
-  check('2b. ★ BrowserWindow 不可见', state.visible === false, JSON.stringify(state))
   if (process.platform === 'darwin') {
+    check('2b. ★ macOS BrowserWindow 不可见', state.visible === false, JSON.stringify(state))
     check('2c. ★ macOS Dock 图标已隐藏', state.dockVisible === false, JSON.stringify(state))
+  } else {
+    check(
+      '2b. ★ 非 macOS 保持可见（Xvfb 已提供隔离桌面）',
+      state.visible === true,
+      JSON.stringify(state)
+    )
   }
 
   const title = await win.title()

@@ -217,9 +217,11 @@ pnpm test:gui:headless  # GUI 冒烟（隐藏窗口与 Dock）
 pnpm verify:headless    # 完整验证；GUI 段全程隐藏窗口
 ```
 
-`DBSTUDIO_TEST_HIDDEN=1` 会让测试用 Electron 窗口 `show: false`；macOS 上还会
-切成 accessory 激活策略并隐藏 Dock。Playwright 仍操作真实 DOM、preload、IPC
-并生成截图，只是不把窗口带到桌面。单独跑任意 `test:gui-*` 时也可显式设置该变量。
+`DBSTUDIO_TEST_HIDDEN=1` 在 macOS 上会让测试用 Electron 窗口 `show: false`，
+同时切成 accessory 激活策略并隐藏 Dock。Playwright 仍操作真实 DOM、preload、
+IPC 并生成截图，只是不把窗口带到桌面。Linux 已经在 Xvfb 虚拟桌面中运行，
+因此保持窗口可见，避免 Chromium 隐藏窗口时截图等待合成结果超时。单独跑任意
+`test:gui-*` 时也可显式设置该变量。
 
 ---
 

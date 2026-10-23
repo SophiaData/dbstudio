@@ -31,11 +31,14 @@ let sqlLibrary: SqlLibraryStore | null = null
 /**
  * GUI 自动化测试是否以“完全后台”方式运行。
  *
- * `show: false` 让 Playwright 仍能操作真实 DOM、preload 与 IPC，但窗口不会
- * 出现在桌面；macOS 还必须切换 activation policy，否则应用仍会短暂抢占
- * Dock 和焦点。只认显式测试变量，正常启动不受影响。
+ * macOS 上 `show: false` 让 Playwright 仍能操作真实 DOM、preload 与 IPC，
+ * 但窗口不会出现在桌面；还必须切换 activation policy，否则应用仍会短暂
+ * 抢占 Dock 和焦点。Linux CI 已经有 Xvfb，不需要隐藏；而隐藏窗口在 Xvfb
+ * 下会让 Chromium 的截图等待合成结果超时，所以这里只在 macOS 生效。
+ * 只认显式测试变量，正常启动不受影响。
  */
-const hiddenTestMode = process.env['DBSTUDIO_TEST_HIDDEN'] === '1'
+const hiddenTestMode =
+  process.env['DBSTUDIO_TEST_HIDDEN'] === '1' && process.platform === 'darwin'
 
 /**
  * 生产环境的凭据加解密器：Electron `safeStorage`。
