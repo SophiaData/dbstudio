@@ -41,6 +41,8 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConnectionConfig } from '../core/dialect'
+import type { SecretInput, SecretMap } from '../core/driver'
+import { isEmptySecret, normalizeSecret, SECRET_KEYS } from '../core/driver'
 
 /** 当前配置文件格式版本。结构有不兼容变化时递增，并在 load 里做迁移。 */
 export const CONNECTIONS_SCHEMA_VERSION = 1
@@ -89,8 +91,24 @@ interface ConnectionsFile {
   readonly connections: readonly StoredConnection[]
 }
 
-/** 解密出来的凭据；没有存过密码时为 undefined。 */
-export type StoredSecret = string | undefined
+/** 解密出来的具名凭据；没有存过任何凭据时为 undefined。 */
+export type StoredSecret = SecretMap | undefined
+
+/**
+ * 新密文的明文载荷前缀。
+ *
+ * 为什么不能直接把 JSON 放进 cipher：`secrets.json` 里的 value 是密文，
+ * 而**上一版已经存过纯字符串密码的密文**。升级后那些密文解密出来就是
+ * `"hunter2"`，若直接 `JSON.parse` 会失败，老连接就全部读不到密码。
+ *
+ * 前缀让两种历史形态可以被无歧义地区分：
+ *   - `dbstudio-secret-v1:{...}` → 具名 SecretMap
+ *   - 其它任意字符串             → 旧版单密码，按 `{ dbPassword }` 解释
+ *
+ * 不用“尝试 JSON.parse，失败就当归一字符串”的原因：合法密码完全可以是
+ * 一段 JSON 文本（例如某些自动化系统生成的 token），那样会被误判。
+ */
+const SECRET_PAYLOAD_PREFIX = 'dbstudio-secret-v1:'
 
 export interface ConnectionStoreOptions {
   /** 落盘目录。生产传 `app.getPath('userData')`，测试传临时目录。 */
@@ -154,10 +172,10 @@ export class ConnectionStore {
   }
 
   /**
-   * 读取某连接的明文密码。
+   * 读取某连接的具名凭据。
    *
    * 三个失败都被**降级为 undefined**而不是抛错：
-   *   - 没存过密码
+   *   - 没存过凭据
    *   - cipher 不可用
    *   - 密文被篡改/解密失败
    *
@@ -174,7 +192,8 @@ export class ConnectionStore {
     }
     try {
       const payload = Buffer.from(encoded, 'base64')
-      return this.#cipher.decrypt(payload)
+      const plain = this.#cipher.decrypt(payload)
+      return decodeSecretPayload(plain)
     } catch (err) {
       this.#onLog(
         'warn',
@@ -233,9 +252,14 @@ export class ConnectionStore {
   }
 
   /**
-   * 保存密码（加密后）。
+   * 保存具名凭据（加密后）。
    *
-   * `plain` 为空/undefined 表示"清除该连接的密码"。
+   * `input` 为字符串时按数据库口令处理（兼容旧调用方）；
+   * 为对象时支持多个独立机密（数据库 / SSH 登录 / SSH 私钥口令）。
+   *
+   * 空字符串、空对象、undefined 都表示"清除该连接的全部凭据"。
+   * 注意这里**不做跨 key 合并**——合并是 ConnectionManager 的职责，
+   * 因为只有它知道这次更新是“用户只改了 SSH 口令”还是“要重置整个凭据”。
    *
    * ===== cipher 不可用时抛错而不是静默跳过 =====
    *
@@ -243,8 +267,9 @@ export class ConnectionStore {
    * 且更糟的是，如果这里改成"存明文"，就彻底违背了本模块的初衷。
    * 抛 `SecretStorageUnavailableError` 让上层能给出准确提示。
    */
-  setSecret(id: string, plain: string | undefined): void {
-    if (plain === undefined || plain === '') {
+  setSecret(id: string, input: SecretInput): void {
+    const secret = normalizeSecret(input)
+    if (isEmptySecret(secret)) {
       this.deleteSecret(id)
       return
     }
@@ -254,7 +279,7 @@ export class ConnectionStore {
           '请在每次连接时手动输入密码。'
       )
     }
-    const payload = this.#cipher.encrypt(plain)
+    const payload = this.#cipher.encrypt(encodeSecretPayload(secret))
     this.#secrets = { ...this.#secrets, [id]: payload.toString('base64') }
     this.#flushSecrets()
   }
@@ -481,6 +506,51 @@ export class ConnectionStore {
 
 function describeThrown(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * 把具名凭据编码成一段可加密的字符串。
+ *
+ * 只序列化白名单键，且丢弃空串：避免 UI 传进来的 `{ sshPassword: '' }`
+ * 被存成一个“看起来有凭据、实际为空”的条目。
+ */
+function encodeSecretPayload(secret: SecretMap): string {
+  const clean: Record<string, string> = {}
+  for (const key of SECRET_KEYS) {
+    const value = secret[key]
+    if (value !== undefined && value !== '') clean[key] = value
+  }
+  return SECRET_PAYLOAD_PREFIX + JSON.stringify(clean)
+}
+
+/**
+ * 解码历史密文。无前缀一律视为旧版单密码。
+ *
+ * 校验必须是严格的：坏 JSON / 非字符串值 / 未知键都按“读不出来”处理，
+ * 不能把任意内容塞进 SecretMap 再带进驱动。未知键尤其危险——它会被
+ * 误以为是自己认识的凭据，最终表现成很难查的认证失败。
+ */
+function decodeSecretPayload(plain: string): StoredSecret {
+  if (!plain.startsWith(SECRET_PAYLOAD_PREFIX)) {
+    return plain === '' ? undefined : { dbPassword: plain }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(plain.slice(SECRET_PAYLOAD_PREFIX.length))
+  } catch {
+    throw new Error('凭据载荷不是合法 JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('凭据载荷不是对象')
+  }
+  const allowed = new Set<string>(SECRET_KEYS)
+  const out: { dbPassword?: string; sshPassword?: string; sshPassphrase?: string } = {}
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!allowed.has(key)) throw new Error(`凭据载荷含未知键 ${key}`)
+    if (typeof value !== 'string') throw new Error(`凭据载荷 ${key} 不是字符串`)
+    if (value !== '') out[key as keyof typeof out] = value
+  }
+  return isEmptySecret(out) ? undefined : out
 }
 
 /** 删除单个临时文件；失败不抛（调用方本来就在错误路径上）。 */

@@ -15,6 +15,7 @@ import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
+import type { SecretInput } from '../core/driver'
 import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
 import type { TableCreateSpec } from '../core/model'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
@@ -357,14 +358,14 @@ function registerIpc(): void {
   const api: Omit<DbStudioApi, never> = {
     listDialects: async () => getManager().listDialects(),
     listConnections: async () => getManager().list(),
-    addConnection: async (config: ConnectionConfig, secret?: string) =>
+    addConnection: async (config: ConnectionConfig, secret?: SecretInput) =>
       getManager().add(config, secret),
     connectConnection: async (connectionId: string) =>
       getManager().connectConnection(connectionId),
     disconnectConnection: async (connectionId: string) =>
       getManager().disconnectConnection(connectionId),
     removeConnection: async (connectionId: string) => getManager().remove(connectionId),
-    testConnection: async (config: ConnectionConfig, secret?: string) =>
+    testConnection: async (config: ConnectionConfig, secret?: SecretInput) =>
       getManager().testConnection(config, secret),
     listChildren: async (nodeId: string | null) => getManager().listChildren(nodeId),
     describeTable: async (tableNodeId: string) => getManager().describeTable(tableNodeId),
@@ -411,7 +412,7 @@ function registerIpc(): void {
     updateConnection: async (
       connectionId: string,
       config: Partial<ConnectionConfig>,
-      secret?: string
+      secret?: SecretInput
     ) => getManager().updateConnection(connectionId, config, secret)
   }
 
@@ -419,7 +420,7 @@ function registerIpc(): void {
   // 万能通道等于把整个能力面重新打开，preload 的白名单就失效了。
   ipcMain.handle(IPC.listDialects, () => api.listDialects())
   ipcMain.handle(IPC.listConnections, () => api.listConnections())
-  ipcMain.handle(IPC.addConnection, (_e, config: ConnectionConfig, secret?: string) =>
+  ipcMain.handle(IPC.addConnection, (_e, config: ConnectionConfig, secret?: SecretInput) =>
     api.addConnection(config, secret)
   )
   // ---- 持久化连接通道（第四阶段新增） ----
@@ -434,7 +435,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.removeConnection, (_e, connectionId: string) =>
     api.removeConnection(connectionId)
   )
-  ipcMain.handle(IPC.testConnection, (_e, config: ConnectionConfig, secret?: string) =>
+  ipcMain.handle(IPC.testConnection, (_e, config: ConnectionConfig, secret?: SecretInput) =>
     api.testConnection(config, secret)
   )
   ipcMain.handle(IPC.listChildren, (_e, nodeId: string | null) => api.listChildren(nodeId))
@@ -498,7 +499,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.cancelQuery, (_e, nodeId: string) => api.cancelQuery(nodeId))
   ipcMain.handle(
     IPC.updateConnection,
-    (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: string) =>
+    (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: SecretInput) =>
       api.updateConnection(connectionId, config, secret)
   )
 }

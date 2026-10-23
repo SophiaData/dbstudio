@@ -40,3 +40,4 @@ out/gui-flow/
 
 # 备份目录（可能含证书/私钥，绝不入库）
 backups/
+tests/.ssh-fixture/

@@ -7,5 +7,12 @@ allowBuilds:
   esbuild: true
   electron: true
   electron-winstaller: true
+  # ssh2 / cpu-features 只提供**可选**的原生加速（加密运算）。
+  # ssh2 的 install.js 会尝试编译 cpu-features；编译失败或不编译时，
+  # ssh2 自动退回纯 JS 实现，功能完全不变（实测可用）。
+  # 显式设为 false 而不是留空：留空会让 `pnpm install` 以
+  # ERR_PNPM_IGNORED_BUILDS 非零退出，CI 会直接挂掉。
+  cpu-features: false
+  ssh2: false
 minimumReleaseAgeExclude:
   - electron@45.0.0

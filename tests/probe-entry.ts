@@ -105,3 +105,11 @@ export function createManagerWithInjected(
 ): ConnectionManager {
   return new ConnectionManager(dialects, store)
 }
+
+/**
+ * 直接暴露机密切换的纯函数，供 GUI/持久化测试验证“按 key 合并”的规则。
+ *
+ * 生产调用链仍是 ConnectionManager.updateConnection；这里不复制实现，
+ * 只是让测试能在不启动数据库宿主的前提下覆盖合并边界。
+ */
+export { mergeSecrets, normalizeSecret, isEmptySecret } from '../src/core/driver'

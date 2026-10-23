@@ -307,7 +307,7 @@ async function main() {
     // 密文必须真的能解回来（否则"没明文"可能只是"什么都没存"）。
     check(
       '8. 密文可解回原文（证明密码确实以密文形式保存了）',
-      store.getSecret('c1') === secret,
+      store.getSecret('c1')?.dbPassword === secret,
       `实际取回: ${store.getSecret('c1')}`
     )
 
@@ -443,7 +443,11 @@ async function main() {
     check('22. 被删连接的凭据消失', reopened.getSecret('c1') === undefined, formatDetail(reopened.getSecret('c1')))
     const secretsObj = JSON.parse(readFileSync(reopened.secretsPath, 'utf8'))
     check('23. secrets.json 里已无 c1 的条目', !('c1' in secretsObj), formatDetail(Object.keys(secretsObj)))
-    check('24. 保留的连接凭据仍可读', reopened.getSecret('c2') === 'keep-me-password', formatDetail(reopened.getSecret('c2')))
+    check(
+      '24. 保留的连接凭据仍可读',
+      reopened.getSecret('c2')?.dbPassword === 'keep-me-password',
+      formatDetail(reopened.getSecret('c2'))
+    )
   }
 
   // ===== 用例 7：凭据被篡改（decrypt 失败不崩） =====
@@ -474,7 +478,11 @@ async function main() {
     }
     check('25. 读取被篡改的凭据不抛错', readError === null, String(readError))
     check('26. 被篡改的凭据返回 undefined（按"未保存密码"处理）', tamperedSecret === undefined, formatDetail(tamperedSecret))
-    check('27. 其它连接的凭据仍能正常读取（坏一个不拖垮全部）', reopened.getSecret('c2') === 'healthy-password', formatDetail(reopened.getSecret('c2')))
+    check(
+      '27. 其它连接的凭据仍能正常读取（坏一个不拖垮全部）',
+      reopened.getSecret('c2')?.dbPassword === 'healthy-password',
+      formatDetail(reopened.getSecret('c2'))
+    )
     check('28. 坏凭据不影响配置清单加载', reopened.listConnections().length === 2, formatDetail(reopened.listConnections().length))
   }
 
@@ -534,11 +542,140 @@ async function main() {
     const store = new ConnectionStore({ baseDir: dir, cipher })
     store.saveConnection('c1', makeConfig('x', '/tmp/x.db'))
     store.setSecret('c1', 'temp-password')
-    check('35. 先存密码可读回', store.getSecret('c1') === 'temp-password', formatDetail(store.getSecret('c1')))
+    check(
+      '35. 先存密码可读回',
+      store.getSecret('c1')?.dbPassword === 'temp-password',
+      formatDetail(store.getSecret('c1'))
+    )
     store.setSecret('c1', undefined)
     check('36. setSecret(undefined) 清除密码', store.getSecret('c1') === undefined, formatDetail(store.getSecret('c1')))
     store.deleteSecret('c1')
     check('37. deleteSecret 幂等（重复删除不抛）', true)
+  }
+
+  // ===== 用例 9b：具名密钥与旧版密文迁移 =====
+  //
+  // SSH 隧道引入了三个独立机密。这里重点钉住两件事：
+  //   1. 多密钥按 key 保存，不会互相覆盖；
+  //   2. 升级前存的单密码密文，仍能被识别为数据库口令。
+  // 第 2 条必须**直接构造旧格式密文**，而不是用新 API 写一遍——
+  // 否则测的是“新格式能读新格式”，完全没覆盖升级路径。
+  {
+    console.log('\n── 用例 9b：★ 具名密钥 / 旧密文兼容 ──')
+    const dir = freshDir('named-secret')
+    const cipher = new FakeCipher()
+    const store = new ConnectionStore({ baseDir: dir, cipher })
+    store.saveConnection('c1', makeConfig('SSH 连接', '/tmp/x.db'))
+
+    store.setSecret('c1', {
+      dbPassword: 'pg-pass',
+      sshPassword: 'ssh-login-pass',
+      sshPassphrase: 'ssh-key-pass'
+    })
+    const named = store.getSecret('c1')
+    check(
+      '37a. ★ 三个具名机密同时保存且互不覆盖',
+      named?.dbPassword === 'pg-pass' &&
+        named?.sshPassword === 'ssh-login-pass' &&
+        named?.sshPassphrase === 'ssh-key-pass',
+      formatDetail(named)
+    )
+    const namedText = readFileSync(store.secretsPath, 'utf8')
+    check(
+      '37b. ★ 三个明文都没有出现在 secrets.json',
+      !namedText.includes('pg-pass') &&
+        !namedText.includes('ssh-login-pass') &&
+        !namedText.includes('ssh-key-pass'),
+      namedText.slice(0, 300)
+    )
+
+    // 手工写一条旧版格式：secrets.json 的 value 是“对原始密码字符串加密”。
+    const oldDir = freshDir('old-secret')
+    const oldCipher = new FakeCipher()
+    const oldStore = new ConnectionStore({ baseDir: oldDir, cipher: oldCipher })
+    oldStore.saveConnection('c1', makeConfig('旧连接', '/tmp/old.db'))
+    writeFileSync(
+      oldStore.secretsPath,
+      JSON.stringify({ c1: oldCipher.encrypt('legacy-password').toString('base64') }),
+      'utf8'
+    )
+    const migrated = new ConnectionStore({ baseDir: oldDir, cipher: oldCipher }).getSecret('c1')
+    check(
+      '37c. ★ 旧版单密码密文按 dbPassword 读出',
+      migrated?.dbPassword === 'legacy-password' && migrated?.sshPassword === undefined,
+      formatDetail(migrated)
+    )
+
+    // 反向断言：如果密码本身恰好是一段 JSON，也不能被误判成新格式。
+    const jsonLike = '{"dbPassword":"should-not-be-parsed"}'
+    const jsonDir = freshDir('json-secret')
+    const jsonCipher = new FakeCipher()
+    const jsonStore = new ConnectionStore({ baseDir: jsonDir, cipher: jsonCipher })
+    jsonStore.saveConnection('c1', makeConfig('JSON 密码', '/tmp/json.db'))
+    writeFileSync(
+      jsonStore.secretsPath,
+      JSON.stringify({ c1: jsonCipher.encrypt(jsonLike).toString('base64') }),
+      'utf8'
+    )
+    check(
+      '37d. ★ 形如 JSON 的旧密码不会被误解析',
+      new ConnectionStore({ baseDir: jsonDir, cipher: jsonCipher }).getSecret('c1')?.dbPassword ===
+        jsonLike,
+      formatDetail(new ConnectionStore({ baseDir: jsonDir, cipher: jsonCipher }).getSecret('c1'))
+    )
+
+    store.setSecret('c1', { sshPassword: 'ssh-only' })
+    check(
+      '37e. setSecret 是整组替换（合并策略属于 Manager，不偷偷保留旧 dbPassword）',
+      store.getSecret('c1')?.dbPassword === undefined &&
+        store.getSecret('c1')?.sshPassword === 'ssh-only',
+      formatDetail(store.getSecret('c1'))
+    )
+  }
+
+  // ===== 用例 9c：按 key 合并（编辑连接不能误删另一类凭据） =====
+  {
+    console.log('\n── 用例 9c：具名密钥合并 ──')
+    const { mergeSecrets } = mod
+    if (typeof mergeSecrets !== 'function') {
+      skip('46 及之后的密钥合并断言', 'probe-entry 未导出 mergeSecrets')
+    } else {
+      const base = {
+        dbPassword: 'pg-pass',
+        sshPassword: 'ssh-pass',
+        sshPassphrase: 'key-pass'
+      }
+      const changed = mergeSecrets(base, { sshPassword: 'new-ssh-pass' })
+      check(
+        '46. ★ 只改 SSH 口令时，数据库口令与私钥口令都保留',
+        changed.dbPassword === 'pg-pass' &&
+          changed.sshPassword === 'new-ssh-pass' &&
+          changed.sshPassphrase === 'key-pass',
+        formatDetail(changed)
+      )
+      const cleared = mergeSecrets(base, { sshPassword: '' })
+      check(
+        '46a. ★ 显式空串只删除对应 key，不误删数据库口令',
+        cleared.dbPassword === 'pg-pass' &&
+          cleared.sshPassword === undefined &&
+          cleared.sshPassphrase === 'key-pass',
+        formatDetail(cleared)
+      )
+      const dbOnly = mergeSecrets(base, 'new-pg-pass')
+      check(
+        '46b. 字符串补丁只替换 dbPassword，SSH 机密保留',
+        dbOnly.dbPassword === 'new-pg-pass' &&
+          dbOnly.sshPassword === 'ssh-pass' &&
+          dbOnly.sshPassphrase === 'key-pass',
+        formatDetail(dbOnly)
+      )
+      const untouched = mergeSecrets(base, undefined)
+      check(
+        '46c. 不传补丁时整组保留（编辑仅改配置的路径）',
+        JSON.stringify(untouched) === JSON.stringify(base),
+        formatDetail(untouched)
+      )
+    }
   }
 
   // ===== 用例 10：多实例并发写不互相踩（temp 名唯一） =====

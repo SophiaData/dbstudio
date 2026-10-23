@@ -47,7 +47,14 @@ export const POSTGRESQL_INFO: DialectInfo = {
     { key: 'port', label: '端口', kind: 'number', required: true, placeholder: '5432', default: 5432 },
     { key: 'database', label: '数据库', kind: 'text', required: true, placeholder: 'postgres' },
     { key: 'user', label: '用户名', kind: 'text', required: true, placeholder: 'postgres' },
-    { key: 'password', label: '密码', kind: 'password', required: false, placeholder: '（可为空）' },
+    {
+      key: 'password',
+      label: '密码',
+      kind: 'password',
+      secretKey: 'dbPassword',
+      required: false,
+      placeholder: '（可为空）'
+    },
     {
       key: 'sslmode',
       label: 'SSL 模式',
@@ -77,6 +84,85 @@ export const POSTGRESQL_INFO: DialectInfo = {
       kind: 'file',
       required: false,
       placeholder: 'verify-ca / verify-full 时需要，如 /path/to/ca.pem'
+    },
+
+    // ---- SSH 隧道（可选）----
+    //
+    // 设计取舍：这些字段**始终显示**，而不是先勾“使用 SSH”再展开。
+    // 原因有两个：
+    //   1. 本项目当前的表单是声明式平铺，没有条件字段机制；临时加一套
+    //      “字段可见性”会同时影响渲染、编辑回填、SDK 元数据消费者。
+    //   2. 是否启用隧道由 `sshHost` 是否为空唯一决定（见 adapter 的
+    //      resolveConnectionInfo）。只填密码不会误启用，语义足够清楚。
+    //
+    // `sshTargetHost/Port` 是**跳板机视角**下的数据库地址。多数人直连和
+    // 隧道目标相同，因此留空就复用上面的 host/port；只有“跳板机在公网、
+    // 数据库在内网”时才需要单独填。
+    {
+      key: 'sshHost',
+      label: 'SSH 主机（留空=不使用隧道）',
+      kind: 'text',
+      required: false,
+      placeholder: '例如 jump.example.com'
+    },
+    {
+      key: 'sshPort',
+      label: 'SSH 端口',
+      kind: 'number',
+      required: false,
+      default: 22
+    },
+    {
+      key: 'sshUser',
+      label: 'SSH 用户名',
+      kind: 'text',
+      required: false,
+      placeholder: '例如 deploy'
+    },
+    {
+      key: 'sshPrivateKey',
+      label: 'SSH 私钥路径（与口令二选一）',
+      kind: 'file',
+      required: false,
+      placeholder: '例如 ~/.ssh/id_ed25519（需填绝对路径）'
+    },
+    {
+      key: 'sshPassword',
+      label: 'SSH 登录口令',
+      kind: 'password',
+      secretKey: 'sshPassword',
+      required: false,
+      placeholder: '使用私钥时可留空'
+    },
+    {
+      key: 'sshPassphrase',
+      label: 'SSH 私钥口令',
+      kind: 'password',
+      secretKey: 'sshPassphrase',
+      required: false,
+      placeholder: '私钥未加密时留空'
+    },
+    {
+      key: 'sshHostKeySha256',
+      label: 'SSH 主机密钥指纹',
+      kind: 'text',
+      required: false,
+      // 首次连接会被拒绝并返回实际指纹（不做 TOFU），用户确认后粘贴到这里。
+      placeholder: '首次连接后按错误提示填入 SHA256:...'
+    },
+    {
+      key: 'sshTargetHost',
+      label: '隧道目标主机（留空=数据库主机）',
+      kind: 'text',
+      required: false,
+      placeholder: '例如 10.0.1.5'
+    },
+    {
+      key: 'sshTargetPort',
+      label: '隧道目标端口（留空=数据库端口）',
+      kind: 'number',
+      required: false,
+      placeholder: '例如 5432'
     }
   ],
   /**

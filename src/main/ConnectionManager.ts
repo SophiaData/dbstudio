@@ -16,8 +16,8 @@
  */
 
 import type { ConnectionConfig } from '../core/dialect'
-import type { DialectInfo, TestConnectionResult } from '../core/driver'
-import { quoteIdentifierWith } from '../core/driver'
+import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
+import { isEmptySecret, mergeSecrets, quoteIdentifierWith } from '../core/driver'
 import { NodeId, type ConnectionSummary } from '../core/api'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type {
@@ -270,8 +270,15 @@ export class ConnectionManager {
     const needsPassword = saved.info.fields.some((f) => f.kind === 'password')
     if (!needsPassword) return null
 
-    // 2. 需要密码：磁盘上确有密文 → true。
-    if (this.#store.hasSecret(saved.id)) return true
+    /*
+     * 2. 需要密码：必须真的能解出**数据库口令**才算存了。
+     *
+     * 早先是 hasSecret() 只看“有没有密文”。SSH 隧道之后这不够：
+     * 一个连接可能只存了 SSH 口令、数据库口令为空，此时磁盘上有密文，
+     * UI 却会显示“密码已保存”，重启后依然连不上数据库。
+     * 这里有意只解密一次小文件，换取状态判断不撒谎。
+     */
+    if (this.#store.getSecret(saved.id)?.dbPassword !== undefined) return true
 
     // 3. 需要密码但没有密文 → false。
     //    典型成因是 cipher 不可用导致 setSecret 抛错（我们宁可拒存也不存明文）。
@@ -321,7 +328,7 @@ export class ConnectionManager {
    * 让用户能改参数重试。如果抛错，调用方通常会把整条记录丢掉，
    * 那"先存后连"就没意义了。
    */
-  async add(config: ConnectionConfig, secret?: string): Promise<ConnectionSummary> {
+  async add(config: ConnectionConfig, secret?: SecretInput): Promise<ConnectionSummary> {
     const info = this.#dialects.find((d) => d.id === config.dialectId)
     if (!info) {
       throw new Error(
@@ -535,7 +542,7 @@ export class ConnectionManager {
 
   async testConnection(
     config: ConnectionConfig,
-    secret?: string
+    secret?: SecretInput
   ): Promise<TestConnectionResult> {
     const host = new DriverHostHandle({ dialectId: config.dialectId })
     try {
@@ -942,7 +949,7 @@ export class ConnectionManager {
   async updateConnection(
     connectionId: string,
     config: Partial<ConnectionConfig>,
-    secret?: string
+    secret?: SecretInput
   ): Promise<ConnectionSummary> {
     const { conn, saved } = this.#resolveSaved(connectionId)
     const wasConnected = conn !== undefined
@@ -970,7 +977,15 @@ export class ConnectionManager {
       // setSecret 在 cipher 不可用时会抛 SecretStorageUnavailableError。
       // 这里**不吞**它：用户明确要改密码，存不了必须让他知道（否则又是一次
       // "以为存了其实没存"）。但配置已经落盘，不会白改。
-      this.#store.setSecret(connectionId, secret)
+      /*
+       * 按 key 合并，而不是整体替换。
+       *
+       * 编辑连接时 UI 只提交“用户改动过的密钥”：改了 SSH 口令不该把数据库
+       * 口令一起清掉。`mergeSecrets` 约定显式空串 = 删除该 key，undefined = 保留。
+       */
+      const existing = this.#store.getSecret(connectionId) ?? {}
+      const merged = mergeSecrets(existing, secret)
+      this.#store.setSecret(connectionId, isEmptySecret(merged) ? undefined : merged)
     }
     this.#saved.set(connectionId, { id: connectionId, config: mergedConfig, info })
     this.#log('info', `[manager] 已更新连接 ${connectionId}（${mergedConfig.name}）的配置`)

@@ -15,7 +15,7 @@
     "test:edit": "node tests/e2e-edit.mjs",
     "test:electron": "node scripts/run-in-electron.mjs scripts/acceptance.mjs",
     "test:gui": "node scripts/run-in-electron.mjs --gui",
-    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:mutations && pnpm run test:ddl && pnpm run test:postgres && pnpm run test:cancel && pnpm run test:postgres-ssl && pnpm run test:gui-layout && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow && pnpm run test:gui-features && pnpm run test:gui-round3 && pnpm run test:gui-sql && pnpm run test:gui-ssl-form",
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run fixture && pnpm run test && pnpm run test:resultset && pnpm run test:edit && pnpm run test:persist && pnpm run test:mutations && pnpm run test:ddl && pnpm run test:postgres && pnpm run test:cancel && pnpm run test:postgres-ssl && pnpm run test:ssh-tunnel && pnpm run test:gui-layout && pnpm run test:electron && pnpm run test:gui && pnpm run build:sdk && pnpm run test:sdk && pnpm run test:gui-flow && pnpm run test:gui-features && pnpm run test:gui-round3 && pnpm run test:gui-sql && pnpm run test:gui-ssl-form && pnpm run test:gui-ssh-form",
     "test:persist": "node tests/e2e-persist.mjs",
     "build:app": "pnpm run build && electron-builder --config electron-builder.config.mjs",
     "build:app:mac": "pnpm run build && electron-builder --config electron-builder.config.mjs --mac",
@@ -31,8 +31,11 @@
     "test:postgres": "node tests/e2e-postgres.mjs",
     "test:cancel": "node tests/e2e-cancel.mjs",
     "test:postgres-ssl": "node tests/e2e-postgres-ssl.mjs",
+    "test:ssh-tunnel": "node tests/e2e-ssh-tunnel.mjs",
+    "ssh-fixture": "node scripts/make-ssh-fixture.mjs tests/.ssh-fixture",
     "ssl-fixture": "node scripts/make-ssl-fixture.mjs tests/.ssl-fixture",
     "test:gui-ssl-form": "node tests/gui-ssl-form.mjs",
+    "test:gui-ssh-form": "node tests/gui-ssh-form.mjs",
     "test:gui-layout": "node tests/gui-layout.mjs",
     "check:build": "bash scripts/check-build-fresh.sh",
     "test:gui-sql": "node tests/gui-sql-editor.mjs"
@@ -40,6 +43,7 @@
   "devDependencies": {
     "@types/node": "^24.9.0",
     "@types/pg": "^8.23.1",
+    "@types/ssh2": "^1.15.6",
     "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^6.0.0",
@@ -58,6 +62,7 @@
     "url": "https://github.com/SophiaData/dbstudio/issues"
   },
   "dependencies": {
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "ssh2": "^1.17.0"
   }
 }

@@ -29,6 +29,7 @@ import type {
   TransactionState
 } from './contracts/resultset.js'
 import type { TestConnectionResult } from './contracts/driver.js'
+import type { SecretInput } from './contracts/driver.js'
 
 /** 单条 RPC 的超时。元数据类操作毫秒级，结果集/写入可能几十秒，故分档。 */
 const METADATA_TIMEOUT_MS = 15_000
@@ -200,12 +201,12 @@ export class DriverHost {
   // ---- 语义化 API ----
 
   /** 建立连接并返回能力声明。 */
-  connect(config: ConnectionConfig, secret?: string): Promise<DriverCapabilities> {
+  connect(config: ConnectionConfig, secret?: SecretInput): Promise<DriverCapabilities> {
     return this.#request<DriverCapabilities>('connect', { config, secret }, METADATA_TIMEOUT_MS)
   }
 
   /** 只测连，不保留连接。 */
-  testConnection(config: ConnectionConfig, secret?: string): Promise<TestConnectionResult> {
+  testConnection(config: ConnectionConfig, secret?: SecretInput): Promise<TestConnectionResult> {
     return this.#request<TestConnectionResult>('testConnection', { config, secret }, HEAVY_TIMEOUT_MS)
   }
 
@@ -305,5 +306,4 @@ export async function withDriverHost<T>(
     await host.close()
   }
 }
-
 

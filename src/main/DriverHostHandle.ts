@@ -25,6 +25,7 @@ import type {
   RpcMethod,
   RpcRequest,
   RpcResponse,
+  SecretInput,
   TestConnectionResult
 } from '../core/driver'
 import { isRpcResponse } from '../core/driver'
@@ -262,7 +263,7 @@ export class DriverHostHandle {
 
   // ---- 语义化的便捷方法（对上层隐藏 RPC 细节） ----
 
-  connect(config: ConnectionConfig, secret?: string): Promise<DriverCapabilities> {
+  connect(config: ConnectionConfig, secret?: SecretInput): Promise<DriverCapabilities> {
     return this.request<DriverCapabilities>('connect', { config, secret })
   }
 
@@ -274,7 +275,7 @@ export class DriverHostHandle {
     return this.request<TableDescription>('describeTable', { id })
   }
 
-  testConnection(config: ConnectionConfig, secret?: string): Promise<TestConnectionResult> {
+  testConnection(config: ConnectionConfig, secret?: SecretInput): Promise<TestConnectionResult> {
     return this.request<TestConnectionResult>('testConnection', { config, secret })
   }
 

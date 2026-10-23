@@ -52,7 +52,15 @@ export type {
 
 export { cellValueToSqlParam, MAX_CELL_TEXT_CHARS } from './contracts/resultset.js'
 
-export type { DialectInfo, DialectField, QuotingRules, TestConnectionResult } from './contracts/driver.js'
+export type {
+  DialectInfo,
+  DialectField,
+  QuotingRules,
+  TestConnectionResult,
+  SecretMap,
+  SecretInput,
+  SecretKey
+} from './contracts/driver.js'
 
 export { quoteIdentifierWith } from './contracts/driver.js'
 

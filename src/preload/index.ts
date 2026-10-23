@@ -104,6 +104,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
+import type { SecretInput } from '../core/driver'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
 import type { CellValue, QueryOptions, QueryResult, ResultPage } from '../core/resultset'
@@ -116,7 +117,7 @@ import type {
 const api: DbStudioApi = {
   listDialects: () => ipcRenderer.invoke(IPC.listDialects),
   listConnections: () => ipcRenderer.invoke(IPC.listConnections) as Promise<ConnectionSummary[]>,
-  addConnection: (config: ConnectionConfig, secret?: string) =>
+  addConnection: (config: ConnectionConfig, secret?: SecretInput) =>
     ipcRenderer.invoke(IPC.addConnection, config, secret) as Promise<ConnectionSummary>,
 
   /**
@@ -134,7 +135,7 @@ const api: DbStudioApi = {
 
   removeConnection: (connectionId: string) =>
     ipcRenderer.invoke(IPC.removeConnection, connectionId) as Promise<void>,
-  testConnection: (config: ConnectionConfig, secret?: string) =>
+  testConnection: (config: ConnectionConfig, secret?: SecretInput) =>
     ipcRenderer.invoke(IPC.testConnection, config, secret),
   listChildren: (nodeId: string | null) =>
     ipcRenderer.invoke(IPC.listChildren, nodeId) as Promise<ObjectRef[]>,
@@ -243,7 +244,7 @@ const api: DbStudioApi = {
   updateConnection: (
     connectionId: string,
     config: Partial<ConnectionConfig>,
-    secret?: string
+    secret?: SecretInput
   ) =>
     ipcRenderer.invoke(
       IPC.updateConnection,

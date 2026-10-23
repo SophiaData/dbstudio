@@ -2,7 +2,7 @@
 #
 # 为什么值得加这一条：本地开发时 node_modules / out / fixtures 都是现成的，
 # 很容易出现「在我机器上能过」。这个 workflow 从零安装、重新生成夹具、
-# 跑全部 555 条断言（含 Electron 内置 Node 验证，以及 6 段 GUI 里的 5 段真实点击），
+# 跑全部 e2e 断言与 8 段 GUI 验证（含真实 PG、SSH 隧道、SSL 与 Electron 点击链路），
 # 是「这个仓库克隆下来真的能跑」的唯一客观证据。
 #
 # 注意 GUI 自检需要显示环境；Linux CI 上用 xvfb 提供虚拟显示。
@@ -97,6 +97,40 @@ jobs:
         env:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: node tests/e2e-cancel.mjs
+
+      - name: SSH 隧道（真实 sshd + 真实 PG）
+        # ===== 为什么 CI 里要自己起 sshd，而不是跳过 =====
+        #
+        # SSH 隧道真正容易坏的都在协议层：主机指纹校验、公钥认证、
+        # pg 把 SSH channel 当 socket 用、取消查询另开 channel。
+        # 只跑 mock 等于没验。GitHub runner 自带 OpenSSH server 二进制，
+        # 用仓库生成的临时夹具起一个只监听 127.0.0.1:2222 的实例即可。
+        #
+        # 注意：夹具必须在同一个用户下生成并启动 sshd；authorized_keys
+        # 的属主/权限不对时 sshd 会直接断开，表现为很难查的 ECONNRESET。
+        env:
+          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: |
+          set -euo pipefail
+          pnpm run ssh-fixture
+          # 用绝对配置路径：sshd 在认证子进程里会 re-exec，相对路径会丢。
+          # 只监听 127.0.0.1:2222，以当前 runner 用户启动即可，不需要 sudo。
+          # 这样 sshd.pid 与夹具同属一个用户，清理时不会碰到权限问题。
+          /usr/sbin/sshd -f "$PWD/tests/.ssh-fixture/sshd_config" -E "$PWD/tests/.ssh-fixture/sshd.log"
+          trap 'kill "$(cat tests/.ssh-fixture/sshd.pid)" 2>/dev/null || true' EXIT
+          # 测试脚本本身会用 Node 探测端口；这里只需等 sshd 真正开始监听。
+          # 循环超时必须显式失败：否则 e2e 会把“sshd 没起来”记成 SKIP，
+          # CI 仍显示绿色，等于再次失去对隧道链路的验证。
+          ssh_ready=0
+          for i in $(seq 1 20); do
+            if node -e "const net=require('net');const s=net.connect(2222,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),1000)"; then
+              ssh_ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          test "$ssh_ready" = 1
+          node tests/e2e-ssh-tunnel.mjs
 
       - name: PostgreSQL SSL/TLS 语义（加密真生效 / 错误 CA 真被拒）
         # ===== 为什么这里要自己起两个容器，而不是复用上面的 service =====
@@ -258,3 +292,12 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm test:gui-ssl-form
+
+      - name: SSH 表单 GUI 测试（多密码框 / 配置不泄漏 / 编辑回填）
+        # 纯 Node 测不出“三个密码框写进同一个变量”：类型检查会通过，
+        # 表单看起来也正常，只在真实测试连接时表现为“总有一个认证失败”。
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum pnpm test:gui-ssh-form

@@ -63,6 +63,13 @@ export interface PgCancelContext {
    * 所以这里把主连接展开好的 attempts 原样传进来，而不是重新解析 sslmode。
    */
   readonly sslAttempts: readonly SslAttempt[]
+  /**
+   * 打开一条通往数据库的通道。走 SSH 隧道时由 adapter 提供。
+   *
+   * 取消查询必须**另开一条数据库连接**（见文件头），而那条连接同样要穿过隧道；
+   * 否则在跳板机场景下，取消连接根本到不了数据库，表现为"取消按钮点了没反应"。
+   */
+  readonly openStream?: () => Promise<import('node:stream').Duplex>
   /** 主连接的后端 PID（`SELECT pg_backend_pid()` 的结果）。 */
   readonly backendPid: number | null
 }
@@ -100,6 +107,7 @@ export async function cancelPostgresBackend(context: PgCancelContext): Promise<b
     user: context.user,
     password: context.password,
     attempts: context.sslAttempts,
+    ...(context.openStream === undefined ? {} : { openStream: context.openStream }),
     // 取消连接必须是"短命"的：超时短一点，避免取消操作本身把用户卡住
     connectionTimeoutMillis: 5_000,
     // 在 pg_stat_activity 里能一眼看出这条连接是来取消的

@@ -28,13 +28,120 @@ import type {
 } from './resultset'
 
 /**
- * 机密值（密码 / token）。
+ * 机密值（密码 / SSH 口令 / 私钥口令）。
  *
  * 刻意**不放进 `ConnectionConfig`**：配置对象会被打日志、会被序列化、
  * 会出现在错误堆栈里，机密一旦混进去就迟早泄漏。
  * 机密只在这个独立参数里传递，且不落盘（落盘由后续的凭据存储负责）。
+ *
+ * ===== 为什么从 `string` 扩成对象（SSH 隧道带来的契约变更）=====
+ *
+ * 在只有数据库密码时，一个字符串就够了。但 SSH 隧道需要**两个**独立机密：
+ *   - 数据库口令
+ *   - SSH 认证（口令，或用带口令的私钥时的私钥口令）
+ *
+ * 有三个候选方案，逐个说为什么没选：
+ *
+ *   1. 把两个机密拼成一个字符串（`"dbpass\nsshpass"`）。看似零改动，
+ *      但要求所有驱动都遵守同一套分隔符约定，而密码里**可以合法包含换行**。
+ *      一旦值里出现分隔符，就会静默地把密码截断成两半——错误还表现为
+ *      "认证失败"，排查成本极高。用不可见的分隔约定传机密是典型的坑。
+ *   2. 把 SSH 口令塞进 `ConnectionConfig.options`。这会直接违背本文件的
+ *      核心约束：options 会被打日志、写进 `connections.json`（明文文件）。
+ *   3. **改成具名对象**（采用）。每个机密的含义由 key 显式表达，
+ *      不依赖任何分隔约定，也不需要改动 `ConnectionConfig` 的结构。
+ *
+ * `string` 仍然被接受（见 `SecretInput`），这样：
+ *   - 既有 SDK 调用方与测试代码不用改；
+ *   - IPC 层照旧可以只传一个字符串（单机无 SSH 的常见情形）；
+ *   - 但它会被**归一化**成一个具名对象再交给 adapter，adapter 只需处理一种形状。
  */
-export type SecretValue = string | undefined
+export interface SecretMap {
+  /** 数据库口令（PostgreSQL 等）。 */
+  readonly dbPassword?: string
+  /** SSH 登录口令（与 privateKey 二选一）。 */
+  readonly sshPassword?: string
+  /**
+   * SSH 私钥自身的口令（私钥加密时使用）。
+   *
+   * 与 `sshPassword` 是**两件事**：前者是"登录用的口令"，
+   * 后者是"解开私钥文件的口令"。混成一体会导致"填了私钥又填口令就连不上"。
+   */
+  readonly sshPassphrase?: string
+}
+
+/** `SecretMap` 的合法键。解析 IPC/RPC 的未知对象时用它做白名单。 */
+export const SECRET_KEYS = ['dbPassword', 'sshPassword', 'sshPassphrase'] as const
+
+export type SecretKey = (typeof SECRET_KEYS)[number]
+
+/**
+ * 调用方可以传的形状：字符串（视为数据库口令，向后兼容）或具名映射。
+ *
+ * 注意这是**入口类型**，adapter 内部统一用 `SecretMap`。
+ */
+export type SecretInput = string | SecretMap | undefined
+
+/**
+ * 归一化后的机密集合。`DriverAdapter` 的方法统一收这个类型。
+ *
+ * 为什么不直接用 `SecretMap`：`undefined` 与"空对象"在实践中要表达同一件事
+ * （没有提供任何机密）。归一化时把它们统一成 `undefined` 之外的空对象，
+ * 可以省掉 adapter 里满地的 `secret?.` 判空。
+ */
+export type SecretValue = SecretMap
+
+/**
+ * 把调用方传入的各种形状归一化成 `SecretValue`。
+ *
+ * 空字符串统一丢弃：UI 的“留空表示不修改”和 SDK 的“不传密码”都会产生空串，
+ * 若保留它，adapter 会拿一个空口令去认证，错误信息会从“没有凭据”变成
+ * “认证失败”，误导排查。
+ */
+export function normalizeSecret(input: SecretInput): SecretValue {
+  if (input === undefined) return {}
+  if (typeof input === 'string') {
+    return input === '' ? {} : { dbPassword: input }
+  }
+  const out: { dbPassword?: string; sshPassword?: string; sshPassphrase?: string } = {}
+  for (const key of SECRET_KEYS) {
+    const value = input[key]
+    if (typeof value === 'string' && value !== '') out[key] = value
+  }
+  return out
+}
+
+/** 是否一个机密键都没有。 */
+export function isEmptySecret(secret: SecretMap): boolean {
+  return SECRET_KEYS.every((key) => secret[key] === undefined)
+}
+
+/**
+ * 按 key 合并两组机密。`patch` 里显式的空串表示删除该 key。
+ *
+ * 用于“编辑连接时只改了 SSH 口令，数据库口令必须原样保留”的场景。
+ * 若直接用 patch 覆盖，用户改一个字段会把另一类凭据静默清掉。
+ */
+export function mergeSecrets(base: SecretMap, patch: SecretInput): SecretValue {
+  const out: { dbPassword?: string; sshPassword?: string; sshPassphrase?: string } = {}
+  for (const key of SECRET_KEYS) {
+    const value = base[key]
+    if (value !== undefined && value !== '') out[key] = value
+  }
+  if (patch === undefined) return out
+  const normalized = normalizeSecret(patch)
+  if (typeof patch === 'string') {
+    if (patch !== '') out.dbPassword = patch
+    return out
+  }
+  for (const key of SECRET_KEYS) {
+    const value = patch[key]
+    if (value === '') delete out[key]
+    else if (value !== undefined) out[key] = value
+    else if (normalized[key] !== undefined) out[key] = normalized[key]
+  }
+  return out
+}
 
 /** 连接探测结果。 */
 export interface TestConnectionResult {
@@ -301,6 +408,17 @@ export interface DialectField {
   readonly label: string
   readonly kind: 'text' | 'number' | 'password' | 'file' | 'select'
   readonly required: boolean
+  /**
+   * `kind === 'password'` 时，该控件对应 `SecretMap` 里的哪个键。
+   *
+   * 为什么显式声明而不是从 `key` 猜：PG 现在有数据库口令、SSH 登录口令、
+   * SSH 私钥口令三个密码框。若 UI 统一把 password 字段塞进同一个变量，
+   * 后填的会覆盖先填的，表现为“测试连接时总有一个认证失败”。
+   * 把映射写进方言元数据，UI 只负责按 key 收集，不再理解方言语义。
+   *
+   * 非 password 字段忽略此属性。
+   */
+  readonly secretKey?: SecretKey
   readonly placeholder?: string
   /** 默认值。 */
   readonly default?: string | number

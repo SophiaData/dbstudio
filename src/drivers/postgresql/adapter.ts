@@ -53,6 +53,13 @@ import {
   type SslAttempt
 } from './ssl'
 import {
+  openSshTunnel,
+  SshTunnelError,
+  type SshCredentials,
+  type SshTunnel,
+  type SshTunnelConfig
+} from './ssh-tunnel'
+import {
   SCHEMAS_FOLDER_ID,
   columnObjectId,
   parseObjectId,
@@ -128,6 +135,16 @@ interface PgConnectionInfo {
    * 而且 CA 文件会被重复读取。这里一次算好，主连接与取消连接共用。
    */
   readonly sslAttempts: readonly SslAttempt[]
+  /**
+   * SSH 隧道配置（未启用时为 undefined）。
+   *
+   * 注意这里存的是**配置**而不是已建立的隧道：隧道有生命周期，
+   * 由 adapter 在 connect/disconnect 时开关（见 `#tunnel`），
+   * 不能混进"每次连接都要重新算一遍"的纯配置解析结果里。
+   */
+  readonly ssh: SshTunnelConfig | undefined
+  /** SSH 认证机密（从统一的 SecretValue 里拆出来）。 */
+  readonly sshCredentials: SshCredentials | undefined
 }
 
 interface EditableTarget {
@@ -183,7 +200,92 @@ function resolveConnectionInfo(config: ConnectionConfig, secret: SecretValue): P
     // 把 CA 缺失/不可读包装成连接错误，让 UI 能看到可读的中文提示。
     throw new PostgresAdapterError('connection_failed', describeThrown(thrown))
   }
-  return { host, port, database, user, password: secret, sslAttempts }
+
+  /**
+   * SSH 隧道配置。`sshHost` 为空即"不启用隧道"。
+   *
+   * 隧道里的 `targetHost/targetPort` 是**跳板机视角**下的数据库地址，
+   * 与直连时的 `host/port` 可以是两个不同的值（典型：跳板机在公网，
+   * 数据库只监听内网 10.x）。所以这里缺省复用 host/port，但允许显式覆盖。
+   */
+  const sshHost = readOptionString(config, 'sshHost')
+  let ssh: SshTunnelConfig | undefined
+  if (sshHost !== '') {
+    const sshUser = readOptionString(config, 'sshUser')
+    if (sshUser === '') {
+      throw new PostgresAdapterError('connection_failed', '启用 SSH 隧道时必须填写 SSH 用户名（sshUser）。')
+    }
+    const sshPortRaw = readOptionString(config, 'sshPort')
+    const sshPort = sshPortRaw === '' ? 22 : Number(sshPortRaw)
+    if (!Number.isInteger(sshPort) || sshPort <= 0 || sshPort > 65535) {
+      throw new PostgresAdapterError(
+        'connection_failed',
+        `SSH 端口非法：${sshPortRaw}（应为 1-65535 的整数）。`
+      )
+    }
+    const targetHostRaw = readOptionString(config, 'sshTargetHost')
+    const targetPortRaw = readOptionString(config, 'sshTargetPort')
+    const targetPort = targetPortRaw === '' ? port : Number(targetPortRaw)
+    if (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) {
+      throw new PostgresAdapterError(
+        'connection_failed',
+        `SSH 目标数据库端口非法：${targetPortRaw}（应为 1-65535 的整数）。`
+      )
+    }
+    const privateKeyPath = readOptionString(config, 'sshPrivateKey')
+    const hostKeySha256 = readOptionString(config, 'sshHostKeySha256')
+    ssh = {
+      host: sshHost,
+      port: sshPort,
+      username: sshUser,
+      privateKeyPath: privateKeyPath === '' ? undefined : privateKeyPath,
+      hostKeySha256: hostKeySha256 === '' ? undefined : hostKeySha256,
+      targetHost: targetHostRaw === '' ? host : targetHostRaw,
+      targetPort
+    }
+  }
+
+  /**
+   * 从统一机密里拆出 SSH 用的两个。数据库口令始终是 `dbPassword`。
+   *
+   * 私钥口令（passphrase）与 SSH 登录口令是**两件事**，见 core/driver.ts 的 SecretMap。
+   */
+  const sshCredentials: SshCredentials | undefined =
+    ssh === undefined
+      ? undefined
+      : {
+          password: secret.sshPassword,
+          privateKeyPassphrase: secret.sshPassphrase
+        }
+
+  return {
+    host,
+    port,
+    database,
+    user,
+    password: secret.dbPassword,
+    sslAttempts,
+    ssh,
+    sshCredentials
+  }
+}
+
+/**
+ * SSH 失败码到 RPC 错误码的映射。
+ *
+ * 宿主层只会透传 `RpcErrorCode` 白名单里的码（见 driver-host/index.ts），
+ * 若直接把 ssh_* 抛出去，最终会被归成 internal，用户看到“内部错误”，
+ * 完全不知道是自己填错了私钥还是主机指纹。
+ *
+ * 这里保留“连接失败”的大语义（UI 的恢复动作都是改配置/重试），
+ * 精确原因仍在消息里。`ssh_host_unverified` 尤其不能丢消息——
+ * 它携带用户需要确认的指纹。
+ */
+function wrapSshError(thrown: unknown): PostgresAdapterError {
+  if (thrown instanceof SshTunnelError) {
+    return new PostgresAdapterError('connection_failed', thrown.message, thrown)
+  }
+  return new PostgresAdapterError('connection_failed', describeThrown(thrown))
 }
 
 /** 非法 sslmode 的报错（单独拆出来只是为了让上面的三元表达式读得下去）。 */
@@ -227,12 +329,35 @@ export class PostgresDriverAdapter implements DriverAdapter {
   #backendPid: number | null = null
   /** 建连参数（取消时需要用它另开一条连接）。未连接时为 null。 */
   #connectionInfo: PgConnectionInfo | null = null
+  /**
+   * 当前 SSH 隧道。未启用隧道时为 null。
+   *
+   * ===== 为什么它挂在 adapter 上，而不是每次连接临时创建 =====
+   * 一次数据库连接期间可能需要多条 channel（SSL 回退尝试、取消查询）。
+   * 让它们复用同一条 SSH 连接，避免重复做 SSH 认证，也不会在跳板机
+   * 日志里刷出一堆会话。`disconnect` 时关闭，不留孤儿连接。
+   */
+  #tunnel: SshTunnel | null = null
 
   async connect(config: ConnectionConfig, secret: SecretValue): Promise<DriverCapabilities> {
     if (this.#client !== null) {
       throw new PostgresAdapterError('already_connected', '该适配器实例已持有一个连接，请先 disconnect 再重新连接。')
     }
     const info = resolveConnectionInfo(config, secret)
+    /**
+     * 隧道模式下先建 SSH，再把通道交给 pg。
+     *
+     * 隧道建立失败要**原样抛出 SshTunnelError**（尤其是 ssh_host_unverified，
+     * 它带着指纹供用户确认）。若被 `wrapPgError` 包成通用的
+     * "无法连接到 PostgreSQL"，UI 就没法区分"该确认主机指纹"和"密码错了"。
+     */
+    if (info.ssh !== undefined) {
+      try {
+        this.#tunnel = await openSshTunnel(info.ssh, info.sshCredentials ?? { password: undefined, privateKeyPassphrase: undefined })
+      } catch (thrown) {
+        throw wrapSshError(thrown)
+      }
+    }
     let client: Client
     try {
       /**
@@ -247,12 +372,16 @@ export class PostgresDriverAdapter implements DriverAdapter {
         user: info.user,
         password: info.password,
         attempts: info.sslAttempts,
+        // 有隧道就每次用新 channel（一条 channel 不能被两次连接复用）。
+        ...(this.#tunnel === null ? {} : { openStream: () => this.#tunnel!.forward() }),
         // 连接超时：与 SQLite 的 BUSY_TIMEOUT 不同，PG 必须防"TCP 连不上挂死"
         connectionTimeoutMillis: 10_000,
         // 应用名，方便 DBA 在 pg_stat_activity 里认出是本客户端
         applicationName: 'dbstudio'
       })
     } catch (thrown) {
+      // 建连失败时隧道也要收掉：留着没有消费者，只是占着跳板机的一条会话。
+      await this.#closeTunnel()
       throw wrapPgError(thrown, 'connection_failed', `无法连接到 PostgreSQL ${info.host}:${info.port}/${info.database}`)
     }
     this.#client = client
@@ -279,15 +408,31 @@ export class PostgresDriverAdapter implements DriverAdapter {
    */
   async disconnect(): Promise<void> {
     const client = this.#client
+    /*
+     * 事务状态必须在清空字段**之前**记下。
+     *
+     * 早先先执行 `#inTransaction = false` 再判断，导致带未提交事务的
+     * disconnect 永远不会发 ROLLBACK。现在与 SQLite 版保持同一语义：
+     * 先显式回滚，再关连接；即便底层关闭本身也会回滚，也不依赖它兜底。
+     */
+    const inTransaction = this.#inTransaction
     this.#client = null
     this.#cursors.clear()
     this.#pendingAffected = 0
     this.#inTransaction = false
     this.#backendPid = null
     this.#connectionInfo = null
-    if (client === null) return
+    if (client === null) {
+      /**
+       * 注意这里也要关隧道：SSH 建立成功、但数据库建连失败的那条路径上，
+       * `#client` 仍然是 null，而隧道可能已经建立（或在失败的 catch 里被关掉）。
+       * 漏掉这一句就会在"SSH 通了、数据库连不上"时留下一条孤儿会话。
+       */
+      await this.#closeTunnel()
+      return
+    }
     try {
-      if (this.#inTransaction) {
+      if (inTransaction) {
         try {
           await client.query('ROLLBACK')
         } catch {
@@ -300,6 +445,21 @@ export class PostgresDriverAdapter implements DriverAdapter {
       } catch {
         // end 失败时忽略：进程即将退出
       }
+      // 顺序：先关数据库连接，再关隧道。反过来的话，pg 的 end() 会往一条
+      // 已经断掉的通道里写终止包，日志里会出现无意义的错误。
+      await this.#closeTunnel()
+    }
+  }
+
+  /** 关闭并清空隧道。幂等——disconnect 会被宿主在退出时再调一次。 */
+  async #closeTunnel(): Promise<void> {
+    const tunnel = this.#tunnel
+    this.#tunnel = null
+    if (tunnel === null) return
+    try {
+      await tunnel.close()
+    } catch {
+      // 关闭失败不影响主流程：进程即将退出，或隧道本就已经断了
     }
   }
 
@@ -311,8 +471,15 @@ export class PostgresDriverAdapter implements DriverAdapter {
     const startedAt = performance.now()
     let info: PgConnectionInfo | null = null
     let client: Client | null = null
+    let tunnel: SshTunnel | null = null
     try {
       info = resolveConnectionInfo(config, secret)
+      if (info.ssh !== undefined) {
+        tunnel = await openSshTunnel(
+          info.ssh,
+          info.sshCredentials ?? { password: undefined, privateKeyPassphrase: undefined }
+        )
+      }
       client = await openClient({
         host: info.host,
         port: info.port,
@@ -320,6 +487,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
         user: info.user,
         password: info.password,
         attempts: info.sslAttempts,
+        ...(tunnel === null ? {} : { openStream: () => tunnel!.forward() }),
         connectionTimeoutMillis: 10_000,
         applicationName: 'dbstudio'
       })
@@ -333,13 +501,26 @@ export class PostgresDriverAdapter implements DriverAdapter {
     } catch (thrown) {
       return {
         ok: false,
-        message: thrown instanceof PostgresAdapterError ? thrown.message : `连接失败：${describeThrown(thrown)}`,
+        message:
+          thrown instanceof PostgresAdapterError
+            ? thrown.message
+            : thrown instanceof SshTunnelError
+              ? thrown.message
+              : `连接失败：${describeThrown(thrown)}`,
         elapsedMs: Math.round(performance.now() - startedAt)
       }
     } finally {
       if (client !== null) {
         try {
           await client.end()
+        } catch {
+          // ignore
+        }
+      }
+      // 测试连接=临时建一条再关掉，隧道也必须一起收（不留孤儿会话）。
+      if (tunnel !== null) {
+        try {
+          await tunnel.close()
         } catch {
           // ignore
         }
@@ -437,7 +618,13 @@ export class PostgresDriverAdapter implements DriverAdapter {
   async cancelQuery(): Promise<boolean> {
     const info = this.#connectionInfo
     if (this.#client === null || info === null || this.#backendPid === null) return false
-    return cancelPostgresBackend({ ...info, backendPid: this.#backendPid })
+    const tunnel = this.#tunnel
+    return cancelPostgresBackend({
+      ...info,
+      backendPid: this.#backendPid,
+      // 取消连接也要穿过同一条隧道（在隧道上开新 channel）。
+      ...(tunnel === null ? {} : { openStream: () => tunnel.forward() })
+    })
   }
 
   async query(sql: string, options?: QueryOptions): Promise<QueryResultContract> {

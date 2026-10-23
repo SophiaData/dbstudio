@@ -155,10 +155,12 @@ pnpm build:app:mac    # 或 :linux / :win
 而 `app.asar` 内的文件**无法被执行**。所以 `electron-builder.config.mjs` 里必须有：
 
 ```js
-asarUnpack: ['out/driver-host/**']
+asarUnpack: ['out/driver-host/**', 'node_modules/**']
 ```
 
 漏了这行，应用能启动、界面正常，但**连不上任何数据库**——症状很有迷惑性。
+`node_modules` 也必须解包：驱动宿主从 `app.asar.unpacked` 执行时，
+Node 的模块查找不会跨回 `app.asar` 去加载 `pg` / `ssh2`。
 `src/main/DriverHostHandle.ts` 的路径候选列表里预留了
 `app.asar.unpacked/out/driver-host/index.js`，与此配置对应。
 
@@ -168,7 +170,7 @@ asarUnpack: ['out/driver-host/**']
 
 ```bash
 pnpm install
-pnpm verify      # 二十二段全链（含 7 段 GUI；PG / SSL 无环境时自动跳过）
+pnpm verify      # 二十四段全链（含 8 段 GUI；PG / SSL / SSH 无环境时自动跳过）
 ```
 
 `pnpm verify` 依次执行（顺序与 `package.json` 里的 `verify` 脚本一致）：
@@ -181,22 +183,24 @@ pnpm verify      # 二十二段全链（含 7 段 GUI；PG / SSL 无环境时自
 | 4 | `test` | 元数据/连接 e2e **43/43**，经 stdio 与宿主对话 |
 | 5 | `test:resultset` | 结果集 e2e **76/76**：查询 / 分页 / 乱序取页 / 游标 |
 | 6 | `test:edit` | 在线编辑 e2e **60/60**：参数化 UPDATE / 事务 / 回滚 / 跨连接隔离 |
-| 7 | `test:persist` | 持久化 e2e **53/53**：配置落盘 / 凭据加密 / 坏文件降级 / 明文泄漏断言 |
+| 7 | `test:persist` | 持久化 e2e **62/62**：配置落盘 / 具名凭据与旧密文迁移 / 坏文件降级 / 明文泄漏断言 |
 | 8 | `test:mutations` | 增删改 e2e **56/56**：INSERT/DELETE/空数组拒绝/注入防护 |
 | 9 | `test:ddl` | DDL e2e **53/53**：建表/删表/视图/重命名/类型与默认值白名单 |
-| 10 | `test:postgres` | PG e2e **42/42**（真实 PG 17.11；无环境时自动跳过） |
+| 10 | `test:postgres` | PG e2e **45/45**（真实 PG 17.11；无环境时自动跳过） |
 | 11 | `test:cancel` | 取消能力 **15/15**：PG 真取消（516ms 中断 10s 慢查询）/ SQLite 如实不支持 |
 | 12 | `test:postgres-ssl` | SSL **23/23**：6 种 sslmode 的加密/校验语义 + 错误 CA 真被拒 + SSL 连接上取消真生效 |
-| 13 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
-| 14 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
-| 15 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
-| 16 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
-| 17 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
-| 18 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
-| 19 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
-| 20 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
-| 21 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
-| 22 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
+| 13 | `test:ssh-tunnel` | SSH **13/13**（真实 sshd + PG）：首次指纹确认 / 错误指纹拒绝 / 未授权私钥 / 隧道 SQL / 取消 |
+| 14 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
+| 15 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
+| 16 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
+| 17 | `build:sdk` | 构建 SDK 发布产物（含 core 的 d.ts，保证 dist 内自闭合） |
+| 18 | `test:sdk` | **30/30**（从 dist 产物导入，模拟外部用户） |
+| 19 | `test:gui-flow` | **Playwright 驱动真实点击**：建连接→展开树→点表→改单元格→应用→提交→验证落库 |
+| 20 | `test:gui-features` | 真实点击验证：树搜索/排序/列宽/统计/CSV/新增行/删除行/右键菜单 |
+| 21 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
+| 22 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
+| 23 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
+| 24 | `test:gui-ssh-form` | SSH 表单 **17/17**：三个独立密码框 / 配置不含明文 / 编辑时能清空 `sshHost` 关闭隧道 |
 
 单独跑：
 
@@ -300,6 +304,27 @@ commitTransaction → 落库
 若那条连接忘了带 SSL，会被 `pg_hba` 拒绝，表现为"取消按钮点了没反应"——
 而这个 bug 只会在远端 SSL 库上出现，本机永远复现不了。
 
+## SSH 隧道：主机指纹不做 TOFU
+
+跳板机后面的自建库只能经 SSH 到达。实现放在驱动宿主进程内
+（`src/drivers/postgresql/ssh-tunnel.ts`），隧道生命周期与数据库连接一致；
+同一会话内的 SSL 回退与取消查询会在一条 SSH 连接上另开 channel，
+断开或重连时重新建立隧道。
+
+安全上的关键选择是**首次连接不静默信任**：
+
+1. 没有预置 `sshHostKeySha256` 时，连接被拒绝，错误里带实际
+   `SHA256:...` 指纹（与 `ssh-keygen -lf` 同格式）；
+2. 用户核对后把指纹填回配置，之后指纹不一致会明确报“可能是中间人攻击，
+   或跳板机重装过”；
+3. 私钥只读文件路径，私钥口令/SSH 登录口令/数据库口令分别存放，
+   不会拼成一个字符串，也不会进入 `connections.json`。
+
+实测踩到的一个协议坑：`pg` 把 `stream` 当 `net.Socket` 用，会调
+`setNoDelay` / `setKeepAlive` / `connect`，而 ssh2 的 channel 是普通
+`Duplex`。所以中间需要一层最小适配，否则会在建连阶段报
+`this.stream.setNoDelay is not a function`。
+
 ## 持久化：配置与凭据分两条通道
 
 ```
@@ -357,6 +382,7 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | **ER 图** | SVG 手绘，30 张表上限，**明确标注不含外键关系**（元数据契约暂无外键字段） |
 | **查询取消** | PostgreSQL 真取消（`pg_cancel_backend`，实测 516ms 中断 10 秒慢查询）；**SQLite 如实不支持**（同步 API 无法中断） |
 | **SSL/TLS** | PostgreSQL 六种 libpq 语义的 sslmode（disable/allow/prefer/require/verify-ca/verify-full）+ CA 证书校验；**语义差异已实测核对**（见下方说明） |
+| **SSH 隧道** | PostgreSQL 经跳板机连接：私钥/口令认证、SHA256 主机指纹确认（不做 TOFU）、目标地址覆盖；SSL 回退与取消查询复用隧道连接 |
 
 ### 还没做（与 DBeaver 的差距）
 
@@ -365,7 +391,6 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | 只有 2 个方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录） |
 | 无传输/导入导出向导 | DBeaver 的 data transfer 是独立子系统，支持跨库搬数据 |
 | 无数据库比较/同步 | 表结构与数据的 diff |
-| 无 SSH 隧道 | 只能用可直连的库（含云库）；跳板机后面自建库连不上。**这是下一个最该补的**（需先扩展 secret 契约，见下） |
 | 无执行历史持久化 | 查过的 SQL 关掉就没了 |
 | ER 图无外键关系线 | 元数据契约缺外键字段，需先扩展 `TableDescription` |
 | SQLite 查询不可取消 | 同步 API 的硬限制 |

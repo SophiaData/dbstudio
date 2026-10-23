@@ -8,7 +8,7 @@
 
 import { NodeId, type ConnectionSummary, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
-import type { DialectField, DialectInfo } from '../core/driver'
+import type { DialectField, DialectInfo, SecretMap } from '../core/driver'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs } from './tabs'
@@ -797,12 +797,12 @@ async function openConnectionDialog(
   errP.hidden = true
   nameInput.value = ''
 
-  /** 收集表单 → ConnectionConfig + secret。密码单独走 secret，绝不进 options。 */
-  const collect = (): { config: ConnectionConfig; secret: string | undefined } => {
+  /** 收集表单 → ConnectionConfig + 具名 secret。密码绝不进 options。 */
+  const collect = (): { config: ConnectionConfig; secret: SecretMap } => {
     const dialect = cachedDialects?.find((d) => d.id === sel.value)
     if (!dialect) throw new Error('请选择数据库类型')
     const options: Record<string, string | number | boolean> = {}
-    let secret: string | undefined
+    const secret: { dbPassword?: string; sshPassword?: string; sshPassphrase?: string } = {}
     for (const f of dialect.fields) {
       // `select` 与 `input` 都带 data-key，但类型不同：统一按"有 value 的控件"取。
       const control = dyn.querySelector<HTMLInputElement | HTMLSelectElement>(
@@ -815,7 +815,9 @@ async function openConnectionDialog(
         continue
       }
       if (f.kind === 'password') {
-        secret = raw
+        // 每个密码框按方言声明的 secretKey 分开收集。SSH 连接最多有三个
+        // 独立机密，绝不能后填覆盖先填（见 DialectField.secretKey 的注释）。
+        secret[f.secretKey ?? 'dbPassword'] = raw
       } else if (f.kind === 'number') {
         const n = Number(raw)
         if (Number.isNaN(n)) throw new Error(`「${f.label}」必须是数字`)
@@ -915,6 +917,7 @@ function buildField(f: DialectField): HTMLElement {
 
   const input = document.createElement('input')
   input.dataset['key'] = f.key
+  if (f.kind === 'password') input.dataset['secretKey'] = f.secretKey ?? 'dbPassword'
   input.type = f.kind === 'password' ? 'password' : f.kind === 'number' ? 'number' : 'text'
   if (f.placeholder) input.placeholder = f.placeholder
   if (f.default !== undefined) input.value = String(f.default)

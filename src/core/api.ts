@@ -16,7 +16,7 @@
  */
 
 import type { ConnectionConfig } from './dialect'
-import type { TestConnectionResult, DialectInfo } from './driver'
+import type { TestConnectionResult, DialectInfo, SecretInput } from './driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
@@ -83,7 +83,7 @@ export interface DbStudioApi {
    * 顺序刻意如此——如果先连后存，连接成功但保存失败时用户会以为已经存了；
    * 而先存后连，连不上至少配置还在，用户可以改参数重试。
    */
-  addConnection(config: ConnectionConfig, secret?: string): Promise<ConnectionSummary>
+  addConnection(config: ConnectionConfig, secret?: SecretInput): Promise<ConnectionSummary>
 
   /** 为已保存的连接建立会话（`addConnection` 之后的重新连接走这里）。 */
   connectConnection(connectionId: string): Promise<ConnectionSummary>
@@ -95,7 +95,7 @@ export interface DbStudioApi {
   removeConnection(connectionId: string): Promise<void>
 
   /** 只测连通性，不保存连接。 */
-  testConnection(config: ConnectionConfig, secret?: string): Promise<TestConnectionResult>
+  testConnection(config: ConnectionConfig, secret?: SecretInput): Promise<TestConnectionResult>
 
   /**
    * 列出某个节点的子节点。
@@ -233,7 +233,7 @@ export interface DbStudioApi {
   updateConnection(
     connectionId: string,
     config: Partial<ConnectionConfig>,
-    secret?: string
+    secret?: SecretInput
   ): Promise<ConnectionSummary>
 }
 

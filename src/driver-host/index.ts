@@ -42,9 +42,11 @@ import type {
   RpcMethod,
   RpcRequest,
   RpcResponse,
+  SecretKey,
+  SecretValue,
   TestConnectionResult
 } from '../core/driver'
-import { isRpcResponse, RPC_METHODS } from '../core/driver'
+import { isRpcResponse, normalizeSecret, RPC_METHODS, SECRET_KEYS } from '../core/driver'
 import type {
   ColumnCreateSpec,
   DriverCapabilities,
@@ -197,13 +199,44 @@ function parseConnectionConfig(raw: unknown, method: RpcMethod): ConnectionConfi
   }
 }
 
-/** `secret` 只允许 string / undefined；不允许 null，避免 undefined 与 null 两套语义。 */
-function parseSecret(raw: unknown, method: RpcMethod): string | undefined {
-  if (raw === undefined) return undefined
-  if (typeof raw !== 'string') {
-    throw new RpcFailure('bad_params', `${method}: secret 必须是字符串或省略`)
+/**
+ * 解析 `secret`。
+ *
+ * 允许两种形状：
+ *   - `string`：单机密（数据库口令），向后兼容既有调用方与 SDK 用户；
+ *   - 对象：具名机密，SSH 隧道需要（`dbPassword` / `sshPassword` / `sshPassphrase`）。
+ *
+ * `null` 仍被拒绝——避免 `undefined` 与 `null` 两套"没有值"的语义。
+ *
+ * 校验在**协议边界**做（而不是直接塞给 adapter）：坏形状应该在进入驱动前
+ * 就被拦下，报错里还能带上方法名，比 adapter 深处的
+ * "Cannot read properties of undefined" 好查得多。
+ */
+function parseSecret(raw: unknown, method: RpcMethod): SecretValue {
+  if (raw === undefined) return {}
+  if (typeof raw === 'string') return normalizeSecret(raw)
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new RpcFailure('bad_params', `${method}: secret 必须是字符串、对象或省略`)
   }
-  return raw
+  const obj = raw as Record<string, unknown>
+  const allowed = new Set<string>(SECRET_KEYS)
+  const unknown = Object.keys(obj).find((key) => !allowed.has(key))
+  if (unknown !== undefined) {
+    throw new RpcFailure(
+      'bad_params',
+      `${method}: secret 含未知键 "${unknown}"（允许: ${SECRET_KEYS.join(', ')}）`
+    )
+  }
+  const out: { [K in SecretKey]?: string } = {}
+  for (const key of SECRET_KEYS) {
+    const value = obj[key]
+    if (value === undefined) continue
+    if (typeof value !== 'string') {
+      throw new RpcFailure('bad_params', `${method}: secret.${key} 必须是字符串`)
+    }
+    out[key] = value
+  }
+  return normalizeSecret(out)
 }
 
 function parseParentId(raw: unknown, method: RpcMethod): string | null {

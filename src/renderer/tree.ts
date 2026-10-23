@@ -44,6 +44,7 @@ import {
   type KVStore
 } from './conn-organize'
 import type { DbStudioApi } from '../core/api'
+import type { SecretMap } from '../core/driver'
 import {
   asDdlApi,
   dropTableWithConfirm,
@@ -940,12 +941,8 @@ export class MetadataTree {
   #openEditConnection(node: NodeState): void {
     const api = optionalApi() as
       | (ReturnType<typeof optionalApi> & {
-          updateConnection?: (
-            id: string,
-            cfg: Record<string, unknown>,
-            secret?: string
-          ) => Promise<unknown>
-          listDialects?: () => Promise<Array<{ id: string; fields: ReadonlyArray<{ key: string; label: string; kind: string; required: boolean; placeholder?: string; default?: string | number }> }>>
+          updateConnection?: (id: string, cfg: Record<string, unknown>, secret?: SecretMap) => Promise<unknown>
+          listDialects?: () => Promise<Array<{ id: string; fields: ReadonlyArray<{ key: string; label: string; kind: string; required: boolean; secretKey?: string; placeholder?: string; default?: string | number; choices?: ReadonlyArray<{ value: string; label: string }> }> }>>
         })
       | null
     if (!api || typeof api.updateConnection !== 'function') {
@@ -1030,17 +1027,16 @@ export class MetadataTree {
     }
     document.addEventListener('keydown', onKey)
 
-    // 密码栏（可选：留空表示不修改）
-    const pwdLabel = document.createElement('div')
-    pwdLabel.textContent = '密码（留空表示不修改）'
-    pwdLabel.style.cssText = 'color:var(--fg-dim);margin:10px 0 4px'
-    const pwdInput = document.createElement('input')
-    pwdInput.type = 'password'
-    pwdInput.setAttribute('aria-label', '密码')
-    pwdInput.placeholder = '不修改则留空'
-    pwdInput.style.cssText = inputStyleLocal()
-    panel.appendChild(pwdLabel)
-    panel.appendChild(pwdInput)
+    /**
+     * 凭据输入区。
+     *
+     * 编辑连接时“留空 = 不修改”必须按 key 生效：用户只改 SSH 口令时，
+     * 数据库口令要继续保留。故这里为每个 *当前方言声明的* password 字段
+     * 单独造一个输入框，并把控件 key 记在 dataset 上；保存时只提交非空的。
+     */
+    const secretHost = document.createElement('div')
+    secretHost.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px'
+    panel.appendChild(secretHost)
 
     void (async () => {
       // 拉方言元数据以生成参数输入框
@@ -1050,9 +1046,8 @@ export class MetadataTree {
         const d = dialects.find((x) => x.id === dialectId)
         if (d) {
           for (const f of d.fields) {
-            if (f.kind === 'password') continue // 密码单独一栏，已在上面
             const lab = document.createElement('div')
-            lab.textContent = f.label
+            lab.textContent = f.kind === 'password' ? `${f.label}（留空表示不修改）` : f.label
             lab.style.cssText = 'color:var(--fg-dim);font-size:12px'
             /**
              * `select` 型字段必须造 `<select>`（与 main.ts 的 buildField 一致）。
@@ -1065,7 +1060,12 @@ export class MetadataTree {
                 ? document.createElement('select')
                 : document.createElement('input')
             if (inp instanceof HTMLInputElement) {
-              inp.type = f.kind === 'number' ? 'number' : 'text'
+              inp.type =
+                f.kind === 'password' ? 'password' : f.kind === 'number' ? 'number' : 'text'
+              if (f.kind === 'password') {
+                inp.dataset['secretKey'] = f.secretKey ?? 'dbPassword'
+                inp.placeholder = '不修改则留空'
+              }
             } else {
               for (const c of f.choices ?? []) {
                 const opt = document.createElement('option')
@@ -1084,7 +1084,7 @@ export class MetadataTree {
             inp.style.cssText = inputStyleLocal()
             const wrap = document.createElement('div')
             wrap.append(lab, inp)
-            paramHost.appendChild(wrap)
+            ;(f.kind === 'password' ? secretHost : paramHost).appendChild(wrap)
           }
         }
       } catch {
@@ -1113,7 +1113,19 @@ export class MetadataTree {
           for (const inp of paramInputs) {
             const key = inp.dataset['key']
             const raw = inp.value.trim()
-            if (key && raw !== '') {
+            if (!key) continue
+            /*
+             * 空值必须显式提交，才能清空已有 option（例如把 sshHost 清空来关闭隧道）。
+             * 早先这里跳过空值，用户删掉字段后保存，磁盘上旧值仍原样保留，
+             * 表现为“看起来关掉了 SSH，重连却还在走跳板机”。
+             *
+             * 唯一例外是 number：空字符串不是合法数字，提交空串会污染配置，
+             * 且这些字段的默认值由驱动在读取时补齐（如端口 5432/22）。
+             */
+            if (raw === '') {
+              if (inp instanceof HTMLInputElement && inp.type === 'number') continue
+              opts[key] = ''
+            } else {
               // 只有 number 输入框才转数字；<select> 永远提交字符串。
               opts[key] = inp instanceof HTMLInputElement && inp.type === 'number' ? Number(raw) : raw
             }
@@ -1125,10 +1137,23 @@ export class MetadataTree {
           }
           if (Object.keys(opts).length > 0) cfg['options'] = opts
 
-          const secret = pwdInput.value.trim()
+          const secret: {
+            dbPassword?: string
+            sshPassword?: string
+            sshPassphrase?: string
+          } = {}
+          for (const input of secretHost.querySelectorAll<HTMLInputElement>(
+            'input[data-secret-key]'
+          )) {
+            const key = input.dataset['secretKey']
+            const value = input.value.trim()
+            if (key !== undefined && value !== '') {
+              secret[key as keyof typeof secret] = value
+            }
+          }
           const fn = api.updateConnection
           if (typeof fn !== 'function') throw new Error('updateConnection 不可用')
-          await fn(connId, cfg, secret === '' ? undefined : secret)
+          await fn(connId, cfg, Object.keys(secret).length === 0 ? undefined : secret)
 
           close()
           document.removeEventListener('keydown', onKey)

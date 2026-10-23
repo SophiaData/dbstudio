@@ -45,6 +45,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import type { Duplex } from 'node:stream'
 import { Client } from 'pg'
 
 /** libpq 的 sslmode 取值。 */
@@ -202,6 +203,16 @@ export interface OpenClientOptions {
   readonly connectionTimeoutMillis: number
   /** `application_name`，便于 DBA 在 pg_stat_activity 里识别。 */
   readonly applicationName: string
+  /**
+   * 打开底层传输。缺省时由 `pg` 自己建 TCP 连接（直连）。
+   *
+   * 传了它就等同于"走 SSH 隧道"：本项目在隧道里拿到的是一条已连接的 channel，
+   * 交给 `pg` 的 `stream` 选项后，SSL 握手仍会在这条流上正常进行
+   * （TLS 只关心字节流，不关心下面是 TCP 还是 SSH 通道）。
+   *
+   * 每次尝试都重新调用：prefer 模式失败要回退时，上一条流的重试需要新通道。
+   */
+  readonly openStream?: () => Promise<Duplex>
 }
 
 /**
@@ -214,6 +225,19 @@ export interface OpenClientOptions {
 export async function openClient(options: OpenClientOptions): Promise<Client> {
   let firstError: unknown = null
   for (const attempt of options.attempts) {
+    /**
+     * 隧道模式下先拿流、再交给 pg。流建立失败属于**传输层**问题，
+     * 与 sslmode 无关——此时不应继续尝试下一种 sslmode（那只会重复失败），
+     * 所以直接抛出去。
+     */
+    /**
+     * 注意 `pg` 的 `stream` 选项是**函数**（`() => Duplex`），不是 Duplex 实例。
+     * 直接传实例会编译失败；传一个返回实例的函数才两边都对。
+     *
+     * 我们的 `openStream` 是异步的（要先等 SSH channel），
+     * 所以先 await 拿到实例，再包成一个同步工厂交给 pg。
+     */
+    const stream = options.openStream === undefined ? undefined : await options.openStream()
     const client = new Client({
       host: options.host,
       port: options.port,
@@ -222,22 +246,37 @@ export async function openClient(options: OpenClientOptions): Promise<Client> {
       password: options.password,
       ssl: attempt.ssl,
       connectionTimeoutMillis: options.connectionTimeoutMillis,
-      application_name: options.applicationName
+      application_name: options.applicationName,
+      ...(stream === undefined ? {} : { stream: () => stream })
     })
     try {
       await client.connect()
       return client
     } catch (thrown) {
       if (firstError === null) firstError = thrown
-      // 确保失败后句柄不残留。
-      try {
-        await client.end()
-      } catch {
-        // 忽略：连接本就没建立
-      }
+      /*
+       * 清理失败尝试的句柄。
+       *
+       * `end()` 在“connect 都没成功”时也可能挂起或再抛错：此时 pg 内部
+       * 没有进入 ended 状态。timeout 兜底是为了不让 fallback 被一次坏连接的
+       * 清理拖死；真正的原始错误仍然优先抛出。
+       */
+      await endQuietly(client)
       const canFallback = attempt.shouldFallback?.(thrown) === true
       if (!canFallback) throw thrown
     }
   }
   throw firstError ?? new Error('无法建立 PostgreSQL 连接')
+}
+
+/** 尽力关闭客户端；失败与超时都静默，调用方处在上报原始错误的路径上。 */
+async function endQuietly(client: Client, timeoutMs = 1000): Promise<void> {
+  try {
+    await Promise.race([
+      client.end().catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
+    ])
+  } catch {
+    // ignore：原始连接错误更重要
+  }
 }

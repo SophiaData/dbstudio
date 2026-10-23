@@ -454,6 +454,65 @@ async function main() {
     const shape = await host.call('describeTable', { id: 'table:public.pg_users' })
     const serializable = JSON.stringify(shape.result) === JSON.stringify(JSON.parse(JSON.stringify(shape.result)))
     check('22a. describeTable 返回值是纯数据（可 JSON 序列化，无函数/句柄泄漏到协议）', shape.ok === true && serializable, formatDetail(shape.result?.columns?.length))
+
+    // ---- disconnect 必须显式回滚未提交事务 ----
+    //
+    // 只验证最终数据也能通过“宿主进程退出时数据库自动回滚”，无法区分
+    // 显式 ROLLBACK 是否真的发出。这里对**仍存活的宿主**发 disconnect，
+    // 再开一条独立 PG 连接读取数据，验证 disconnect 返回时改动已经撤销。
+    const txnUpdate = await host.call('applyEdits', {
+      tableId: 'table:public.pg_users',
+      updates: [
+        {
+          keyValues: { id: { kind: 'number', value: 1 } },
+          changes: { email: { kind: 'text', text: 'disconnect-rollback@example.com' } }
+        }
+      ]
+    })
+    check(
+      '23. ★ disconnect 前修改成功并进入事务',
+      txnUpdate.ok === true && txnUpdate.result?.inTransaction === true,
+      formatDetail(txnUpdate.ok ? txnUpdate.result : txnUpdate.error)
+    )
+    const disconnected = await host.call('disconnect', {})
+    check('23a. disconnect 成功', disconnected.ok === true, formatDetail(disconnected.error))
+
+    const verifier = launchHost(['--dialect', 'postgresql'])
+    try {
+      await verifier.waitForEvent((f) => f.kind === 'handshake')
+      const verifierConnect = await verifier.call('connect', {
+        config: {
+          dialectId: 'postgresql',
+          name: 'pg-disconnect-verifier',
+          options: {
+            host: info.host,
+            port: info.port,
+            database: info.database,
+            user: info.user
+          }
+        },
+        secret: info.password
+      })
+      const afterDisconnect = await verifier.call('query', {
+        sql: 'SELECT email FROM public.pg_users WHERE id = 1',
+        options: { keepCursor: false }
+      })
+      const emailAfterDisconnect = afterDisconnect.result?.rows?.[0]?.cells?.[0]?.text
+      check(
+        '23b. ★★ disconnect 显式回滚：独立连接读回原值（不是等进程退出才兜底）',
+        verifierConnect.ok === true &&
+          afterDisconnect.ok === true &&
+          emailAfterDisconnect === emailBefore,
+        formatDetail({
+          connect: verifierConnect.error,
+          query: afterDisconnect.error,
+          emailBefore,
+          emailAfterDisconnect
+        })
+      )
+    } finally {
+      await verifier.close()
+    }
   } catch (err) {
     check('脚本执行未抛异常', false, err instanceof Error ? err.message : String(err))
     if (host.stderrText) console.log(`      stderr: ${host.stderrText.slice(-800)}`)
