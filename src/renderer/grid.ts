@@ -1636,8 +1636,7 @@ export class ResultGrid implements TransactionParticipant {
           const res = await fn(tableId, values)
           close()
           this.#cb.onStatus(`已插入 ${res.affected} 行（未提交，点「提交」生效）`)
-          await this.reload()
-          await this.#refreshTransactionState()
+          await this.#notifyConnectionMutation()
         } catch (e) {
           this.#cb.onStatus(`插入失败：${errText(e)}`, true)
         } finally {
@@ -1715,11 +1714,36 @@ export class ResultGrid implements TransactionParticipant {
       }
       this.#selectedRow = -1
       this.#cb.onStatus(`已删除 ${res.affected} 行（未提交，点「提交」生效）`)
-      await this.reload()
-      await this.#refreshTransactionState()
+      await this.#notifyConnectionMutation()
     } catch (e) {
       this.#cb.onStatus(`删除失败：${errText(e)}`, true)
     }
+  }
+
+  /**
+   * 插入/删除之后通知**连接级**控制器。
+   *
+   * ===== 为什么不能只刷新自己 =====
+   *
+   * 事务是连接级的：一次 INSERT 会让同一连接上**所有**标签的
+   * 「未提交改动」提示与数据都过期。早先这里只 `reload()` 自己，
+   * 于是另一个标签仍显示旧数据、也看不到「提交」按钮变亮——
+   * 用户会以为改动没生效，或者在另一个标签点提交时才发现有事务。
+   *
+   * `notifyMutation` 会把新的事务状态广播给所有参与者，并刷新它们的网格。
+   *
+   * 为什么不用 `reload()`：它走的是「用户主动重新加载」的路径，
+   * 会先问「本地未应用编辑怎么处理」。而插入/删除**已经**进了事务，
+   * 此时不该再问一次——要问的是"这些本地编辑要不要一起应用"。
+   */
+  async #notifyConnectionMutation(): Promise<void> {
+    if (this.#txController) {
+      await this.#txController.notifyMutation(this)
+      return
+    }
+    // 没有控制器（不该发生，但别让界面卡在旧数据上）。
+    await this.reload()
+    await this.#refreshTransactionState()
   }
 
   async #refreshTransactionState(): Promise<void> {

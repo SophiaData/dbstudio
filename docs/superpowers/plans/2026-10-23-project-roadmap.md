@@ -19,6 +19,7 @@
 | T3 连接级事务 | ✅ 完成 | `tests/gui-transaction-lifecycle.mjs` 36/36：离开保护、取消不关闭、丢弃不改数据、连接级状态同步、退出前询问 |
 | T4 连接故障恢复 | ✅ 完成 | `tests/e2e-connection-lifecycle.mjs` 3/3：宿主异常退出、并发建连去重、无 cipher 临时凭据 |
 | T5 导出完整性 | ✅ 完成 | `tests/gui-export-integrity.mjs` 13/13：截断文本三条导出路径全部拒绝，且不产出文件 |
+| T3 增删改事务归属 | ✅ 完成 | `tests/gui-mutation-transaction.mjs` 19/19：INSERT/DELETE 后同连接其他标签同步事务状态与数据；未提交不入盘、回滚可撤销 |
 | T6 文档同步 | 🔶 大部分完成 | README 的查询编辑器范围与 SDK 三层能力分层已补；M1 执行结果契约已写（见下），待单独成实现计划 |
 | 统一验证清单 | ✅ 完成 | `scripts/verify-manifest.mjs` 为唯一真相，`scripts/verify.mjs` 按分组执行；CI 与本地共用。`tests/e2e-verify-manifest.mjs` 46/46 防漂移 |
 | 发布门禁（版本） | ✅ 完成 | `release.yml` 打包前校验 tag 与 `package.json` 一致，不一致直接失败 |
@@ -36,14 +37,20 @@
 - **退出应用时未提交事务被静默回滚。**主进程 `before-quit` 直接 `disposeAll` 杀宿主，
   用户的未提交改动无声消失。已接入渲染进程询问钩子（`window.dbstudioGuardTransactions`），
   并加了 60 秒超时兜底——渲染进程卡死时不能变成「应用永远退不出去」。
+- **INSERT / DELETE 后同连接的其他标签不更新。**`transaction-controller.ts` 里
+  早就定义了 `notifyMutation`，但**从未被调用**——插入/删除只刷新了当前网格。
+  结果是：同一连接开两个标签，在 A 标签插入后，B 标签仍显示旧数据、
+  「提交」按钮也不亮。已改为走连接级控制器广播（`grid.ts` 的
+  `#notifyConnectionMutation`）。这条 bug 是新写的测试首次运行时暴露的。
 
 **尚未验证/仍存在的缺口：**
 
 - PostgreSQL、PG SSL、SSH 隧道三组测试**本地未跑**（缺 `DBSTUDIO_PG_URL` /
   `DBSTUDIO_PG_SSL_URL` / `DBSTUDIO_PG_PLAIN_URL`）。CI 里有真实 PG 容器与 sshd，
   但本地结论不能替代 CI 结论。
-- 事务状态模型的 UPDATE / INSERT / DELETE 三条路径只覆盖了 UPDATE；
-  INSERT/DELETE 沿用既有 `insertRow`/`deleteRows` 链路，未单独做事务归属用例。
+- 事务状态模型的 UPDATE / INSERT / DELETE 三条路径现在都有用例了，但
+  **不同连接两标签的隔离矩阵**仍未单独验证（只验证了「一个宿主退出不影响
+  其他连接」）。
 - 不同连接的隔离只做了「一个宿主退出不影响其他连接」，未做「同连接两标签 vs 不同连接两标签」
   的完整矩阵。
 - M2 的完整字段导出仍是任务，不是承诺：当前对截断字段**拒绝导出**而不是导出全文。

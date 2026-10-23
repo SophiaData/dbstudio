@@ -53,7 +53,8 @@
     "test:gui-sql-library": "node tests/gui-sql-library.mjs",
     "test:gui-tab-context": "node tests/gui-tab-context.mjs",
     "test:gui-export-integrity": "node tests/gui-export-integrity.mjs",
-    "test:gui-transaction-lifecycle": "node tests/gui-transaction-lifecycle.mjs"
+    "test:gui-transaction-lifecycle": "node tests/gui-transaction-lifecycle.mjs",
+    "test:gui-mutation-transaction": "node tests/gui-mutation-transaction.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

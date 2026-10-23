@@ -72,6 +72,7 @@ export const STEPS = [
   { id: 'test:gui-tab-context', title: '多标签上下文 GUI（导出/筛选跟随）', group: 'gui' },
   { id: 'test:gui-export-integrity', title: '导出完整性 GUI（截断拒绝导出）', group: 'gui' },
   { id: 'test:gui-transaction-lifecycle', title: '事务生命周期 GUI（离开保护/提交/回滚）', group: 'gui' },
+  { id: 'test:gui-mutation-transaction', title: '增删改的事务归属 GUI（跨标签同步）', group: 'gui' },
 
   // ---- 需要外部服务 ----
   {
