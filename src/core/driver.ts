@@ -143,7 +143,49 @@ export function mergeSecrets(base: SecretMap, patch: SecretInput): SecretValue {
   return out
 }
 
-/** 连接探测结果。 */
+/**
+ * 连接测试的单个阶段。
+ *
+ * 阶段只描述「用户需要排查的边界」，不绑定某个具体驱动：
+ * SQLite 只会用到 config / server_query，PostgreSQL 还可以经过 SSH 与数据库。
+ */
+export type ConnectionTestStage =
+  | 'config'
+  | 'ssh_connect'
+  | 'ssh_host_key'
+  | 'ssh_auth'
+  | 'ssh_forward'
+  | 'database'
+  | 'server_query'
+
+/** 一个阶段的诊断结果。 */
+export interface ConnectionTestCheck {
+  readonly stage: ConnectionTestStage
+  readonly status: 'passed' | 'failed' | 'skipped'
+  readonly message?: string
+  readonly elapsedMs?: number
+}
+
+/**
+ * SSH 主机密钥检查结果。
+ *
+ * `unverified` 表示首次连接、尚未保存指纹；`mismatch` 表示已有指纹但本次
+ * 拿到的值不同。两者的风险与用户动作完全不同，不能都叫「验证失败」。
+ */
+export interface SshHostKeyCheck {
+  readonly host: string
+  readonly port: number
+  readonly fingerprint: string
+  readonly expectedFingerprint?: string
+  readonly state: 'unverified' | 'mismatch'
+}
+
+/**
+ * 驱动测试连接的完整结果。
+ *
+ * `checks` 只是展示性的诊断，不是调用方必须理解的协议状态机；
+ * 决定成败的仍然只有 `ok`。
+ */
 export interface TestConnectionResult {
   readonly ok: boolean
   /** 失败原因；成功时为 undefined。 */
@@ -152,6 +194,13 @@ export interface TestConnectionResult {
   readonly elapsedMs: number
   /** 连上后探测到的服务端信息，如 `SQLite 3.51.0`。 */
   readonly serverVersion?: string
+  /**
+   * 分段诊断。为兼容既有 SDK 调用方，驱动可以不返回；
+   * 新驱动应尽量返回，让 UI 能指出到底卡在 SSH、数据库还是探测查询。
+   */
+  readonly checks?: readonly ConnectionTestCheck[]
+  /** SSH 主机密钥需要用户处理时返回；普通连接失败不返回。 */
+  readonly sshHostKey?: SshHostKeyCheck
 }
 
 /**

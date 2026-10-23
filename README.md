@@ -189,7 +189,7 @@ pnpm verify      # 二十四段全链（含 8 段 GUI；PG / SSL / SSH 无环境
 | 10 | `test:postgres` | PG e2e **45/45**（真实 PG 17.11；无环境时自动跳过） |
 | 11 | `test:cancel` | 取消能力 **15/15**：PG 真取消（516ms 中断 10s 慢查询）/ SQLite 如实不支持 |
 | 12 | `test:postgres-ssl` | SSL **23/23**：6 种 sslmode 的加密/校验语义 + 错误 CA 真被拒 + SSL 连接上取消真生效 |
-| 13 | `test:ssh-tunnel` | SSH **13/13**（真实 sshd + PG）：首次指纹确认 / 错误指纹拒绝 / 未授权私钥 / 隧道 SQL / 取消 |
+| 13 | `test:ssh-tunnel` | SSH **21/21**（真实 sshd + PG）：结构化分段诊断 / 首次指纹确认 / 指纹变化 / 未授权私钥 / 隧道 SQL / 取消 |
 | 14 | `test:gui-layout` | 布局持久化 GUI 测试 **20/20**：拖列宽/排序落进 localStorage、重开表恢复、重置回默认 |
 | 15 | `test:electron` | **19/19**，在 Electron 内置 Node 下验证运行时形态 |
 | 16 | `test:gui` | 真实启动窗口，从渲染进程取 DOM 确认 API 注入与 safeStorage 往返 |
@@ -200,7 +200,7 @@ pnpm verify      # 二十四段全链（含 8 段 GUI；PG / SSL / SSH 无环境
 | 21 | `test:gui-round3` | 真实点击验证：多标签页 / DDL 对话框 / 编辑连接 |
 | 22 | `test:gui-sql` | 真实点击验证 SQL 编辑器：高亮 / 多语句 / 执行计划 / 格式化 |
 | 23 | `test:gui-ssl-form` | SSL 表单 **7/7**：sslmode 是 select 而非文本框、默认 prefer、提交值原样落盘 |
-| 24 | `test:gui-ssh-form` | SSH 表单 **17/17**：三个独立密码框 / 配置不含明文 / 编辑时能清空 `sshHost` 关闭隧道 |
+| 24 | `test:gui-ssh-form` | SSH 表单 **20/20**：三个独立密码框 / 指纹确认后自动重试 / 连接失败不假报成功 / 编辑时能清空 `sshHost` |
 
 单独跑：
 
@@ -315,10 +315,14 @@ commitTransaction → 落库
 
 1. 没有预置 `sshHostKeySha256` 时，连接被拒绝，错误里带实际
    `SHA256:...` 指纹（与 `ssh-keygen -lf` 同格式）；
-2. 用户核对后把指纹填回配置，之后指纹不一致会明确报“可能是中间人攻击，
-   或跳板机重装过”；
+2. 新连接界面会弹出独立确认框展示 SSH 主机、端口与实际指纹，用户确认后
+   写回 `sshHostKeySha256` 并自动重试；已保存指纹不一致时同时展示期望值与
+   实际值，并明确警告“可能是中间人攻击，或跳板机重装过”；
 3. 私钥只读文件路径，私钥口令/SSH 登录口令/数据库口令分别存放，
    不会拼成一个字符串，也不会进入 `connections.json`。
+
+`testConnection` 还会返回 `checks` 分段结果（配置解析、SSH 握手、主机指纹、
+SSH 认证、SSH 转发、数据库连接、服务端查询），失败时 UI 能直接指出停在哪一步。
 
 实测踩到的一个协议坑：`pg` 把 `stream` 当 `net.Socket` 用，会调
 `setNoDelay` / `setKeepAlive` / `connect`，而 ssh2 的 channel 是普通

@@ -122,6 +122,17 @@
           <select id="f-dialect" required></select>
         </label>
         <div id="f-dynamic"></div>
+        <section id="test-diagnostics" class="test-diagnostics" hidden aria-live="polite">
+          <div class="test-diagnostics-head">
+            <span id="test-diagnostics-title">连接诊断</span>
+            <span id="test-diagnostics-elapsed"></span>
+          </div>
+          <ol id="test-check-list" class="test-check-list"></ol>
+          <div id="test-message" class="test-message" hidden>
+            <p id="test-message-text"></p>
+            <button id="btn-test-trust-host" type="button" hidden>核对指纹并信任…</button>
+          </div>
+        </section>
         <p id="f-error" class="error" hidden></p>
         <menu>
           <button id="btn-cancel" type="button" value="cancel">取消</button>
@@ -129,6 +140,34 @@
           <button id="btn-submit" type="submit">连接</button>
         </menu>
       </form>
+    </dialog>
+
+    <!-- SSH 首次连接 / 指纹变化确认。独立于连接表单，避免用 alert 拼文本。 -->
+    <dialog id="dlg-ssh-host-key" class="confirm-dialog">
+      <div class="confirm-body">
+        <h2 id="ssh-key-title">确认 SSH 主机密钥</h2>
+        <p id="ssh-key-warning" class="confirm-warning" hidden></p>
+        <p id="ssh-key-intro" class="confirm-intro"></p>
+        <dl class="fingerprint-details">
+          <div>
+            <dt>SSH 主机</dt>
+            <dd id="ssh-key-host"></dd>
+          </div>
+          <div id="ssh-key-expected-row" hidden>
+            <dt>已保存指纹</dt>
+            <dd id="ssh-key-expected" class="fingerprint"></dd>
+          </div>
+          <div>
+            <dt id="ssh-key-actual-label">实际指纹</dt>
+            <dd id="ssh-key-actual" class="fingerprint"></dd>
+          </div>
+        </dl>
+        <p id="ssh-key-guidance" class="confirm-guidance"></p>
+        <menu>
+          <button id="btn-ssh-key-cancel" type="button">取消</button>
+          <button id="btn-ssh-key-trust" type="button">信任并继续</button>
+        </menu>
+      </div>
     </dialog>
 
     <script type="module" src="./main.ts"></script>

@@ -84,6 +84,7 @@ export interface SshCredentials {
 export type SshErrorCode =
   | 'ssh_auth_failed'
   | 'ssh_host_unverified'
+  | 'ssh_host_key_mismatch'
   | 'ssh_connect_failed'
   | 'ssh_forward_failed'
   | 'ssh_missing_credentials'
@@ -92,12 +93,20 @@ export class SshTunnelError extends Error {
   readonly code: SshErrorCode
   /** `ssh_host_unverified` 时带上实际指纹，供 UI 展示给用户确认。 */
   readonly hostKeySha256?: string
+  /** 本客户端配置里原本信任的指纹；首次连接时为 undefined。 */
+  readonly expectedHostKeySha256?: string
 
-  constructor(code: SshErrorCode, message: string, hostKeySha256?: string) {
+  constructor(
+    code: SshErrorCode,
+    message: string,
+    hostKeySha256?: string,
+    expectedHostKeySha256?: string
+  ) {
     super(message)
     this.name = 'SshTunnelError'
     this.code = code
     if (hostKeySha256 !== undefined) this.hostKeySha256 = hostKeySha256
+    if (expectedHostKeySha256 !== undefined) this.expectedHostKeySha256 = expectedHostKeySha256
   }
 }
 
@@ -248,6 +257,15 @@ export function openSshTunnel(config: SshTunnelConfig, credentials: SshCredentia
       fail(new SshTunnelError('ssh_connect_failed', `SSH 连接失败：${message}`))
     })
 
+    /**
+     * `error` 不保证覆盖所有失败：sshd 在 KEX 阶段直接断开时，ssh2 往往只发
+     * `close`，最终表现为一个没有上下文的 ECONNRESET。这里把“还没 ready 就
+     * close”收口成明确的连接失败，而不是让 Promise 悬着或让上层猜阶段。
+     */
+    client.on('close', () => {
+      fail(new SshTunnelError('ssh_connect_failed', 'SSH 连接被对端关闭（尚未完成握手）'))
+    })
+
     client.connect({
       host: config.host,
       port: config.port,
@@ -271,10 +289,11 @@ export function openSshTunnel(config: SshTunnelConfig, credentials: SshCredentia
         }
         if (config.hostKeySha256 !== fingerprint) {
           pendingHostKeyError = new SshTunnelError(
-            'ssh_host_unverified',
+            'ssh_host_key_mismatch',
             `SSH 主机密钥与已保存的不一致（可能是中间人攻击，或跳板机重装过）。` +
               `期望 ${config.hostKeySha256}，实际 ${fingerprint}`,
-            fingerprint
+            fingerprint,
+            config.hostKeySha256
           )
           return false
         }

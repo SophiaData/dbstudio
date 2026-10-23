@@ -235,6 +235,21 @@ async function sshReachable() {
   })
 }
 
+/** 对限速造成的临时 ECONNRESET 做有上限的退避，避免测试随机红。 */
+async function withSshRateLimitRetry(run, attempts = 5) {
+  let last
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const result = await run()
+    const message = String(
+      result?.error ?? result?.frame?.error?.message ?? result?.result?.message ?? ''
+    )
+    if (!message.includes('ECONNRESET') && !message.includes('connect_timeout')) return result
+    last = result
+    await new Promise((resolve) => setTimeout(resolve, 2500 * (attempt + 1)))
+  }
+  return last
+}
+
 function baseOptions(extra = {}) {
   return {
     host: pg.host,
@@ -269,7 +284,7 @@ async function tryConnect({ options, secret, timeoutMs = 30000 }) {
       },
       timeoutMs
     )
-    return { ok: frame.ok === true, frame, error: frame.error }
+    return { ok: frame.ok === true, frame, error: frame.error?.message }
   } catch (err) {
     return { ok: false, error: String(err instanceof Error ? err.message : err), host }
   } finally {
@@ -282,10 +297,38 @@ async function tryConnect({ options, secret, timeoutMs = 30000 }) {
   }
 }
 
-/** 从错误消息里提取指纹（协议错误是字符串，不携带结构化字段）。 */
-function extractFingerprint(frame) {
-  const text = String(frame?.error?.message ?? '')
-  return /(SHA256:[A-Za-z0-9+/]+)/.exec(text)?.[1]
+/**
+ * 直接调用只测连通道。与 `connect` 不同，它返回结构化诊断，
+ * 也是新连接对话框实际使用的路径。
+ */
+async function tryTestConnection({ options, secret, timeoutMs = 30000 }) {
+  const host = launch()
+  try {
+    await host.waitFor((f) => f.kind === 'handshake')
+    const frame = await host.call(
+      'testConnection',
+      {
+        config: { dialectId: 'postgresql', name: 'ssh-probe', options },
+        secret
+      },
+      timeoutMs
+    )
+    return {
+      rpcOk: frame.ok === true,
+      ok: frame.ok === true && frame.result?.ok === true,
+      frame,
+      result: frame.result,
+      error: frame.error?.message
+    }
+  } catch (err) {
+    return { ok: false, error: String(err instanceof Error ? err.message : err), host }
+  } finally {
+    await host.close()
+  }
+}
+
+function stageOf(result, stage) {
+  return result?.checks?.find((check) => check.stage === stage)
 }
 
 async function main() {
@@ -307,11 +350,14 @@ async function main() {
   // ---- 1. 首次连接：没有主机指纹必须拒绝，并返回指纹 ----
   {
     console.log('\n[1] 主机密钥确认（不做 TOFU）')
-    const first = await tryConnect({
-      options: baseOptions(),
-      secret: { dbPassword: pg.password }
-    })
-    const got = extractFingerprint(first.frame)
+    const first = await withSshRateLimitRetry(() =>
+      tryConnect({
+        options: baseOptions(),
+        secret: { dbPassword: pg.password }
+      })
+    )
+    const text = String(first.frame?.error?.message ?? '')
+    const got = /(SHA256:[A-Za-z0-9+/]+)/.exec(text)?.[1]
     check('1a. ★ 未预置主机指纹时拒绝连接', first.ok === false, first.error)
     check('1b. ★ 错误码是 connection_failed（协议层保留可读原因）', first.frame?.error?.code === 'connection_failed', first.frame?.error)
     check('1c. ★ 拒绝时返回实际 SHA256 指纹供用户确认', typeof got === 'string' && got.startsWith('SHA256:'), first.frame?.error)
@@ -320,21 +366,90 @@ async function main() {
     }
   }
 
+  // ---- 1b. testConnection：结构化诊断与指纹确认数据 ----
+  {
+    console.log('\n[1b] testConnection 结构化诊断')
+    const first = await withSshRateLimitRetry(() =>
+      tryTestConnection({
+        options: baseOptions(),
+        secret: { dbPassword: pg.password }
+      })
+    )
+    check('1e. ★ 未确认主机时 testConnection 返回 ok=false', first.ok === false, first.error)
+    check(
+      '1f. ★ 返回 state=unverified 的实际主机指纹',
+      first.result?.sshHostKey?.state === 'unverified' &&
+        first.result.sshHostKey.host === SSH_HOST &&
+        first.result.sshHostKey.port === SSH_PORT &&
+        typeof first.result.sshHostKey.fingerprint === 'string' &&
+        first.result.sshHostKey.fingerprint.startsWith('SHA256:'),
+      first.result?.sshHostKey
+    )
+    check(
+      '1g. ★ 分段诊断明确指出失败在主机指纹阶段',
+      stageOf(first.result, 'config')?.status === 'passed' &&
+        stageOf(first.result, 'ssh_host_key')?.status === 'failed',
+      first.result?.checks
+    )
+    if (expectedFingerprint) {
+      check(
+        '1h. testConnection 指纹也与 ssh-keygen 一致',
+        first.result?.sshHostKey?.fingerprint === expectedFingerprint,
+        { got: first.result?.sshHostKey?.fingerprint, expectedFingerprint }
+      )
+    }
+
+    const trusted = await withSshRateLimitRetry(() =>
+      tryTestConnection({
+        options: baseOptions(
+          expectedFingerprint === undefined ? {} : { sshHostKeySha256: expectedFingerprint }
+        ),
+        secret: { dbPassword: pg.password }
+      })
+    )
+    check('1i. ★ 正确指纹下 testConnection 成功', trusted.ok === true, trusted.error)
+    check(
+      '1j. ★ 成功诊断覆盖 SSH/数据库/探测查询',
+      ['config', 'ssh_connect', 'ssh_host_key', 'ssh_auth', 'ssh_forward', 'database', 'server_query']
+        .every((stage) => stageOf(trusted.result, stage)?.status === 'passed'),
+      trusted.result?.checks
+    )
+  }
+
   // ---- 2. 错误指纹：必须拒绝（反向断言） ----
   {
     console.log('\n[2] 错误指纹必须拒绝')
-    const bad = await tryConnect({
-      options: baseOptions({
-        sshHostKeySha256: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-      }),
-      secret: { dbPassword: pg.password }
-    })
+    const bad = await withSshRateLimitRetry(() =>
+      tryConnect({
+        options: baseOptions({
+          sshHostKeySha256: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        }),
+        secret: { dbPassword: pg.password }
+      })
+    )
     check('2a. ★ 指纹不匹配时连接失败', bad.ok === false, bad.error)
     check(
       '2b. 错误信息提示可能是中间人攻击或跳板机重装',
       String(bad.frame?.error?.message ?? '').includes('中间人') ||
         String(bad.frame?.error?.message ?? '').includes('不一致'),
       bad.frame?.error
+    )
+    const mismatched = await withSshRateLimitRetry(() =>
+      tryTestConnection({
+        options: baseOptions({
+          sshHostKeySha256: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        }),
+        secret: { dbPassword: pg.password }
+      })
+    )
+    check(
+      '2c. ★ testConnection 区分 mismatch 并带回期望/实际指纹',
+      mismatched.result?.sshHostKey?.state === 'mismatch' &&
+        mismatched.result.sshHostKey.fingerprint.startsWith('SHA256:') &&
+        mismatched.result.sshHostKey.expectedFingerprint ===
+          'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' &&
+        stageOf(mismatched.result, 'ssh_host_key')?.status === 'failed',
+      mismatched.result?.sshHostKey ?? mismatched.error
     )
   }
 
@@ -355,18 +470,35 @@ async function main() {
       }
     }
     if (hasWrongKey) {
-      const bad = await tryConnect({
-        options: baseOptions({
-          sshPrivateKey: wrongKey,
-          ...(expectedFingerprint === undefined ? {} : { sshHostKeySha256: expectedFingerprint })
-        }),
-        secret: { dbPassword: pg.password }
-      })
+      const bad = await withSshRateLimitRetry(() =>
+        tryConnect({
+          options: baseOptions({
+            sshPrivateKey: wrongKey,
+            ...(expectedFingerprint === undefined ? {} : { sshHostKeySha256: expectedFingerprint })
+          }),
+          secret: { dbPassword: pg.password }
+        })
+      )
       check('3a. ★ 未授权私钥导致认证失败', bad.ok === false, bad.error)
       check(
         '3b. 错误信息区分认证失败，而不是笼统的连接失败',
         String(bad.frame?.error?.message ?? '').includes('认证失败'),
         bad.frame?.error
+      )
+      const auth = await withSshRateLimitRetry(() =>
+        tryTestConnection({
+          options: baseOptions({
+            sshPrivateKey: wrongKey,
+            ...(expectedFingerprint === undefined ? {} : { sshHostKeySha256: expectedFingerprint })
+          }),
+          secret: { dbPassword: pg.password }
+        })
+      )
+      check(
+        '3c. ★ testConnection 把认证失败归到 ssh_auth 阶段',
+        stageOf(auth.result, 'ssh_auth')?.status === 'failed' &&
+          auth.result.sshHostKey === undefined,
+        auth.result?.checks ?? auth.error
       )
     } else {
       skip('3. SSH 认证失败反证', '无法生成临时未授权密钥')

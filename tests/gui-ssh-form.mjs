@@ -34,7 +34,7 @@ const check = (name, cond, detail = '') => {
     console.log(`  ✅ ${name}`)
   } else {
     fail++
-    console.log(`  ❌ ${name}${detail ? ` — ${detail}` : ''}`)
+    console.log(`  ❌ ${name}${detail ? ` - ${detail}` : ''}`)
   }
 }
 
@@ -75,10 +75,95 @@ check(
   passwordKeys.join(',')
 )
 
+/**
+ * 用主进程 IPC 的确定性替身验证 UI 闭环：首次未知指纹 → 弹确认框 →
+ * 用户确认 → 指纹写回表单 → 自动重试。这里不 mock 渲染层函数，
+ * 点击、对话框、自动重试走的都是生产代码。
+ *
+ * 注意：这是唯一一处直接操作 Electron 私有 `_invokeHandlers` 的地方。
+ * 原因是 contextBridge 暴露的 API 被冻结，而本项目又没有为测试开放的
+ * “强制未知指纹”环境变量。未来若新增测试注入点，应优先替换掉它。
+ */
+await app.evaluate(({ ipcMain }) => {
+  globalThis.__dbstudioTestCalls = 0
+  /**
+   * Playwright 的主进程 eval 上下文拿不到 registerIpc 当初注册的那个 handler，
+   * 对 `_invokeHandlers` 做赋值会被 Electron 的内部代理吞掉。直接改
+   * ipcMain 的内置映射是目前唯一能在真实 preload/IPC 路径上替换单通道的方法；
+   * 调用签名与 Electron 的 handle() 完全一致。
+   */
+  const invokeHandlers = ipcMain._invokeHandlers
+  invokeHandlers.set('dbstudio:testConnection', async (_event, config) => {
+    globalThis.__dbstudioTestCalls += 1
+    if (globalThis.__dbstudioTestCalls === 1) {
+      return {
+        ok: false,
+        message: '首次连接该 SSH 主机，需要确认主机密钥指纹：SHA256:ui-test',
+        elapsedMs: 9,
+        checks: [
+          { stage: 'config', status: 'passed', message: '连接参数解析通过' },
+          { stage: 'ssh_host_key', status: 'failed', message: '等待用户确认主机指纹' }
+        ],
+        sshHostKey: {
+          host: String(config.options.sshHost),
+          port: Number(config.options.sshPort),
+          fingerprint: 'SHA256:ui-test',
+          state: 'unverified'
+        }
+      }
+    }
+    const trusted = config.options.sshHostKeySha256 === 'SHA256:ui-test'
+    return {
+      ok: trusted,
+      ...(trusted ? { serverVersion: 'PostgreSQL UI mock' } : { message: '指纹没有写回表单' }),
+      elapsedMs: 14,
+      checks: [
+        { stage: 'config', status: 'passed', message: '连接参数解析通过' },
+        {
+          stage: 'ssh_host_key',
+          status: trusted ? 'passed' : 'failed',
+          message: trusted ? 'SSH 主机密钥与已保存指纹一致' : '指纹没有写回表单'
+        }
+      ]
+    }
+  })
+})
+
+await win.fill('#f-dynamic input[data-key="sshHost"]', '127.0.0.1')
+await win.fill('#f-dynamic input[data-key="sshPort"]', '2222')
+await win.fill('#f-dynamic input[data-key="host"]', '127.0.0.1')
+await win.fill('#f-dynamic input[data-key="port"]', '55432')
+await win.fill('#f-dynamic input[data-key="database"]', 'postgres')
+await win.fill('#f-dynamic input[data-key="user"]', 'postgres')
+await win.click('#btn-test')
+await win.waitForSelector('#dlg-ssh-host-key[open]', { state: 'attached', timeout: 10000 })
+check(
+  '1d. ★ 未知 SSH 指纹弹出确认框并展示实际指纹',
+  (await win.locator('#ssh-key-actual').textContent()) === 'SHA256:ui-test' &&
+    (await win.locator('#ssh-key-expected-row').getAttribute('hidden')) !== null,
+  await win.locator('#ssh-key-actual').textContent()
+)
+await win.click('#btn-ssh-key-trust')
+await win.waitForFunction(
+  () =>
+    document.querySelector('#test-check-list .test-check[data-stage="ssh_host_key"]')?.classList.contains(
+      'passed'
+    ) === true,
+  { timeout: 10000 }
+)
+check(
+  '1e. ★ 确认后写回指纹并自动重试成功',
+  (await win.locator('#f-dynamic input[data-key="sshHostKeySha256"]').inputValue()) ===
+    'SHA256:ui-test' &&
+    (await win.locator('#status-bar').textContent())?.includes('连接成功') === true &&
+    (await app.evaluate(() => globalThis.__dbstudioTestCalls)) === 2,
+  await win.locator('#status-bar').textContent()
+)
+
 console.log('\n[2] 填表并落盘：三机密不能互相覆盖')
 await win.fill('#f-name', 'SSH-FORM')
 await win.fill('#f-dynamic input[data-key="host"]', '127.0.0.1')
-await win.fill('#f-dynamic input[data-key="port"]', '1')
+await win.fill('#f-dynamic input[data-key="port"]', '55432')
 await win.fill('#f-dynamic input[data-key="database"]', 'postgres')
 await win.fill('#f-dynamic input[data-key="user"]', 'postgres')
 await win.fill('#f-dynamic input[data-key="password"]', 'DB_PASS_UNIQUE')
@@ -93,10 +178,14 @@ await win.fill('#f-dynamic input[data-key="sshTargetHost"]', '10.0.0.9')
 await win.fill('#f-dynamic input[data-key="sshTargetPort"]', '5432')
 
 await win.click('#btn-submit')
+/**
+ * 未授权的假 SSH 参数会保存配置，但不会建立会话。对话框必须保持打开，
+ * 这正是“先落盘、再连接”与“连上才关闭”之间的区别。
+ */
 await win.waitForFunction(
   () => {
-    const d = document.getElementById('dlg-connection')
-    return d !== null && !d.hasAttribute('open')
+    const e = document.getElementById('f-error')
+    return e !== null && !e.hasAttribute('hidden')
   },
   { timeout: 25000 }
 )
@@ -138,6 +227,13 @@ check(
  * 三个控件分别暴露出来，且 config 不泄漏。
  */
 check('2d. 连接节点 meta 不含明文密码', !JSON.stringify(saved?.meta ?? {}).includes('DB_PASS_UNIQUE'))
+check(
+  '2e. ★ 新连接失败时对话框保留，并提示配置已保存',
+  (await win.locator('#dlg-connection[open]').count()) === 1 &&
+    (await win.locator('#f-error:not([hidden])').textContent())?.includes('配置已保存') === true,
+  await win.locator('#f-error').textContent()
+)
+await win.click('#btn-cancel')
 
 console.log('\n[3] 编辑连接：不能退回单个密码框')
 // 右键连接节点，菜单第一项之后找“编辑连接”。

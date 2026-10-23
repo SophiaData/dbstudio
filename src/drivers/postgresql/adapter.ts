@@ -26,7 +26,14 @@ import { randomUUID } from 'node:crypto'
 import { Client, type QueryResult } from 'pg'
 
 import type { ConnectionConfig } from '../../core/dialect'
-import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../core/driver'
+import type {
+  ConnectionTestCheck,
+  ConnectionTestStage,
+  DriverAdapter,
+  SecretValue,
+  SshHostKeyCheck,
+  TestConnectionResult
+} from '../../core/driver'
 import type { DriverCapabilities, ObjectRef, TableDescription, ColumnDescription } from '../../core/model'
 import type { DriverFactory } from '../../core/registry'
 import type {
@@ -288,6 +295,65 @@ function wrapSshError(thrown: unknown): PostgresAdapterError {
   return new PostgresAdapterError('connection_failed', describeThrown(thrown))
 }
 
+/**
+ * 记录一个测试阶段。阶段按执行顺序追加，耗时由调用方按边界计算。
+ *
+ * 不在这里直接读 `performance.now()`：SSH 认证与主机密钥校验同属 SSH 连接
+ * 事件，却被 ssh2 合并成一次等待；单独造精确耗时会给出看似精确、实则编造的数字。
+ */
+function recordCheck(
+  checks: ConnectionTestCheck[],
+  stage: ConnectionTestStage,
+  status: ConnectionTestCheck['status'],
+  message?: string,
+  elapsedMs?: number
+): void {
+  checks.push({
+    stage,
+    status,
+    ...(message === undefined ? {} : { message }),
+    ...(elapsedMs === undefined ? {} : { elapsedMs })
+  })
+}
+
+/** 把 SSH 异常映射到它实际失败的阶段。 */
+function sshFailureStage(error: SshTunnelError): ConnectionTestStage {
+  switch (error.code) {
+    case 'ssh_host_unverified':
+    case 'ssh_host_key_mismatch':
+      return 'ssh_host_key'
+    case 'ssh_auth_failed':
+      return 'ssh_auth'
+    case 'ssh_forward_failed':
+      return 'ssh_forward'
+    case 'ssh_missing_credentials':
+    case 'ssh_connect_failed':
+      return 'ssh_connect'
+  }
+}
+
+/** 从 SSH 异常构造 UI 可直接展示的主机密钥确认数据。 */
+function toSshHostKeyCheck(
+  config: SshTunnelConfig,
+  error: SshTunnelError
+): SshHostKeyCheck | undefined {
+  if (
+    error.hostKeySha256 === undefined ||
+    (error.code !== 'ssh_host_unverified' && error.code !== 'ssh_host_key_mismatch')
+  ) {
+    return undefined
+  }
+  return {
+    host: config.host,
+    port: config.port,
+    fingerprint: error.hostKeySha256,
+    ...(error.expectedHostKeySha256 === undefined
+      ? {}
+      : { expectedFingerprint: error.expectedHostKeySha256 }),
+    state: error.code === 'ssh_host_key_mismatch' ? 'mismatch' : 'unverified'
+  }
+}
+
 /** 非法 sslmode 的报错（单独拆出来只是为了让上面的三元表达式读得下去）。 */
 function invalidSslMode(raw: string): never {
   throw new PostgresAdapterError(
@@ -469,17 +535,35 @@ export class PostgresDriverAdapter implements DriverAdapter {
    */
   async testConnection(config: ConnectionConfig, secret: SecretValue): Promise<TestConnectionResult> {
     const startedAt = performance.now()
+    const checks: ConnectionTestCheck[] = []
     let info: PgConnectionInfo | null = null
     let client: Client | null = null
     let tunnel: SshTunnel | null = null
     try {
       info = resolveConnectionInfo(config, secret)
+      recordCheck(checks, 'config', 'passed', '连接参数解析通过')
       if (info.ssh !== undefined) {
+        const sshStartedAt = performance.now()
         tunnel = await openSshTunnel(
           info.ssh,
           info.sshCredentials ?? { password: undefined, privateKeyPassphrase: undefined }
         )
+        recordCheck(
+          checks,
+          'ssh_connect',
+          'passed',
+          `SSH 已连接 ${info.ssh.host}:${info.ssh.port}`,
+          Math.round(performance.now() - sshStartedAt)
+        )
+        recordCheck(checks, 'ssh_host_key', 'passed', 'SSH 主机密钥与已保存指纹一致')
+        recordCheck(checks, 'ssh_auth', 'passed', 'SSH 认证通过')
+      } else {
+        recordCheck(checks, 'ssh_connect', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_host_key', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_auth', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_forward', 'skipped', '未启用 SSH 隧道')
       }
+      const databaseStartedAt = performance.now()
       client = await openClient({
         host: info.host,
         port: info.port,
@@ -491,23 +575,73 @@ export class PostgresDriverAdapter implements DriverAdapter {
         connectionTimeoutMillis: 10_000,
         applicationName: 'dbstudio'
       })
+      if (info.ssh !== undefined) {
+        recordCheck(
+          checks,
+          'ssh_forward',
+          'passed',
+          `SSH 转发通道可用，目标 ${info.ssh.targetHost}:${info.ssh.targetPort}`
+        )
+      }
+      checks.push({
+        stage: 'database',
+        status: 'passed',
+        message: `已连接数据库 ${info.host}:${info.port}/${info.database}`,
+        elapsedMs: Math.round(performance.now() - databaseStartedAt)
+      })
+      const queryStartedAt = performance.now()
       const versionResult = await client.query<{ version: string }>('SELECT version() AS version')
+      checks.push({
+        stage: 'server_query',
+        status: 'passed',
+        message: '服务端探测查询通过',
+        elapsedMs: Math.round(performance.now() - queryStartedAt)
+      })
       const serverVersion = versionResult.rows[0]?.version
       return {
         ok: true,
         elapsedMs: Math.round(performance.now() - startedAt),
-        ...(serverVersion === undefined ? {} : { serverVersion })
+        ...(serverVersion === undefined ? {} : { serverVersion }),
+        checks
       }
     } catch (thrown) {
+      let failedStage: ConnectionTestStage =
+        client !== null ? 'server_query' : info === null ? 'config' : 'database'
+      let message: string
+      let sshHostKey: SshHostKeyCheck | undefined
+      if (thrown instanceof SshTunnelError) {
+        failedStage = sshFailureStage(thrown)
+        message = thrown.message
+        if (info?.ssh !== undefined) sshHostKey = toSshHostKeyCheck(info.ssh, thrown)
+      } else if (thrown instanceof PostgresAdapterError) {
+        message = thrown.message
+        if (info === null) failedStage = 'config'
+        else if (tunnel === null) failedStage = info.ssh === undefined ? 'database' : 'ssh_connect'
+        else {
+          // 非 SSH 异常出现在 openClient 内，说明 openStream 已成功拿到 channel；
+          // 真正卡住的是其后的 PG 握手/认证，而不是 SSH 转发。
+          if (client === null && info.ssh !== undefined) {
+            recordCheck(
+              checks,
+              'ssh_forward',
+              'passed',
+              `SSH 转发通道可用，目标 ${info.ssh.targetHost}:${info.ssh.targetPort}`
+            )
+          }
+          failedStage = client === null ? 'database' : 'server_query'
+        }
+      } else {
+        message = `连接失败：${describeThrown(thrown)}`
+      }
+      // 失败之前的阶段已经通过；把当前阶段标红，后面的阶段保持未执行，
+      // 而不是伪造 skipped — 用户能看出诊断停在哪一步。
+      recordCheck(checks, failedStage, 'failed', message)
       return {
         ok: false,
-        message:
-          thrown instanceof PostgresAdapterError
-            ? thrown.message
-            : thrown instanceof SshTunnelError
-              ? thrown.message
-              : `连接失败：${describeThrown(thrown)}`,
-        elapsedMs: Math.round(performance.now() - startedAt)
+        message,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        checks,
+        ...(sshHostKey === undefined ? {} : { sshHostKey })
       }
     } finally {
       if (client !== null) {

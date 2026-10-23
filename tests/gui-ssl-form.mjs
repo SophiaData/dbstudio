@@ -105,20 +105,23 @@ await win.fill('#f-dynamic input[data-key="database"]', 'postgres')
 await win.fill('#f-dynamic input[data-key="user"]', 'postgres')
 
 /**
- * 提交后对话框会**关闭**——这是现有语义，不是 bug：
- * `addConnection` 是「先落盘、再尝试连接」，连接失败不会丢掉已保存的配置，
- * 用户之后可以在连接节点上重试/编辑。所以这里断言的是"能正常提交完成"，
- * 而不是"失败时保持打开"（那是测试连接按钮 `#btn-test` 的语义）。
+ * 端口 1 必然连不上，但 `addConnection` 会先落盘。新语义要求保留对话框并
+ * 明说“配置已保存、会话未连接”，不能像旧版那样关框后仍显示“已连接”。
  */
 await win.click('#btn-submit')
 await win.waitForFunction(
   () => {
-    const d = document.getElementById('dlg-connection')
-    return d !== null && !d.hasAttribute('open')
+    const e = document.getElementById('f-error')
+    return e !== null && !e.hasAttribute('hidden')
   },
   { timeout: 20000 }
 )
-check('3a. 提交后对话框关闭（add 语义：先落盘再连）', true)
+check(
+  '3a. ★ 连接失败时对话框保留且明确提示配置已保存',
+  (await win.locator('#dlg-connection[open]').count()) === 1 &&
+    (await win.locator('#f-error').textContent())?.includes('配置已保存') === true,
+  await win.locator('#f-error').textContent()
+)
 
 // 用页面内的 API 直接验证：collect() 的结果会随 addConnection 一起落盘，
 // 端口 1 必然连不上，但**配置已保存**（add 的语义是先落盘再连）。

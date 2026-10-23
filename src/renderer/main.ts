@@ -8,7 +8,14 @@
 
 import { NodeId, type ConnectionSummary, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
-import type { DialectField, DialectInfo, SecretMap } from '../core/driver'
+import type {
+  ConnectionTestCheck,
+  TestConnectionResult,
+  DialectField,
+  DialectInfo,
+  SecretMap,
+  SshHostKeyCheck
+} from '../core/driver'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs } from './tabs'
@@ -757,6 +764,135 @@ function actionButton(label: string, onClick: () => Promise<void>): HTMLButtonEl
 
 let cachedDialects: DialectInfo[] | null = null
 
+const TEST_STAGE_LABELS: Readonly<Record<ConnectionTestCheck['stage'], string>> = {
+  config: '配置',
+  ssh_connect: 'SSH 握手',
+  ssh_host_key: '主机指纹',
+  ssh_auth: 'SSH 认证',
+  ssh_forward: 'SSH 转发',
+  database: '数据库连接',
+  server_query: '服务端查询'
+}
+
+function renderConnectionTest(
+  result: TestConnectionResult,
+  onTrustHostKey: (check: SshHostKeyCheck) => Promise<void>
+): void {
+  const panel = el<HTMLElement>('test-diagnostics')
+  const list = el<HTMLOListElement>('test-check-list')
+  const message = el<HTMLDivElement>('test-message')
+  const messageText = el<HTMLParagraphElement>('test-message-text')
+  const trust = el<HTMLButtonElement>('btn-test-trust-host')
+  const title = el('test-diagnostics-title')
+  const elapsed = el('test-diagnostics-elapsed')
+
+  panel.hidden = false
+  title.textContent = result.ok ? '连接测试通过' : '连接测试失败'
+  elapsed.textContent = `${result.elapsedMs}ms`
+  list.replaceChildren()
+
+  for (const check of result.checks ?? []) {
+    const item = document.createElement('li')
+    item.className = `test-check ${check.status}`
+    item.dataset['stage'] = check.stage
+
+    const icon = document.createElement('span')
+    icon.className = 'test-check-icon'
+    icon.textContent = check.status === 'passed' ? '✓' : check.status === 'failed' ? '✕' : '—'
+    icon.setAttribute('aria-hidden', 'true')
+
+    const name = document.createElement('span')
+    name.className = 'test-check-name'
+    name.textContent = TEST_STAGE_LABELS[check.stage]
+
+    const detail = document.createElement('span')
+    detail.className = 'test-check-message'
+    detail.textContent = check.message ?? ''
+    if (check.elapsedMs !== undefined) {
+      detail.textContent += `${detail.textContent === '' ? '' : ' · '}${check.elapsedMs}ms`
+    }
+    item.append(icon, name, detail)
+    list.appendChild(item)
+  }
+
+  message.hidden = result.ok || (result.message === undefined && result.sshHostKey === undefined)
+  messageText.textContent = result.ok ? '' : result.message ?? ''
+  trust.hidden = true
+  trust.onclick = null
+
+  if (result.sshHostKey !== undefined) {
+    const hostKey = result.sshHostKey
+    trust.textContent =
+      hostKey.state === 'unverified' ? '核对指纹并信任…' : '查看指纹差异…'
+    trust.hidden = false
+    trust.onclick = () => {
+      trust.disabled = true
+      void onTrustHostKey(hostKey).finally(() => {
+        trust.disabled = false
+      })
+    }
+    message.hidden = false
+  }
+}
+
+/**
+ * 展示主机密钥并等待用户明确选择。
+ *
+ * 已保存指纹不一致时也允许更新，但不提供“静默覆盖”：按钮文案和警告都要求
+ * 用户先核对实际指纹。这里没有“始终信任”选项，避免把一次决定变成永久绕过。
+ */
+function confirmSshHostKey(check: SshHostKeyCheck): Promise<boolean> {
+  const dlg = el<HTMLDialogElement>('dlg-ssh-host-key')
+  const expectedRow = el('ssh-key-expected-row')
+  const warning = el('ssh-key-warning')
+  const title = el('ssh-key-title')
+  const intro = el('ssh-key-intro')
+  const guidance = el('ssh-key-guidance')
+  const trust = el<HTMLButtonElement>('btn-ssh-key-trust')
+
+  const mismatch = check.state === 'mismatch'
+  title.textContent = mismatch ? 'SSH 主机密钥已变化' : '确认新的 SSH 主机'
+  warning.hidden = !mismatch
+  warning.textContent = mismatch
+    ? '这可能是中间人攻击，也可能是跳板机重装或换过主机密钥。务必通过可信渠道核对下方实际指纹，确认无误后再继续。'
+    : ''
+  intro.textContent = mismatch
+    ? '本客户端拒绝在未获确认时改用新指纹。'
+    : '这是第一次连接该主机。请通过可信渠道核对指纹；确认后只会信任这一次展示的密钥。'
+  guidance.textContent = mismatch
+    ? '若无法解释指纹变化，请取消并联系跳板机管理员。不要仅在网络恢复后反复重试。'
+    : '可与管理员提供的 ssh-keygen -lf 输出逐字比对。'
+  el('ssh-key-host').textContent = `${check.host}:${check.port}`
+  el('ssh-key-expected').textContent = check.expectedFingerprint ?? ''
+  expectedRow.hidden = !mismatch || check.expectedFingerprint === undefined
+  el('ssh-key-actual-label').textContent = mismatch ? '本次实际指纹' : 'SHA256 指纹'
+  el('ssh-key-actual').textContent = check.fingerprint
+  trust.textContent = mismatch ? '我核对过，使用新指纹' : '信任并继续'
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const finish = (accepted: boolean): void => {
+      if (settled) return
+      settled = true
+      trust.removeEventListener('click', onTrust)
+      el('btn-ssh-key-cancel').removeEventListener('click', onCancel)
+      dlg.removeEventListener('cancel', onDialogCancel)
+      dlg.close()
+      resolve(accepted)
+    }
+    const onTrust = (): void => finish(true)
+    const onCancel = (): void => finish(false)
+    const onDialogCancel = (event: Event): void => {
+      event.preventDefault()
+      finish(false)
+    }
+    trust.addEventListener('click', onTrust)
+    el('btn-ssh-key-cancel').addEventListener('click', onCancel)
+    dlg.addEventListener('cancel', onDialogCancel)
+    dlg.showModal()
+  })
+}
+
 async function openConnectionDialog(
   api: DbStudioApi,
   onConnected: (summary: ConnectionSummary) => void
@@ -795,6 +931,7 @@ async function openConnectionDialog(
   sel.onchange = renderFields
 
   errP.hidden = true
+  el<HTMLElement>('test-diagnostics').hidden = true
   nameInput.value = ''
 
   /** 收集表单 → ConnectionConfig + 具名 secret。密码绝不进 options。 */
@@ -830,20 +967,53 @@ async function openConnectionDialog(
     return { config: { dialectId: dialect.id, name, options }, secret }
   }
 
+  /**
+   * 测试连接。未知或已变化的 SSH 指纹由用户显式确认，写回表单后自动重试；
+   * 确认值尚未落盘时取消，不会留下任何“已信任”状态。
+   */
+  const runTest = async (): Promise<void> => {
+    const { config, secret } = collect()
+    let res = await api.testConnection(config, secret)
+    if (!res.ok && res.sshHostKey !== undefined) {
+      const accepted = await confirmSshHostKey(res.sshHostKey)
+      if (accepted) {
+        const fingerprintInput = dyn.querySelector<HTMLInputElement>(
+          '[data-key="sshHostKeySha256"]'
+        )
+        if (fingerprintInput === null) {
+          throw new Error('当前表单不支持保存 SSH 主机指纹')
+        }
+        fingerprintInput.value = res.sshHostKey.fingerprint
+        setStatus('已确认主机指纹，正在重新测试…')
+        res = await api.testConnection(collect().config, secret)
+      }
+    }
+    renderConnectionTest(res, async (hostKey) => {
+      const accepted = await confirmSshHostKey(hostKey)
+      if (!accepted) return
+      const fingerprintInput = dyn.querySelector<HTMLInputElement>(
+        '[data-key="sshHostKeySha256"]'
+      )
+      if (fingerprintInput === null) throw new Error('当前表单不支持保存 SSH 主机指纹')
+      fingerprintInput.value = hostKey.fingerprint
+      setStatus('已确认主机指纹，正在重新测试…')
+      await runTest()
+    })
+    if (res.ok) {
+      setStatus(
+        `连接成功（${res.elapsedMs}ms${res.serverVersion ? ` · ${res.serverVersion}` : ''}）`
+      )
+    } else {
+      setStatus(`连接失败：${res.message ?? '未知原因'}`, true)
+    }
+  }
+
   el('btn-test').onclick = () => {
     void (async () => {
       errP.hidden = true
       setStatus('正在测试连接…')
       try {
-        const { config, secret } = collect()
-        const res = await api.testConnection(config, secret)
-        if (res.ok) {
-          setStatus(
-            `连接成功（${res.elapsedMs}ms${res.serverVersion ? ` · ${res.serverVersion}` : ''}）`
-          )
-        } else {
-          setStatus(`连接失败：${res.message ?? '未知原因'}`, true)
-        }
+        await runTest()
       } catch (e) {
         errP.textContent = errText(e)
         errP.hidden = false
@@ -866,9 +1036,21 @@ async function openConnectionDialog(
       try {
         const { config, secret } = collect()
         const summary: ConnectionSummary = await api.addConnection(config, secret)
-        dlg.close()
-        setStatus(`已连接：${summary.name}`)
-        onConnected(summary)
+        /*
+         * addConnection 的成功语义是“配置已保存”，不代表会话已建立。
+         * 连接失败时保留表单，让用户直接改参数/测试；但刷新树，
+         * 因为配置确实已经落盘，用户也可以稍后从树里重连。
+         */
+        if (summary.connected) {
+          dlg.close()
+          setStatus(`已连接：${summary.name}`)
+          onConnected(summary)
+        } else {
+          errP.textContent = `配置已保存，但会话连接失败。请检查参数后重试，或从树中稍后连接「${summary.name}」。`
+          errP.hidden = false
+          setStatus(`已保存，未连接：${summary.name}`, true)
+          onConnected(summary)
+        }
       } catch (err) {
         errP.textContent = errText(err)
         errP.hidden = false

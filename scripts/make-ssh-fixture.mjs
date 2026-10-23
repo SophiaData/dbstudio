@@ -83,6 +83,11 @@ writeFileSync(
     'PasswordAuthentication no',
     'KbdInteractiveAuthentication no',
     'PubkeyAuthentication yes',
+    // 测试会连续制造“指纹不匹配/错误私钥”等反向用例。新版 OpenSSH 的
+    // 父进程限速会把同一来源暂时丢连接，表现为随机 ECONNRESET。这里只对
+    // 隔离的测试 sshd 放宽，不改变生产连接逻辑。
+    'PerSourcePenalties no',
+    'MaxStartups 100:30:200',
     'UsePAM no',
     'StrictModes no',
     'AllowTcpForwarding yes',
