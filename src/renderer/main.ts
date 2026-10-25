@@ -37,7 +37,7 @@ import {
 import { pickQuotingRules, quoteIdentifier } from './grid'
 import type { QuotingRules } from '../core/driver'
 import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
-import { guardAllTransactions, runConnectionOperation } from './transaction-controller'
+import { getTransactionController, guardAllTransactions, runConnectionOperation } from './transaction-controller'
 
 declare global {
   interface Window {
@@ -289,19 +289,40 @@ async function boot(): Promise<void> {
       const stmt = statements[i] as string
       const startedAt = performance.now()
       try {
-        const opened = await tabs.runSql(connectionNodeId, stmt)
-        await recordSqlHistory(
-          stmt,
-          connectionNodeId,
-          performance.now() - startedAt,
-          opened.outcome.error,
-          opened.outcome.result?.returned ?? null
-        )
-        if (opened.outcome.error !== null) {
-          const where =
-            statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
-          setStatus(`${where}${opened.outcome.error}`, true)
-          return
+        const stmtRes = await api.executeStatement(connectionNodeId, stmt)
+        const elapsed = performance.now() - startedAt
+        if (stmtRes.kind === 'rows') {
+          const opened = await tabs.runSql(connectionNodeId, stmt)
+          await recordSqlHistory(
+            stmt,
+            connectionNodeId,
+            elapsed,
+            opened.outcome.error,
+            opened.outcome.result?.returned ?? null
+          )
+          if (opened.outcome.error !== null) {
+            const where =
+              statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+            setStatus(`${where}${opened.outcome.error}`, true)
+            return
+          }
+        } else if (stmtRes.kind === 'affected') {
+          const parsed = NodeId.parse(connectionNodeId)
+          if (parsed) {
+            const ctrl = getTransactionController(parsed.connectionId)
+            await ctrl.notifyExternalMutation(api)
+          }
+          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, stmtRes.affected)
+          setStatus(`执行成功，影响 ${stmtRes.affected} 行（耗时 ${Math.round(elapsed)}ms）`)
+        } else if (stmtRes.kind === 'ddl') {
+          tree.loadRoots()
+          const parsed = NodeId.parse(connectionNodeId)
+          if (parsed) {
+            const ctrl = getTransactionController(parsed.connectionId)
+            await ctrl.notifyExternalMutation(api)
+          }
+          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, 0)
+          setStatus(`DDL 执行成功：${stmtRes.summary}（耗时 ${Math.round(elapsed)}ms）`)
         }
       } catch (e) {
         await recordSqlHistory(

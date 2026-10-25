@@ -592,12 +592,15 @@ export class SqliteDriverAdapter implements DriverAdapter {
     }
 
     if (analyzed.kind === 'affected') {
+      const inOwnTransaction = this.#ensureTransaction(db)
       let changes = 0
       try {
         const stmt = db.prepare(analyzed.statementSql)
         const info = stmt.run()
         changes = Number(info.changes)
+        this.#pendingAffected += changes
       } catch (thrown) {
+        this.#releaseFailedOwnTransaction(db, inOwnTransaction)
         if (thrown instanceof SqliteAdapterError) throw thrown
         throw new SqliteAdapterError('query_failed', `执行语句失败：${describeThrown(thrown)}`, thrown)
       }

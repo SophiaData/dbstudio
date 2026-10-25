@@ -820,11 +820,14 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
 
     if (analyzed.kind === 'affected') {
+      const inOwnTransaction = await this.#ensureTransaction(client)
       let rowCount = 0
       try {
         const res = await client.query(analyzed.statementSql)
         rowCount = res.rowCount ?? 0
+        this.#pendingAffected += rowCount
       } catch (thrown) {
+        await this.#releaseFailedOwnTransaction(client, inOwnTransaction)
         throw wrapPgError(thrown, 'query_failed', '执行语句失败')
       }
       const elapsedMs = Math.round(performance.now() - startedAt)
