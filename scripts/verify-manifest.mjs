@@ -52,6 +52,8 @@ export const STEPS = [
   { id: 'test:postgres-edits', title: 'PostgreSQL 编辑列名与组合主键契约', group: 'node' },
   { id: 'test:sql-library', title: 'SQL 历史与收藏存储', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
+  { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
+  { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，
  // **不创建窗口**，所以不需要显示器——归在 node 组。
   { id: 'test:electron', title: 'Electron 内置 Node 运行时验收', group: 'node' },

@@ -85,17 +85,15 @@ jobs:
         # 这里显式设 DBSTUDIO_PG_URL，测试因此**不会**走跳过分支。
         env:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        # 走清单里的同一组脚本，而不是直接调 node tests/xxx——
-        # 这样「清单声明了什么」和「实际跑了什么」永远一致。
         run: |
           node scripts/build-driver-host.mjs
           node scripts/make-fixture-pg.mjs
-          pnpm run verify:node --only test:postgres
+          node scripts/verify.mjs external --only test:postgres --require-external
 
       - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
         env:
           DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: node tests/e2e-cancel.mjs
+        run: node scripts/verify.mjs external --only test:cancel --require-external
 
       - name: SSH 隧道（真实 sshd + 真实 PG）
         # ===== 为什么 CI 里要自己起 sshd，而不是跳过 =====
@@ -129,7 +127,7 @@ jobs:
             sleep 0.5
           done
           test "$ssh_ready" = 1
-          node tests/e2e-ssh-tunnel.mjs
+          node scripts/verify.mjs external --only test:ssh-tunnel --require-external
 
       - name: PostgreSQL SSL/TLS 语义（加密真生效 / 错误 CA 真被拒）
         # ===== 为什么这里要自己起两个容器，而不是复用上面的 service =====
@@ -211,7 +209,7 @@ jobs:
           docker exec dbstudio-pg-ssl psql -U postgres -tAc "show ssl" | grep -qx on
 
           # 5) 跑测试
-          node tests/e2e-postgres-ssl.mjs
+          node scripts/verify.mjs external --only test:postgres-ssl --require-external
 
       - name: SDK 构建与外部用户视角测试
         # SDK 不 import 源码，而是 import 构建后的 dist 产物，用 require.resolve

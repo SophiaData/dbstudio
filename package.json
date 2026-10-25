@@ -58,7 +58,9 @@
     "test:gui-mutation-transaction": "node tests/gui-mutation-transaction.mjs",
     "test:gui-grid-lifecycle": "node tests/gui-grid-lifecycle.mjs",
     "test:gui-app-close-guard": "node tests/gui-app-close-guard.mjs",
-    "test:gui-connection-guard": "node tests/gui-connection-guard.mjs"
+    "test:gui-connection-guard": "node tests/gui-connection-guard.mjs",
+    "test:verify-runner": "node tests/e2e-verify-runner.mjs",
+    "test:cancel-sqlite": "node tests/e2e-cancel.mjs --sqlite-only"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

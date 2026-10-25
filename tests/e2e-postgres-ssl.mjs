@@ -361,7 +361,7 @@ async function main() {
     const wrongCa = await tryConnect({
       url: SSL_URL,
       sslmode: 'verify-full',
-      sslrootcert: resolve(root, 'tests/.ssl-fixture/wrong-ca.pem')
+      sslrootcert: process.env['DBSTUDIO_PG_SSL_WRONG_CA'] ?? resolve(root, 'tests/.ssl-fixture/wrong-ca.pem')
     })
     check('3d. ★ verify-full 用无关 CA：必须失败（证明真的在校验链）', wrongCa.ok === false, wrongCa)
 
