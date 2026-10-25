@@ -11,7 +11,7 @@
  * 主进程即使遇到某个驱动的原生崩溃，也只是那一个宿主进程挂掉。
  */
 
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
@@ -27,6 +27,7 @@ import { SqlLibraryStore } from './SqlLibraryStore'
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
 let sqlLibrary: SqlLibraryStore | null = null
+let windowCleanup: Promise<void> = Promise.resolve()
 
 /**
  * GUI 自动化测试是否以“完全后台”方式运行。
@@ -165,36 +166,27 @@ function createWindow(): void {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  const win = mainWindow
+  let closeApproved = false
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+    const closingManager = manager
+    manager = null
+    windowCleanup = closingManager?.disposeAll() ?? Promise.resolve()
   })
-
-  /**
-   * 关闭最后一个窗口时也要问一次。
-   *
-   * macOS 上关掉窗口**不会**退出应用（`window-all-closed` 里只有非 darwin 才 quit），
-   * 所以 `before-quit` 根本不会触发——但用户此时确实打算收工了，
-   * 未提交的改动仍然悬着。Windows/Linux 上关最后一个窗口会走到 `app.quit()`，
-   * 于是 `before-quit` 会拦住；这里提前拦一次，两边行为一致。
-   *
-   * 注意 macOS 上关窗口**不等于退出**：用户确认后只是把窗口关掉，
-   * 应用仍在后台运行（符合 macOS 惯例）。要真正退出，走「退出应用」菜单，
-   * 那条路径由 `before-quit` 负责。
-   */
-  mainWindow.on('close', (event) => {
-    if (quitConfirmed || windowCloseApproved) return
-    if (BrowserWindow.getAllWindows().length > 1) return
+  win.on('close', (event) => {
+    if (quitConfirmed || closeApproved) return
     event.preventDefault()
     if (quitGuardRunning) return
     quitGuardRunning = true
     void (async () => {
-      const outcome = await askRendererToGuard()
-      if (outcome === 'blocked') return // 用户取消：窗口保持打开
-      windowCloseApproved = true
-      mainWindow?.close()
-    })().finally(() => {
+      if (!(await askRendererToGuard(win))) return
+      if (win.isDestroyed()) return
+      closeApproved = true
       quitGuardRunning = false
-    })
+      win.close()
+    })().catch((error) => console.error('[main] 关闭确认失败:', error))
+      .finally(() => { quitGuardRunning = false })
   })
 
   // 自检钩子：设置 DBSTUDIO_SMOKE=1 时，窗口加载完成后在渲染进程里跑一段断言，
@@ -595,7 +587,9 @@ app.whenReady().then(() => {
   createWindow()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    void windowCleanup.then(() => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
 })
 
@@ -605,109 +599,82 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-/**
- * 退出前询问渲染进程：还有未提交的改动吗？
- *
- * ===== 为什么必须在退出前拦这一下 =====
- *
- * 事务是**连接级**的。若用户在 A 标签改了数据并「应用」（进了事务但没提交），
- * 然后直接退出应用：
- *   - 旧行为：主进程 `disposeAll` 把宿主进程杀掉，数据库回滚未提交事务——
- *     用户的改动**静默消失**，界面上还显示着「未提交：1 行」。
- *   - 新行为：先问用户「提交还是回滚」，用户选「取消」就留在应用里。
- *
- * 「静默丢数据」比报错严重得多：用户以为自己改过并保存了。
- *
- * ===== 为什么用 preventDefault + 延后 quit =====
- *
- * `before-quit` 里 `event.preventDefault()` 可以取消这次退出。
- * 我们在这个回调里异步询问渲染进程，拿到答案后：
- *   - 放行 → 重新调用 `app.quit()`（这次不再被拦截）
- *   - 取消 → 什么都不做，应用继续开着
- */
+// One pending request covers both window close and application quit. Repeated
+// requests must still preventDefault while the renderer is asking the user.
 let quitConfirmed = false
 let quitGuardRunning = false
-/** 上一次「关窗口」已被用户确认放行，下一次 close 不再拦截。 */
-let windowCloseApproved = false
 
-/**
- * 退出询问的最长等待时间。
- *
- * 为什么需要它：如果渲染进程卡死（wedged），`executeJavaScript` 的 Promise
- * 永远不会 settle，应用就**再也退不出去**了——用户只能强杀进程。
- * 那比丢一次未提交的事务更糟。
- *
- * 为什么给 60 秒：正常情况下用户看一眼对话框就点，最多几十秒。
- * 60 秒远大于任何合理决策时间，所以绝不会「用户还在犹豫就被关掉」，
- * 但足以保证应用不会永久卡在退不出去的状态。
- */
-const QUIT_GUARD_TIMEOUT_MS = 60_000
+async function askRendererToGuard(win: BrowserWindow): Promise<boolean> {
+  if (win.isDestroyed()) return false
+  const contents = win.webContents
+  const askForce = async (): Promise<boolean> => {
+    if (win.isDestroyed()) return false
+    const result = await dialog.showMessageBox(win, {
+      type: 'warning', title: '无法确认未保存改动',
+      message: '页面无响应或已崩溃，无法检查当前连接上的未提交事务。',
+      detail: '取消会保留窗口；退出并放弃可能丢失未应用编辑，并回滚未提交事务。',
+      buttons: ['取消', '退出并放弃'], defaultId: 0, cancelId: 0, noLink: true
+    })
+    return result.response === 1
+  }
+  if (contents.isDestroyed() || contents.isCrashed()) return askForce()
 
-/** 询问渲染进程的结果。 */
-type GuardOutcome = 'ok' | 'blocked' | 'unavailable'
-
-/**
- * 询问渲染进程：现在安全吗（没有未应用的编辑、没有未提交的事务）。
- *
- * 供「关最后一个窗口」与「before-quit」两条路径共用——它们的判断依据
- * 完全相同（渲染进程里的未应用编辑 + 连接上的未提交事务），分成两套
- * 迟早会漂移成「关窗口不拦、菜单退出拦」这种不一致。
- *
- * @returns `blocked` 表示用户选择取消；`unavailable` 表示没有界面可问
- *          （渲染进程已退出），此时应当放行——继续拦着只会让应用永远退不出去。
- */
-async function askRendererToGuard(): Promise<GuardOutcome> {
-  const win = mainWindow
-  if (!win || win.isDestroyed()) return 'unavailable'
+  let finishUnavailable: (value: boolean) => void = () => {}
+  const unavailable = new Promise<boolean>((resolve) => { finishUnavailable = resolve })
+  let nativePending = false
+  const recover = async (crashed: boolean): Promise<void> => {
+    if (nativePending) return
+    nativePending = true
+    try {
+      const force = await askForce()
+      // On an unresponsive but living renderer, cancel leaves its original
+      // confirmation pending. A crash cannot ever deliver that decision.
+      if (force || crashed) finishUnavailable(force)
+    } finally { nativePending = false }
+  }
+  const onGone = (): void => { void recover(true) }
+  const onUnresponsive = (): void => { void recover(false) }
+  const onDestroyed = (): void => finishUnavailable(false)
+  contents.on('render-process-gone', onGone)
+  contents.on('unresponsive', onUnresponsive)
+  contents.on('destroyed', onDestroyed)
+  // This is a diagnostic deadline only; a user considering a dialog never
+  // loses either the pending decision or their data because a timer fired.
+  const timer = setTimeout(() => {
+    console.warn('[main] 仍在等待退出确认，窗口和未保存改动保持不变')
+  }, 60_000)
   try {
-    const safe = await Promise.race([
-      win.webContents.executeJavaScript(
-        `(async () => {
-           if (typeof window.dbstudioGuardTransactions !== 'function') return true
-           return await window.dbstudioGuardTransactions('退出应用')
-         })()`
-      ),
-      // 渲染进程卡死时的兜底：到期就放行，绝不让应用永久退不出去。
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(true), QUIT_GUARD_TIMEOUT_MS)
-      })
-    ])
-    return safe === false ? 'blocked' : 'ok'
-  } catch (e) {
-    // 渲染进程已经没了（崩溃 / 被销毁）：没有界面可保护，也没有用户可询问。
-    // 这时**放行**退出——继续拦着只会让应用永远退不出去。
-    // 未提交的事务会随宿主进程退出而回滚，不会留下半提交状态。
-    console.warn('[main] 退出前事务询问不可用（渲染进程可能已退出），放行退出:', e)
-    return 'unavailable'
+    const decision = contents.executeJavaScript(`(async () => {
+      if (typeof window.dbstudioGuardTransactions !== 'function') throw new Error('页面事务检查尚未就绪')
+      return (await window.dbstudioGuardTransactions('退出应用')) === true
+    })()`).catch(async (error) => {
+      console.warn('[main] 无法读取退出确认:', error)
+      if (!nativePending) return askForce()
+      return unavailable
+    })
+    return (await Promise.race([decision, unavailable])) === true
+  } finally {
+    clearTimeout(timer)
+    contents.removeListener('render-process-gone', onGone)
+    contents.removeListener('unresponsive', onUnresponsive)
+    contents.removeListener('destroyed', onDestroyed)
   }
 }
 
 app.on('before-quit', (event) => {
-  if (quitConfirmed) {
-    // 不 await：before-quit 里异步操作可能来不及。这里发信号即可，
-    // 子进程有 SIGTERM 兜底，且它们是我们的子进程，父进程退出后不会变成孤儿常驻。
-    void manager?.disposeAll()
-    return
-  }
-  const win = mainWindow
-  if (!win || win.isDestroyed()) {
-    // 没有窗口可问（已经在关闭流程里）：直接走清理，不无限拦截。
-    quitConfirmed = true
-    void manager?.disposeAll()
-    return
-  }
-  if (quitGuardRunning) return // 已经在问了，别重复弹框
-
+  if (quitConfirmed) return
   event.preventDefault()
+  if (quitGuardRunning) return
   quitGuardRunning = true
   void (async () => {
-    const outcome = await askRendererToGuard()
-    if (outcome === 'blocked') return // 用户取消：留在应用里
+    const win = mainWindow
+    if (win && !win.isDestroyed() && !(await askRendererToGuard(win))) return
+    await Promise.all([windowCleanup, manager?.disposeAll()])
+    manager = null
     quitConfirmed = true
     app.quit()
-  })().finally(() => {
-    quitGuardRunning = false
-  })
+  })().catch((error) => console.error('[main] 退出确认失败:', error))
+    .finally(() => { quitGuardRunning = false })
 })
 
 // 任何未捕获异常都要有日志，不能静默——Electron 主进程静默崩溃最难查。

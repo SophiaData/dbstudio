@@ -76,6 +76,9 @@ export const STEPS = [
   { id: 'test:gui-mutation-transaction', title: '增删改的事务归属 GUI（跨标签同步）', group: 'gui' },
   { id: 'test:gui-grid-lifecycle', title: '网格真实查询、分页与销毁竞争', group: 'gui' },
 
+  { id: 'test:gui-app-close-guard', title: '真实窗口关闭、退出与崩溃保护', group: 'gui' },
+  { id: 'test:gui-connection-guard', title: '连接断开、删除和更新的事务保护', group: 'gui' },
+
   // ---- 需要外部服务 ----
   {
     id: 'test:postgres',

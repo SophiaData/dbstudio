@@ -37,7 +37,7 @@ import {
 import { pickQuotingRules, quoteIdentifier } from './grid'
 import type { QuotingRules } from '../core/driver'
 import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
-import { guardAllTransactions } from './transaction-controller'
+import { guardAllTransactions, runConnectionOperation } from './transaction-controller'
 
 declare global {
   interface Window {
@@ -703,7 +703,7 @@ async function showDetail(
             actionButton('断开', async () => {
               setStatus('正在断开…')
               try {
-                await api.disconnectConnection(connId)
+                await runConnectionOperation(api, connId, '断开连接', () => api.disconnectConnection(connId))
                 setStatus(`已断开：${ref.name}（配置仍保留）`)
                 await reloadTree()
               } catch (e) {
@@ -719,7 +719,7 @@ async function showDetail(
               return
             }
             try {
-              await api.removeConnection(connId)
+              await runConnectionOperation(api, connId, '删除连接', () => api.removeConnection(connId))
               setStatus(`已删除：${ref.name}`)
               await reloadTree()
             } catch (e) {

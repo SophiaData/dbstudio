@@ -23,6 +23,8 @@ export interface TransactionParticipant {
   refreshFromTransactionController(): Promise<void>
   setTransactionStateFromController(state: TransactionState): void
   reportTransactionControllerStatus(text: string, isError?: boolean): void
+  setConnectionOperationLocked?(locked: boolean): void
+  invalidateConnection?(): Promise<void>
 }
 
 type Decision =
@@ -53,6 +55,8 @@ export class TransactionController {
   readonly #participants = new Map<string, TransactionParticipant>()
   #state: TransactionState = { active: false, pendingAffected: 0 }
   #queue: Promise<unknown> = Promise.resolve()
+  #connectionOperation = false
+  #exitGuardLocked = false
 
   constructor(connectionId: string) {
     this.connectionId = connectionId
@@ -61,13 +65,14 @@ export class TransactionController {
   register(api: DbStudioApi, participant: TransactionParticipant): () => void {
     this.#api = api
     this.#participants.set(participant.transactionParticipantId, participant)
+    participant.setConnectionOperationLocked?.(this.#connectionOperation || this.#exitGuardLocked)
     participant.setTransactionStateFromController(this.#state)
 
     return () => {
       this.#participants.delete(participant.transactionParticipantId)
       // 这里刻意**不回滚**。关闭一个标签绝不能影响同一连接上其他标签
       // 正在使用的事务——「关标签」不等于「放弃这个连接的事务」。
-      if (this.#participants.size === 0) controllers.delete(this.connectionId)
+      if (this.#participants.size === 0 && !this.#connectionOperation) controllers.delete(this.connectionId)
     }
   }
 
@@ -224,10 +229,51 @@ export class TransactionController {
    * 决定永远是**连接级**的：提交或回滚会作用于该连接的所有标签。
    */
   async guardAll(action: string): Promise<boolean> {
-    return this.#enqueue(async () => {
+    return this.#enqueue(() => this.#guardAll(action))
+  }
+
+  setExitGuardLocked(locked: boolean): void {
+    this.#exitGuardLocked = locked
+    for (const p of this.#participants.values()) {
+      p.setConnectionOperationLocked?.(locked || this.#connectionOperation)
+    }
+  }
+
+  async runConnectionOperation<T>(
+    api: DbStudioApi, action: string, operation: () => Promise<T>
+  ): Promise<T> {
+    if (this.#connectionOperation || this.#exitGuardLocked) throw new Error('当前连接正在处理离开操作，请等待')
+    this.#connectionOperation = true
+    this.#api = api
+    for (const p of this.#participants.values()) p.setConnectionOperationLocked?.(true)
+    try {
+      return await this.#enqueue(async () => {
+        if (!(await this.#guardAll(action, false))) throw new Error(`已取消${action}`)
+        try {
+          return await operation()
+        } finally {
+          // A replacement can close the old host and then fail to reconnect.
+          // Its old grids must not become editable against a later new session.
+          for (const p of this.#participants.values()) await p.invalidateConnection?.()
+        }
+      })
+    } finally {
+      this.#connectionOperation = false
+      for (const p of this.#participants.values()) p.setConnectionOperationLocked?.(this.#exitGuardLocked)
+      if (this.#participants.size === 0) controllers.delete(this.connectionId)
+    }
+  }
+
+  async #guardAll(action: string, refresh = true): Promise<boolean> {
+    try {
       const participant = this.#firstParticipant()
-      if (!participant) return true
-      const state = await this.#readState(participant)
+      const nodeId = participant?.transactionNodeId ?? `connection:${this.connectionId}`
+      // A disconnected connection has no host transaction, but can still have
+      // local edits after a host crash. Keep those subject to the same decision.
+      const connection = (await this.#requireApi().listConnections()).find((c) => c.id === this.connectionId)
+      const state = connection?.connected
+        ? await this.#requireApi().transactionState(nodeId)
+        : { active: false, pendingAffected: 0 }
       const dirty = this.#dirtyParticipants()
       if (!state.active && dirty.length === 0) return true
 
@@ -236,29 +282,32 @@ export class TransactionController {
       if (choice === 'apply-commit') {
         if (!(await this.#applyParticipants(dirty))) return false
         try {
-          const next = await this.#requireApi().commitTransaction(participant.transactionNodeId)
+          const next = await this.#requireApi().commitTransaction(nodeId)
           this.#broadcastState(next)
-          this.#broadcastRefresh()
+          if (refresh) this.#broadcastRefresh()
           return true
         } catch (e) {
-          participant.reportTransactionControllerStatus(`提交失败：${errText(e)}`, true)
+          participant?.reportTransactionControllerStatus(`提交失败：${errText(e)}`, true)
           return false
         }
       }
 
-      for (const item of dirty) item.discardLocalEditsFromController()
       if (state.active) {
         try {
-          const next = await this.#requireApi().rollbackTransaction(participant.transactionNodeId)
+          const next = await this.#requireApi().rollbackTransaction(nodeId)
           this.#broadcastState(next)
-          this.#broadcastRefresh()
         } catch (e) {
-          participant.reportTransactionControllerStatus(`回滚失败：${errText(e)}`, true)
+          participant?.reportTransactionControllerStatus(`回滚失败：${errText(e)}`, true)
           return false
         }
       }
+      for (const item of dirty) item.discardLocalEditsFromController()
+      if (refresh) this.#broadcastRefresh()
       return true
-    })
+    } catch (e) {
+      this.#firstParticipant()?.reportTransactionControllerStatus(`检查事务失败：${errText(e)}`, true)
+      return false
+    }
   }
 
   /**
@@ -461,10 +510,23 @@ export function getTransactionController(connectionId: string): TransactionContr
 
 /** Guard all registered connections for a main/index lifecycle action. */
 export async function guardAllTransactions(action: string): Promise<boolean> {
-  for (const controller of controllers.values()) {
-    if (!(await controller.guardAll(action))) return false
+  const guarded = [...controllers.values()]
+  for (const controller of guarded) controller.setExitGuardLocked(true)
+  try {
+    for (const controller of guarded) {
+      if (!(await controller.guardAll(action))) return false
+    }
+    return true
+  } finally {
+    for (const controller of guarded) controller.setExitGuardLocked(false)
   }
-  return true
+}
+
+/** Guard one connection before an operation that closes or replaces its host. */
+export async function runConnectionOperation<T>(
+  api: DbStudioApi, connectionId: string, action: string, operation: () => Promise<T>
+): Promise<T> {
+  return getTransactionController(connectionId).runConnectionOperation(api, action, operation)
 }
 
 function errText(error: unknown): string {

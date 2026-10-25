@@ -56,7 +56,9 @@
     "test:gui-export-integrity": "node tests/gui-export-integrity.mjs",
     "test:gui-transaction-lifecycle": "node tests/gui-transaction-lifecycle.mjs",
     "test:gui-mutation-transaction": "node tests/gui-mutation-transaction.mjs",
-    "test:gui-grid-lifecycle": "node tests/gui-grid-lifecycle.mjs"
+    "test:gui-grid-lifecycle": "node tests/gui-grid-lifecycle.mjs",
+    "test:gui-app-close-guard": "node tests/gui-app-close-guard.mjs",
+    "test:gui-connection-guard": "node tests/gui-connection-guard.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

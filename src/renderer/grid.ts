@@ -61,6 +61,7 @@ interface PageState {
 }
 
 export interface GridCallbacks {
+  onInvalidated?: () => void
   onStatus(text: string, isError?: boolean): void
 }
 
@@ -154,6 +155,7 @@ export class ResultGrid implements TransactionParticipant {
   /** 查询轮次序号：保证并发或异步广播刷新时，较旧请求绝不覆盖较新结果集状态。 */
   #queryEpoch = 0
   #disposed = false
+  #connectionOperationLocked = false
 
   // ---- 复制 / 右键菜单 / 全文模态 ----
   readonly #menuEl: HTMLElement
@@ -317,6 +319,20 @@ export class ResultGrid implements TransactionParticipant {
 
   reportTransactionControllerStatus(text: string, isError = false): void {
     this.#cb.onStatus(text, isError)
+  }
+
+  setConnectionOperationLocked(locked: boolean): void {
+    if (locked) this.#root.querySelector<HTMLInputElement>('.grid-cell-editor')?.blur()
+    this.#connectionOperationLocked = locked
+    this.#root.inert = locked
+  }
+
+  async invalidateConnection(): Promise<void> {
+    await this.dispose()
+    this.#root.dataset['editable'] = 'false'
+    this.#root.inert = false
+    this.#root.textContent = '连接已关闭或更新，请从连接树重新打开结果。'
+    this.#cb.onInvalidated?.()
   }
 
   get isDisposed(): boolean { return this.#disposed }
@@ -1449,7 +1465,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 把脏数据提交到事务（不 commit）。 */
   async applyEdits(): Promise<void> {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     if (this.#txController) {
       await this.#txController.apply(this)
       return
@@ -1511,7 +1527,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 提交事务。 */
   async commit(): Promise<void> {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     if (!this.#txController || !this.#source) {
       this.#cb.onStatus('自由 SQL 无事务上下文，无法提交', true)
       return
@@ -1521,7 +1537,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 回滚事务。 */
   async rollback(): Promise<void> {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     if (!this.#txController || !this.#source) return
     await this.#txController.rollback(this)
   }
@@ -1582,7 +1598,7 @@ export class ResultGrid implements TransactionParticipant {
    * 让用户一次填完再提交，更安全。
    */
   #openInsertModal(): void {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     const desc = this.#desc
     const tableId = this.#tableNodeId()
     if (!desc || !tableId) {
@@ -1692,7 +1708,7 @@ export class ResultGrid implements TransactionParticipant {
           if (typeof fn !== 'function') {
             throw new Error('insertRow 接口尚未就绪')
           }
-          if (this.#disposed) return
+          if (this.#connectionOperationLocked || this.#disposed) return
           const res = await fn(tableId, values)
           close()
           this.#cb.onStatus(`已插入 ${res.affected} 行（未提交，点「提交」生效）`)
@@ -1708,7 +1724,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 删除当前选中的行。用主键值定位，避免误删。 */
   async #deleteSelectedRow(): Promise<void> {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     const desc = this.#desc
     const tableId = this.#tableNodeId()
     if (!desc || !tableId) {
@@ -2085,7 +2101,7 @@ export class ResultGrid implements TransactionParticipant {
     current: CellValue,
     dbValue: CellValue
   ): void {
-    if (this.#disposed) return
+    if (this.#connectionOperationLocked || this.#disposed) return
     if (this.#editing) return // 已有输入框，先让上一个处理完
     const row = this.#rowAt(rowIndex)
     if (!row) return

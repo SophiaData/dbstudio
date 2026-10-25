@@ -213,7 +213,7 @@ export class ResultTabs {
 
   get activeContext(): ActiveTabContext | null {
     const tab = this.#tabs.find((t) => t.id === this.#activeId)
-    if (!tab) return null
+    if (!tab || tab.grid.isDisposed) return null
     const nodeId = tab.source.kind === 'table' ? tab.source.ref.id : tab.source.nodeId
     const parsed = NodeId.parse(nodeId)
     if (!parsed) throw new Error(`标签缺少连接归属：${nodeId}`)
@@ -254,6 +254,7 @@ export class ResultTabs {
     this.#stackEl.appendChild(pane)
 
     const grid = new ResultGrid(gridRoot, {
+      onInvalidated: () => this.#syncChrome(),
       onStatus: (text, isError = false) => {
         const tab = this.#tabById(id)
         if (!tab || tab.closing) return
@@ -425,7 +426,7 @@ export class ResultTabs {
     this.#emptyEl.hidden = has
     this.#stackEl.hidden = !has
     const active = this.#activeId !== null ? this.#tabById(this.#activeId) : undefined
-    this.#exportAllBtn.disabled = !active || active.exporting || active.closing
+    this.#exportAllBtn.disabled = !active || active.grid.isDisposed || active.exporting || active.closing
     this.#exportAllBtn.textContent = active?.exportProgress ?? this.#exportAllLabel
     if (active) {
       // tooltip 明确两件事：①只作用于当前标签 ②会重新查询一次 ③有上限。
@@ -455,7 +456,7 @@ export class ResultTabs {
     const id = this.#activeId
     if (id === null) return
     const tab = this.#tabById(id)
-    if (!tab || tab.exporting || tab.closing) return
+    if (!tab || tab.grid.isDisposed || tab.exporting || tab.closing) return
 
     tab.exporting = true
     this.#syncChrome()
@@ -464,7 +465,7 @@ export class ResultTabs {
       // 1) 重新执行查询，拿第一页 + 新游标。
       const first = await this.#runQueryForSource(tab.source)
       cursorId = first.cursorId
-      if (tab.closing || !this.#tabs.includes(tab)) return
+      if (tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
       // previewTable/runQuery 若没保留游标（keepCursor=false）就没有 cursorId：
       // 这种情况只能导出第一页，明确告知，而不是假装导完了。
       if (!cursorId) {
@@ -499,7 +500,7 @@ export class ResultTabs {
           offset,
           Math.min(EXPORT_PAGE_SIZE, MAX_EXPORT_ALL_ROWS - total)
         )
-        if (tab.closing || !this.#tabs.includes(tab)) return
+        if (tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
         if (next.returned === 0) {
           if (next.hasMore) throw new Error('分页未前进，已中止导出（不能确认结果完整）')
           break
