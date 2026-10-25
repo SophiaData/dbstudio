@@ -26,7 +26,8 @@ import type {
   QueryResult,
   ResultPage,
   RowUpdate,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from './contracts/resultset.js'
 import type { TestConnectionResult } from './contracts/driver.js'
 import type { SecretInput } from './contracts/driver.js'
@@ -223,6 +224,11 @@ export class DriverHost {
   /** 执行 SQL，返回第一页（带 cursorId）。 */
   query(sql: string, options?: QueryOptions): Promise<QueryResult> {
     return this.#request<QueryResult>('query', { sql, options }, HEAVY_TIMEOUT_MS)
+  }
+
+  /** 执行语句（查询、DML 或 DDL）。 */
+  executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
+    return this.#request<StatementResult>('executeStatement', { sql, options }, HEAVY_TIMEOUT_MS)
   }
 
   /** 从游标按偏移量取一页（支持乱序）。 */

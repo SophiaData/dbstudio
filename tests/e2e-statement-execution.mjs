@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
+import { build } from 'vite'
 import { DatabaseSync } from 'node:sqlite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -198,6 +199,60 @@ try {
 } finally {
   host.kill()
   rmSync(work, { recursive: true, force: true })
+}
+
+// Phase 2: ConnectionManager 集成与游标作用域验证
+const cmProbeDir = mkdtempSync(join(root, 'out/.stmt-cm-probe-'))
+const cmWork = mkdtempSync(join(tmpdir(), 'dbstudio-cm-stmt-test-'))
+const cmDbPath = join(cmWork, 'cm_test.db')
+const cmDb = new DatabaseSync(cmDbPath)
+cmDb.exec("CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO items VALUES(1, 'first');")
+cmDb.close()
+
+let cmManager
+try {
+  await build({
+    configFile: false,
+    root,
+    logLevel: 'error',
+    build: {
+      outDir: cmProbeDir,
+      emptyOutDir: false,
+      target: 'node22',
+      minify: false,
+      ssr: true,
+      rollupOptions: {
+        external: [/^node:/, 'electron'],
+        output: { entryFileNames: 'probe.cjs' }
+      },
+      lib: { entry: resolve(root, 'tests/probe-entry.ts'), formats: ['cjs'] }
+    }
+  })
+  const { createManagerWithBuiltinDialects } = await import(`file://${join(cmProbeDir, 'probe.cjs')}`)
+  cmManager = createManagerWithBuiltinDialects()
+
+  const connSummary = await cmManager.add({ dialectId: 'sqlite', name: 'cm-stmt', options: { file: cmDbPath } })
+  await cmManager.connectConnection(connSummary.id)
+  const connNodeId = `connection:${connSummary.id}`
+
+  // 1. SELECT: rows + scoped cursorId
+  const selRes = await cmManager.executeStatement(connNodeId, 'SELECT * FROM items ORDER BY id')
+  check('CM-1. ConnectionManager.executeStatement SELECT 返回 rows', selRes.kind === 'rows')
+  check('CM-1a. 游标带有连接作用域前缀', typeof selRes.result.cursorId === 'string' && selRes.result.cursorId.startsWith(`connection:${connSummary.id}|`))
+  const page = await cmManager.fetchResultPage(selRes.result.cursorId, 0, 10)
+  check('CM-1b. 作用域游标可正常分页获取', page.rows.length === 1)
+
+  // 2. INSERT: affected
+  const insRes = await cmManager.executeStatement(connNodeId, "INSERT INTO items VALUES (2, 'second')")
+  check('CM-2. ConnectionManager.executeStatement INSERT 返回 affected = 1', insRes.kind === 'affected' && insRes.affected === 1)
+
+  // 3. DDL: ddl
+  const ddlRes = await cmManager.executeStatement(connNodeId, 'CREATE TABLE cm_tab (id INT)')
+  check('CM-3. ConnectionManager.executeStatement DDL 返回 ddl', ddlRes.kind === 'ddl' && ddlRes.committed === true)
+} finally {
+  if (cmManager) await cmManager.disposeAll()
+  rmSync(cmProbeDir, { recursive: true, force: true })
+  rmSync(cmWork, { recursive: true, force: true })
 }
 
 // Optional PostgreSQL verification if DBSTUDIO_PG_URL is present

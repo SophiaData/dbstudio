@@ -425,6 +425,8 @@ function registerIpc(): void {
     // 超时策略因此在 DriverHostHandle 里分开（见 RESULT_SET_TIMEOUT_MS）。
     runQuery: async (nodeId: string, sql: string, options?: QueryOptions) =>
       getManager().runQuery(nodeId, sql, options),
+    executeStatement: async (nodeId: string, sql: string, options?: QueryOptions) =>
+      getManager().executeStatement(nodeId, sql, options),
     fetchResultPage: async (cursorId: string, offset: number, limit: number) =>
       getManager().fetchResultPage(cursorId, offset, limit),
     closeCursor: async (cursorId: string) => getManager().closeCursor(cursorId),
@@ -508,6 +510,9 @@ function registerIpc(): void {
   // 每个通道单独注册，理由同上：万能通道会让 preload 的白名单失效。
   ipcMain.handle(IPC.runQuery, (_e, nodeId: string, sql: string, options?: QueryOptions) =>
     api.runQuery(nodeId, sql, options)
+  )
+  ipcMain.handle(IPC.executeStatement, (_e, nodeId: string, sql: string, options?: QueryOptions) =>
+    api.executeStatement(nodeId, sql, options)
   )
   ipcMain.handle(
     IPC.fetchResultPage,

@@ -47,7 +47,8 @@ export type {
   RowUpdate,
   RowEditOutcome,
   EditApplyResult,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from './contracts/resultset.js'
 
 export { cellValueToSqlParam, MAX_CELL_TEXT_CHARS } from './contracts/resultset.js'

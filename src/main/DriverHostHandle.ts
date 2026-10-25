@@ -30,7 +30,7 @@ import type {
 } from '../core/driver'
 import { isRpcResponse } from '../core/driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
-import type { QueryOptions, QueryResult, ResultPage } from '../core/resultset'
+import type { QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
 
@@ -313,6 +313,15 @@ export class DriverHostHandle {
   query(sql: string, options?: QueryOptions): Promise<QueryResult> {
     return this.#requestWithTimeout<QueryResult>(
       'query',
+      { sql, options },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
+  /** 执行语句（查询、DML 或 DDL）。 */
+  executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
+    return this.#requestWithTimeout<StatementResult>(
+      'executeStatement',
       { sql, options },
       RESULT_SET_TIMEOUT_MS
     )
