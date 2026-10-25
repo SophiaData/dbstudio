@@ -19,7 +19,7 @@
 
 import type { ConnectionConfig, SqlDialect } from './dialect'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
-import type { QueryOptions, QueryResult, ResultPage } from './resultset'
+import type { QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type {
   CellValue,
   EditApplyResult,
@@ -275,6 +275,12 @@ export interface DriverAdapter {
   query(sql: string, options?: QueryOptions): Promise<QueryResult>
 
   /**
+   * 执行一条 SQL 语句（查询、DML 或 DDL）。
+   * 区别于 query() 只读游标接口，该方法区分返回行、影响行数与 DDL 变更摘要。
+   */
+  executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult>
+
+  /**
    * 从已打开的游标按偏移量取一页。
    *
    * **必须支持乱序取页**（先取第 100 行、再取第 0 行都要能工作）。
@@ -526,6 +532,7 @@ export const RPC_METHODS = [
   'listChildren',
   'describeTable',
   'query',
+  'executeStatement',
   'fetchResultPage',
   'closeCursor',
   'applyEdits',

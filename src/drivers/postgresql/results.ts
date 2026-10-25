@@ -89,7 +89,7 @@ const REJECTED_KEYWORDS = new Set([
  * 分页实现是 `SELECT * FROM (你的 SQL) LIMIT n OFFSET m`，
  * 要求你的 SQL 是返回行的查询表达式。`EXPLAIN` / `SHOW` / `DESCRIBE` 不是。
  */
-const PAGINATABLE_KEYWORDS = new Set(['select', 'values', 'table'])
+export const PAGINATABLE_KEYWORDS = new Set(['select', 'values', 'table'])
 
 /** PG 认可、但不能包成子查询分页的语句起始词。用于区分"合法但不支持"与"拼错"。 */
 const KNOWN_SQL_KEYWORDS = new Set([
@@ -315,6 +315,59 @@ export function prepareReadOnlyStatement(rawSql: string): string {
   }
 
   return analysis.statementSql
+}
+
+export type PostgresStatementKind = 'rows' | 'affected' | 'ddl'
+
+export interface AnalyzedPostgresStatement {
+  readonly statementSql: string
+  readonly keyword: string
+  readonly kind: PostgresStatementKind
+}
+
+/**
+ * 分析并分类用于工作台执行的 PostgreSQL 通用语句。
+ */
+export function prepareGeneralStatement(rawSql: string): AnalyzedPostgresStatement {
+  const sql = rawSql.trim()
+  if (sql === '') {
+    throw new PostgresAdapterError('bad_params', 'SQL 不能为空。')
+  }
+
+  const analysis = analyzeSql(sql)
+  if (analysis.statementSql === '') {
+    throw new PostgresAdapterError('bad_params', '这段 SQL 里没有可执行的语句。')
+  }
+
+  if (analysis.hasExtraStatement) {
+    throw new PostgresAdapterError(
+      'bad_params',
+      '一次只能执行一条语句：查询窗口不会执行第二条及之后的语句，请分开执行。'
+    )
+  }
+
+  const keyword = statementKeyword(analysis.topLevelWords)
+  if (keyword === '') {
+    throw new PostgresAdapterError('bad_params', '无法识别这条 SQL 的语句类型，请检查语法。')
+  }
+
+  const DML_KEYWORDS = new Set(['insert', 'update', 'delete', 'merge'])
+  if (DML_KEYWORDS.has(keyword)) {
+    if (analysis.topLevelWords.includes('returning')) {
+      return { statementSql: analysis.statementSql, keyword, kind: 'rows' }
+    }
+    return { statementSql: analysis.statementSql, keyword, kind: 'affected' }
+  }
+
+  const DDL_KEYWORDS = new Set([
+    'create', 'drop', 'alter', 'truncate', 'comment', 'reindex', 'vacuum', 'cluster',
+    'grant', 'revoke', 'set', 'reset', 'discard'
+  ])
+  if (DDL_KEYWORDS.has(keyword)) {
+    return { statementSql: analysis.statementSql, keyword, kind: 'ddl' }
+  }
+
+  return { statementSql: analysis.statementSql, keyword, kind: 'rows' }
 }
 
 // ---------------------------------------------------------------------------

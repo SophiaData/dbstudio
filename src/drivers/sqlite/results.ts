@@ -421,6 +421,60 @@ export function prepareReadOnlyStatement(rawSql: string): string {
   return analysis.statementSql
 }
 
+export type SqliteStatementKind = 'rows' | 'affected' | 'ddl'
+
+export interface AnalyzedSqliteStatement {
+  readonly statementSql: string
+  readonly keyword: string
+  readonly kind: SqliteStatementKind
+}
+
+/**
+ * 分析并分类用于工作台执行的通用 SQL 语句。
+ * 区别于只读窗口的硬性拦截，这里允许 DML 与 DDL 并区分返回类型。
+ */
+export function prepareGeneralStatement(rawSql: string): AnalyzedSqliteStatement {
+  const sql = rawSql.trim()
+  if (sql === '') {
+    throw new SqliteAdapterError('bad_params', 'SQL 不能为空。')
+  }
+
+  const analysis = analyzeSql(sql)
+  if (analysis.statementSql === '') {
+    throw new SqliteAdapterError('bad_params', '这段 SQL 里没有可执行的语句。')
+  }
+
+  if (analysis.hasExtraStatement) {
+    throw new SqliteAdapterError(
+      'bad_params',
+      '一次只能执行一条语句：SQLite 驱动会静默忽略第一条之后的语句，请分开执行。'
+    )
+  }
+
+  const keyword = statementKeyword(analysis.topLevelWords)
+  if (keyword === '') {
+    throw new SqliteAdapterError('bad_params', '无法识别这条 SQL 的语句类型，请检查语法。')
+  }
+
+  const DML_KEYWORDS = new Set(['insert', 'update', 'delete', 'replace'])
+  if (DML_KEYWORDS.has(keyword)) {
+    return { statementSql: analysis.statementSql, keyword, kind: 'affected' }
+  }
+
+  const DDL_KEYWORDS = new Set([
+    'create', 'drop', 'alter', 'vacuum', 'reindex', 'attach', 'detach'
+  ])
+  if (DDL_KEYWORDS.has(keyword)) {
+    return { statementSql: analysis.statementSql, keyword, kind: 'ddl' }
+  }
+
+  if (keyword === 'pragma' && analysis.hasAssignment) {
+    return { statementSql: analysis.statementSql, keyword, kind: 'ddl' }
+  }
+
+  return { statementSql: analysis.statementSql, keyword, kind: 'rows' }
+}
+
 // ---------------------------------------------------------------------------
 // 分页
 // ---------------------------------------------------------------------------
