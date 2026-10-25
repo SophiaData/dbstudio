@@ -19,6 +19,19 @@ const shortTimers = (f) => f.app.evaluate(() => {
   const original = globalThis.setTimeout
   globalThis.setTimeout = (fn, ms, ...args) => original(fn, ms === 60000 ? 150 : ms, ...args)
 })
+const crashRenderer = (f) => f.app.evaluate(({ BrowserWindow }) => new Promise((resolve, reject) => {
+  const contents = BrowserWindow.getAllWindows()[0].webContents
+  const onGone = () => {
+    clearTimeout(timer)
+    resolve()
+  }
+  const timer = setTimeout(() => {
+    contents.removeListener('render-process-gone', onGone)
+    reject(new Error('Renderer crash did not emit render-process-gone within 10s'))
+  }, 10_000)
+  contents.once('render-process-gone', onGone)
+  contents.forcefullyCrashRenderer()
+}))
 
 await scenario('normal decision timeout never grants close; cancel preserves dirty data', async (f) => {
   await shortTimers(f)
@@ -114,17 +127,16 @@ await scenario('crashed renderer requires native confirmation; cancel keeps wind
   await f.edit('applied')
   await f.win.getByRole('button', { name: '应用修改', exact: true }).click()
   await f.win.waitForSelector(`${pane} .grid-tx-info.is-pending`)
-  await f.app.evaluate(({ BrowserWindow, dialog }) => {
+  await f.app.evaluate(({ dialog }) => {
     globalThis.nativePrompts = []
     globalThis.nativeResponse = 0
     dialog.showMessageBox = async (_win, options) => {
       globalThis.nativePrompts.push(options)
       return { response: globalThis.nativeResponse }
     }
-    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer()
   })
+  await crashRenderer(f)
   await quit(f)
-  await new Promise((r) => setTimeout(r, 300))
   assert.equal(await f.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1)
   assert.ok((await f.app.evaluate(() => globalThis.nativePrompts)).length > 0)
   assert.deepEqual(f.values(), ['original', 'second'])
@@ -155,13 +167,12 @@ await scenario('renderer crash during a pending dialog cancels safely and permit
   await f.edit('pending')
   await quit(f)
   await dialog(f)
-  await f.app.evaluate(({ BrowserWindow, dialog }) => {
+  await f.app.evaluate(({ dialog }) => {
     globalThis.promptCount = 0
     globalThis.response = 0
     dialog.showMessageBox = async () => { globalThis.promptCount++; return { response: globalThis.response } }
-    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer()
   })
-  await new Promise((resolve) => setTimeout(resolve, 300))
+  await crashRenderer(f)
   assert.ok(await f.app.evaluate(() => globalThis.promptCount > 0))
   assert.equal(await f.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1)
   await f.app.evaluate(() => { globalThis.response = 1 })
