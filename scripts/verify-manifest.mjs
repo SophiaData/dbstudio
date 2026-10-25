@@ -54,6 +54,8 @@ export const STEPS = [
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
+  { id: 'test:release-gate', title: '发布门禁与 draft 附件校验', group: 'node' },
+  { id: 'test:packaged-smoke', title: '打包冒烟脚本的离线回归', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，
  // **不创建窗口**，所以不需要显示器——归在 node 组。
   { id: 'test:electron', title: 'Electron 内置 Node 运行时验收', group: 'node' },

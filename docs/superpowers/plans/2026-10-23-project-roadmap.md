@@ -7,7 +7,16 @@
 **技术栈：**Electron、TypeScript、electron-vite、原生 DOM/CSS、node:sqlite、pg、ssh2、Playwright、pnpm。  
 **文档层级：**项目路线图与可验收任务卡，不是逐行实现方案。涉及 SQL 执行契约、流式导出等较大改动，应在对应阶段单独形成实现计划。
 
-## 0. 执行进度（M0 收口中，2026-10-24 更新）
+## 0. 执行进度（M0 已完成，远端发布验证待补，2026-10-25 更新）
+
+**2026-10-24 A1 修复补充：**A1 第二轮发现已修复并完成最终本地验证：Node 分组 17/17、GUI 分组 15/15、临时真实 PostgreSQL 主驱动 52/52。增删改 GUI 现为 75/75，新增网格生命周期 7/7。交付证据和剩余限制见 `/Users/gaotingkai/Projects/dbstudio/docs/superpowers/plans/2026-10-24-m0-a1-review.md` 第 7 节。
+
+**2026-10-24 A2–A6 收口：**M0 收尾计划 A1–A6 已全部执行完毕，验收结论见
+`/Users/gaotingkai/Projects/dbstudio/docs/superpowers/plans/2026-10-24-m0-acceptance-report.md`。
+最终本地验证：**选中 42 / 执行 38 / 通过 38 / 跳过 4 / 失败 0**，退出码 0；
+真实外部服务分组 **4/4 通过**（PG 52/52、取消 15/15、SSL 23/23、SSH 21/21）。
+下表已按实际执行结果更新；**A5 只标到"代码与负例完成"**，
+远端三平台发布验证仍未做，因此不宣布 Beta 发布就绪。
 
 下列状态基于**本地实际跑过的测试**，不是计划值。未跑到的项目明确标注为未完成。
 
@@ -19,11 +28,15 @@
 | T3 连接级事务 | ✅ 完成 | `tests/gui-transaction-lifecycle.mjs` 36/36：离开保护、取消不关闭、丢弃不改数据、连接级状态同步、退出前询问 |
 | T4 连接故障恢复 | ✅ 完成 | `tests/e2e-connection-lifecycle.mjs` 3/3：宿主异常退出、并发建连去重、无 cipher 临时凭据 |
 | T5 导出完整性 | ✅ 完成 | `tests/gui-export-integrity.mjs` 13/13：截断文本三条导出路径全部拒绝，且不产出文件 |
-| T3 增删改事务归属 | ✅ 完成 | `tests/gui-mutation-transaction.mjs` 19/19：INSERT/DELETE 后同连接其他标签同步事务状态与数据；未提交不入盘、回滚可撤销 |
-| T6 文档同步 | 🔶 大部分完成 | README 的查询编辑器范围与 SDK 三层能力分层已补；M1 执行结果契约已写（见下），待单独成实现计划 |
-| 统一验证清单 | ✅ 完成 | `scripts/verify-manifest.mjs` 为唯一真相，`scripts/verify.mjs` 按分组执行；CI 与本地共用。`tests/e2e-verify-manifest.mjs` 46/46 防漂移 |
-| 发布门禁（版本） | ✅ 完成 | `release.yml` 打包前校验 tag 与 `package.json` 一致，不一致直接失败 |
-| 发布门禁（全平台产物） | ⏳ 未完成 | 尚未做到「三个平台产物都成功上传」才允许对外发布 |
+| T3 增删改事务归属 | ✅ 完成 | `tests/gui-mutation-transaction.mjs` 75/75：INSERT/DELETE 后同连接其他标签同步事务状态与数据；未提交不入盘、回滚可撤销 |
+| T6 文档同步 | ✅ 完成 | README 的验证分组、发布门禁流程与验收报告入口已补；M0 验收报告已出（`2026-10-24-m0-acceptance-report.md`）。M1 执行结果契约已写，待单独成实现计划 |
+| 统一验证清单 | ✅ 完成 | `scripts/verify-manifest.mjs` 为唯一真相，`scripts/verify.mjs` 按分组执行；CI 与本地共用。`tests/e2e-verify-manifest.mjs` 55/55 防漂移；`tests/e2e-verify-runner.mjs` 29/29 |
+| 发布门禁（版本） | ✅ 完成 | `release.yml` 打包前校验 tag 与 `package.json` 一致，不一致直接失败；手动 dispatch 永不 publish |
+| 发布门禁（全平台产物） | 🔶 代码与负例完成，远端待验证 | `scripts/release-gate.mjs` + `publish-release.mjs` + `smoke-packaged-app.mjs` 已实现；`tests/e2e-release-gate.mjs` 25/25 负例。本机 mac/arm64 打包冒烟通过；Windows/Linux 与远端 runner 未验证 |
+| A2 真实窗口关闭 / 退出保护 | ✅ 完成 | `tests/gui-app-close-guard.mjs` 9/9：超时不放行、重复 quit 被拦、apply-commit / discard-rollback 真落库、macOS 重开窗需重新确认、崩溃需主进程确认 |
+| A3 连接操作事务保护 | ✅ 完成 | `tests/gui-connection-guard.mjs` 16/16：工具栏 / 树 / 删除 / 更新 × 取消 / 提交 / 放弃，逐项验证 UI + 磁盘数据 + 连接配置 |
+| A4 验证执行器 | ✅ 完成 | `scripts/verify.mjs` 严格参数解析与失败传播；CI 外部步骤改走 `--require-external`；清单防漂移 55/55 |
+| A6 集成验证与状态纠偏 | ✅ 完成 | 完整本地验证退出码 0、真实外部服务 4/4、验收报告已出、路线图状态已更新 |
 
 **统一验证清单带来的直接收益：**清单一致性测试在第一次运行时就抓到
 `test:gui:headless` 未登记进清单——它一直存在于 `package.json` 却从未被
@@ -35,8 +48,9 @@
   `onActiveChange` 重置为新标签的空草稿，用户写的条件静默消失。已改为输入即回写标签
   （`src/renderer/main.ts`）。
 - **退出应用时未提交事务被静默回滚。**主进程 `before-quit` 直接 `disposeAll` 杀宿主，
-  用户的未提交改动无声消失。已接入渲染进程询问钩子（`window.dbstudioGuardTransactions`），
-  并加了 60 秒超时兜底——渲染进程卡死时不能变成「应用永远退不出去」。
+  用户的未提交改动无声消失。已接入渲染进程询问钩子（`window.dbstudioGuardTransactions`）。
+  A2 进一步重写了退出守卫：60 秒不再是"超时自动放行"，只是诊断计时器；
+  等待用户决定期间窗口与数据都保持不变。
 - **INSERT / DELETE 后同连接的其他标签不更新。**`transaction-controller.ts` 里
   早就定义了 `notifyMutation`，但**从未被调用**——插入/删除只刷新了当前网格。
   结果是：同一连接开两个标签，在 A 标签插入后，B 标签仍显示旧数据、
@@ -45,15 +59,18 @@
 
 **尚未验证/仍存在的缺口：**
 
-- PostgreSQL、PG SSL、SSH 隧道三组测试**本地未跑**（缺 `DBSTUDIO_PG_URL` /
-  `DBSTUDIO_PG_SSL_URL` / `DBSTUDIO_PG_PLAIN_URL`）。CI 里有真实 PG 容器与 sshd，
-  但本地结论不能替代 CI 结论。
+- PostgreSQL、PG SSL、SSH 隧道三组测试**已在本地用真实服务跑通**
+  （PG 52/52、取消 15/15、SSL 23/23、SSH 21/21，见验收报告 §2.2），
+  但**尚未在 CI runner 上复核**——本地结论不能替代 CI 结论。
+- **A5 发布链路从未真实执行过一次**：Windows x64 / Linux x64 连本机产物都没有；
+  mac x64 的打包冒烟因 Playwright 无法附加 Rosetta 进程而未通过（应用本身能启动）。
 - 事务状态模型的 UPDATE / INSERT / DELETE 三条路径现在都有用例了，但
   **不同连接两标签的隔离矩阵**仍未单独验证（只验证了「一个宿主退出不影响
   其他连接」）。
 - 不同连接的隔离只做了「一个宿主退出不影响其他连接」，未做「同连接两标签 vs 不同连接两标签」
   的完整矩阵。
 - M2 的完整字段导出仍是任务，不是承诺：当前对截断字段**拒绝导出**而不是导出全文。
+- M0 的全部改动已分四批提交到本地 `main`；未 push、未打 tag、未创建 PR、未发布。验证基线仍是 `0e7e840`，提交整理从 `50b9019` 开始。
 
 ## 1. 判断与规划假设
 
@@ -86,6 +103,13 @@
 | SDK | 类型声明、宿主打包、独立 API、仓库内产物测试 | 干净目录运行失败；依赖与支持范围声明需要校正 |
 
 ## 3. 本次验证结果
+
+> ⚠️ **本节是 2026-10-23 首次评估时的历史快照，数字不再代表当前状态。**
+> 当前有效结论见 §0 与
+> `/Users/gaotingkai/Projects/dbstudio/docs/superpowers/plans/2026-10-24-m0-acceptance-report.md`：
+> 本地验证 **42 选中 / 38 执行 / 38 通过 / 4 跳过 / 0 失败**（退出码 0），
+> 真实外部服务 **4/4 通过**。
+> 下面保留原样，作为"评估当时的实际观测"，不做事后修饰。
 
 执行命令：`pnpm verify:headless`。环境：macOS、本机 Node `v25.8.1`、pnpm `11.24.0`。完整编排退出码为 **0**，已执行的检查通过。
 

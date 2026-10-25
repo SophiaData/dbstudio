@@ -60,7 +60,9 @@
     "test:gui-app-close-guard": "node tests/gui-app-close-guard.mjs",
     "test:gui-connection-guard": "node tests/gui-connection-guard.mjs",
     "test:verify-runner": "node tests/e2e-verify-runner.mjs",
-    "test:cancel-sqlite": "node tests/e2e-cancel.mjs --sqlite-only"
+    "test:cancel-sqlite": "node tests/e2e-cancel.mjs --sqlite-only",
+    "test:release-gate": "node tests/e2e-release-gate.mjs",
+    "test:packaged-smoke": "node tests/e2e-packaged-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
