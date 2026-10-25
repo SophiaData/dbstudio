@@ -852,9 +852,10 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
     const elapsedMs = Math.round(performance.now() - startedAt)
     const txState = await this.transactionState()
+    const snippet = analyzed.statementSql.replace(/\s+/g, ' ').trim().slice(0, 50)
     return {
       kind: 'ddl',
-      summary: command,
+      summary: `${snippet} 已完成`,
       committed: !txState.active,
       executedSql: analyzed.statementSql,
       elapsedMs

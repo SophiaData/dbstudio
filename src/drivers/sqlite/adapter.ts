@@ -624,9 +624,10 @@ export class SqliteDriverAdapter implements DriverAdapter {
       throw new SqliteAdapterError('query_failed', `执行 DDL 失败：${describeThrown(thrown)}`, thrown)
     }
     const elapsedMs = Math.round(performance.now() - startedAt)
+    const snippet = analyzed.statementSql.replace(/\s+/g, ' ').trim().slice(0, 50)
     return {
       kind: 'ddl',
-      summary: `${analyzed.keyword.toUpperCase()} 语句执行完成`,
+      summary: `${snippet} 已完成`,
       committed: true,
       executedSql: analyzed.statementSql,
       elapsedMs

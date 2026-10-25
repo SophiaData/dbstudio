@@ -28,7 +28,7 @@
 
 import { NodeId, type DbStudioApi } from '../core/api'
 import type { ObjectRef, TableDescription } from '../core/model'
-import type { QueryOptions, QueryResult, ResultColumn, ResultPage } from '../core/resultset'
+import type { QueryOptions, QueryResult, ResultColumn, ResultPage, StatementResult } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
 import { ResultGrid, type SqlExecutionOutcome } from './grid'
 import { csvEscape, buildCsvFileName } from './grid'
@@ -80,8 +80,9 @@ interface Tab {
   id: number
   /** 显示在标签栏上的名字。 */
   title: string
-  /** 该标签独占的网格实例。 */
-  grid: ResultGrid
+  kind: 'grid' | 'command-summary'
+  /** 该标签独占的网格实例（仅在 kind === 'grid' 时存在）。 */
+  grid: ResultGrid | null
   /** 承载该网格的容器（显示/隐藏靠它，不重建网格）。 */
   pane: HTMLElement
   /** 导出全部时重新执行查询所需的信息。 */
@@ -179,11 +180,11 @@ export class ResultTabs {
     // 「正在执行」的状态，而不是等查完才跳转（否则会觉得点了没反应）。
     this.#activate(tab.id)
     try {
-      await tab.grid.openTable(ref, desc)
+      await tab.grid!.openTable(ref, desc)
     } catch (e) {
       this.#cb.onStatus(`打开表失败：${errText(e)}`, true)
     }
-    return tab.grid
+    return tab.grid!
   }
 
   /** 执行 SQL → 新开一个标签，标题取 SQL 前若干字符。 */
@@ -203,17 +204,99 @@ export class ResultTabs {
     this.#activate(tab.id)
     let outcome: SqlExecutionOutcome = { result: null, error: '执行未完成' }
     try {
-      outcome = await tab.grid.runSql(nodeId, sql)
+      outcome = await tab.grid!.runSql(nodeId, sql)
     } catch (e) {
       this.#cb.onStatus(`执行 SQL 失败：${errText(e)}`, true)
       outcome = { result: null, error: errText(e) }
     }
-    return { grid: tab.grid, outcome }
+    return { grid: tab.grid!, outcome }
+  }
+
+  /** 展示 DML/DDL 的结构化命令执行结果卡片面板。 */
+  async showCommandResult(nodeId: string, sql: string, result: Exclude<StatementResult, { kind: 'rows' }>): Promise<void> {
+    const title = sqlTitle(sql)
+    const id = this.#nextId++
+    const pane = document.createElement('div')
+    pane.className = 'tab-pane'
+    pane.dataset['tabId'] = String(id)
+
+    const summaryPane = document.createElement('div')
+    summaryPane.className = 'statement-summary-pane'
+
+    const header = document.createElement('div')
+    header.className = 'statement-summary-header'
+
+    const badge = document.createElement('span')
+    badge.className = `statement-badge is-${result.kind}`
+    badge.textContent = result.kind === 'affected' ? 'DML 变更' : 'DDL 结构'
+
+    const titleEl = document.createElement('h3')
+    titleEl.className = 'statement-title'
+    titleEl.textContent = title
+    header.append(badge, titleEl)
+
+    const stats = document.createElement('div')
+    stats.className = 'statement-stats'
+
+    if (result.kind === 'affected') {
+      const statAff = document.createElement('div')
+      statAff.className = 'statement-stat'
+      statAff.innerHTML = `<span class="stat-label">影响行数</span><span class="stat-value">影响 ${result.affected} 行</span>`
+      stats.appendChild(statAff)
+    } else if (result.kind === 'ddl') {
+      const statDdl = document.createElement('div')
+      statDdl.className = 'statement-stat'
+      statDdl.innerHTML = `<span class="stat-label">变更摘要</span><span class="stat-value">${result.summary}</span>`
+      stats.appendChild(statDdl)
+    }
+
+    const statElapsed = document.createElement('div')
+    statElapsed.className = 'statement-stat'
+    statElapsed.innerHTML = `<span class="stat-label">执行耗时</span><span class="stat-value">耗时 ${result.elapsedMs}ms</span>`
+    stats.appendChild(statElapsed)
+
+    if (result.kind === 'affected' && result.inTransaction) {
+      const statTx = document.createElement('div')
+      statTx.className = 'statement-stat'
+      statTx.innerHTML = `<span class="stat-label">事务状态</span><span class="stat-value is-pending">未提交（事务中）</span>`
+      stats.appendChild(statTx)
+    }
+
+    const sqlBox = document.createElement('div')
+    sqlBox.className = 'statement-sql-box'
+    const code = document.createElement('code')
+    code.textContent = result.executedSql || sql
+    sqlBox.appendChild(code)
+
+    summaryPane.append(header, stats, sqlBox)
+    pane.appendChild(summaryPane)
+    this.#stackEl.appendChild(pane)
+
+    const tab: Tab = {
+      id,
+      title,
+      kind: 'command-summary',
+      grid: null,
+      pane,
+      source: { kind: 'sql', nodeId, sql },
+      baseSource: { kind: 'sql', nodeId, sql },
+      filterText: '',
+      filterConditions: [],
+      filterDraft: '',
+      filterVisible: false,
+      closing: false,
+      status: null,
+      exporting: false,
+      exportProgress: null
+    }
+
+    this.#tabs.push(tab)
+    this.#activate(tab.id)
   }
 
   get activeContext(): ActiveTabContext | null {
     const tab = this.#tabs.find((t) => t.id === this.#activeId)
-    if (!tab || tab.grid.isDisposed) return null
+    if (!tab || !tab.grid || tab.grid.isDisposed) return null
     const nodeId = tab.source.kind === 'table' ? tab.source.ref.id : tab.source.nodeId
     const parsed = NodeId.parse(nodeId)
     if (!parsed) throw new Error(`标签缺少连接归属：${nodeId}`)
@@ -249,7 +332,7 @@ export class ResultTabs {
     // 每个 ResultGrid 自己会在 root 里建 toolbar/banner/header/viewport。
     // 我们只给它一个干净的容器，**不复制 grid 的任何内部代码**。
     const gridRoot = document.createElement('div')
-    gridRoot.className = 'tab-grid-root'
+    gridRoot.className = 'tab-grid-root grid-panel'
     pane.appendChild(gridRoot)
     this.#stackEl.appendChild(pane)
 
@@ -285,7 +368,7 @@ export class ResultTabs {
     }, true)
 
     const tab: Tab = {
-      id, title, grid, pane, source, baseSource: source,
+      id, title, kind: 'grid', grid, pane, source, baseSource: source,
       filterText: '', filterConditions: [], filterDraft: '', filterVisible: false,
       closing: false, status: null, exporting: false, exportProgress: null
     }
@@ -330,27 +413,29 @@ export class ResultTabs {
     tab.closing = true
     this.#syncChrome()
 
-    try {
-      if (!(await tab.grid.prepareToLeave('关闭标签'))) {
+    if (tab.grid) {
+      try {
+        if (!(await tab.grid.prepareToLeave('关闭标签'))) {
+          tab.closing = false
+          this.#syncChrome()
+          return
+        }
+      } catch (e) {
         tab.closing = false
         this.#syncChrome()
+        this.#cb.onStatus(`关闭标签前检查编辑失败：${errText(e)}`, true)
         return
       }
-    } catch (e) {
-      tab.closing = false
-      this.#syncChrome()
-      this.#cb.onStatus(`关闭标签前检查编辑失败：${errText(e)}`, true)
-      return
-    }
 
-    // 先释放游标，再摘 DOM。即使 dispose 抛错也要继续清理 DOM，否则会留下
-    // "看不见但还在"的僵尸 pane。所以用 try/finally 把清理与释放分开。
-    try {
-      await tab.grid.dispose()
-    } catch (e) {
-      // 释放失败不阻断关闭流程，但要让人知道（可能是连接已断）。
-      this.#cb.onStatus(`关闭标签时释放游标失败：${errText(e)}`, true)
-    } finally {
+      // 先释放游标，再摘 DOM。即使 dispose 抛错也要继续清理 DOM，否则会留下
+      // "看不见但还在"的僵尸 pane。所以用 try/finally 把清理与释放分开。
+      try {
+        await tab.grid.dispose()
+      } catch (e) {
+        // 释放失败不阻断关闭流程，但要让人知道（可能是连接已断）。
+        this.#cb.onStatus(`关闭标签时释放游标失败：${errText(e)}`, true)
+      }
+    }
       tab.pane.remove()
       // await dispose() 期间别的标签可能已经关掉了，所以按对象重新定位下标，
       // 不能用 await 之前记下的那个位置。
@@ -367,7 +452,6 @@ export class ResultTabs {
       this.#syncChrome()
       const status = this.#tabs.find((t) => t.id === this.#activeId)?.status
       if (status) this.#cb.onStatus(status.text, status.isError)
-    }
   }
 
   /** 关闭当前标签（快捷键与按钮共用）。 */
@@ -426,7 +510,7 @@ export class ResultTabs {
     this.#emptyEl.hidden = has
     this.#stackEl.hidden = !has
     const active = this.#activeId !== null ? this.#tabById(this.#activeId) : undefined
-    this.#exportAllBtn.disabled = !active || active.grid.isDisposed || active.exporting || active.closing
+    this.#exportAllBtn.disabled = !active || !active.grid || active.grid.isDisposed || active.exporting || active.closing
     this.#exportAllBtn.textContent = active?.exportProgress ?? this.#exportAllLabel
     if (active) {
       // tooltip 明确两件事：①只作用于当前标签 ②会重新查询一次 ③有上限。
@@ -456,7 +540,7 @@ export class ResultTabs {
     const id = this.#activeId
     if (id === null) return
     const tab = this.#tabById(id)
-    if (!tab || tab.grid.isDisposed || tab.exporting || tab.closing) return
+    if (!tab || !tab.grid || tab.grid.isDisposed || tab.exporting || tab.closing) return
 
     tab.exporting = true
     this.#syncChrome()
@@ -465,7 +549,7 @@ export class ResultTabs {
       // 1) 重新执行查询，拿第一页 + 新游标。
       const first = await this.#runQueryForSource(tab.source)
       cursorId = first.cursorId
-      if (tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
+      if (!tab.grid || tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
       // previewTable/runQuery 若没保留游标（keepCursor=false）就没有 cursorId：
       // 这种情况只能导出第一页，明确告知，而不是假装导完了。
       if (!cursorId) {
@@ -500,7 +584,7 @@ export class ResultTabs {
           offset,
           Math.min(EXPORT_PAGE_SIZE, MAX_EXPORT_ALL_ROWS - total)
         )
-        if (tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
+        if (!tab.grid || tab.grid.isDisposed || tab.closing || !this.#tabs.includes(tab)) return
         if (next.returned === 0) {
           if (next.hasMore) throw new Error('分页未前进，已中止导出（不能确认结果完整）')
           break

@@ -307,6 +307,7 @@ async function boot(): Promise<void> {
             return
           }
         } else if (stmtRes.kind === 'affected') {
+          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
           const parsed = NodeId.parse(connectionNodeId)
           if (parsed) {
             const ctrl = getTransactionController(parsed.connectionId)
@@ -315,6 +316,7 @@ async function boot(): Promise<void> {
           await recordSqlHistory(stmt, connectionNodeId, elapsed, null, stmtRes.affected)
           setStatus(`执行成功，影响 ${stmtRes.affected} 行（耗时 ${Math.round(elapsed)}ms）`)
         } else if (stmtRes.kind === 'ddl') {
+          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
           tree.loadRoots()
           const parsed = NodeId.parse(connectionNodeId)
           if (parsed) {
