@@ -32,6 +32,7 @@
     "test:sdk": "cd sdk && node test/sdk.e2e.mjs",
     "test:sdk-package": "node tests/e2e-sdk-package.mjs",
     "test:connection-lifecycle": "node tests/e2e-connection-lifecycle.mjs",
+    "test:postgres-edits": "node tests/e2e-postgres-edits.mjs",
     "test:verify-manifest": "node tests/e2e-verify-manifest.mjs",
     "test:gui-flow": "node tests/gui-flow.mjs",
     "test:mutations": "node tests/e2e-mutations.mjs",
@@ -54,7 +55,8 @@
     "test:gui-tab-context": "node tests/gui-tab-context.mjs",
     "test:gui-export-integrity": "node tests/gui-export-integrity.mjs",
     "test:gui-transaction-lifecycle": "node tests/gui-transaction-lifecycle.mjs",
-    "test:gui-mutation-transaction": "node tests/gui-mutation-transaction.mjs"
+    "test:gui-mutation-transaction": "node tests/gui-mutation-transaction.mjs",
+    "test:gui-grid-lifecycle": "node tests/gui-grid-lifecycle.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

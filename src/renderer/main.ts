@@ -20,6 +20,7 @@ import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs, type ActiveTabContext } from './tabs'
 import { SqlEditor } from './sql-editor'
+import { extractKeyValues, resolveKeyColumnIndex, encodeRowKey } from './grid'
 import { SqlLibraryPanel } from './sql-library'
 import { splitStatements } from './sql-format'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
@@ -105,6 +106,13 @@ async function boot(): Promise<void> {
       // 检查失败时**不放行**：宁可让用户重试，也不能在不确定的情况下退出。
       return false
     }
+  }
+
+  // 暴露 A1 纯函数与核心身份契约，供 GUI/端到端自动化测试验证
+  ;(window as unknown as Record<string, unknown>).__dbstudioA1 = {
+    extractKeyValues,
+    resolveKeyColumnIndex,
+    encodeRowKey
   }
 
   // ---- 结果集多标签接线 ----

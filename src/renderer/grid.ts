@@ -32,7 +32,7 @@ import {
   type GridLayoutPrefs,
   type StorageLike
 } from './layout-persist'
-import type { ObjectRef, TableDescription } from '../core/model'
+import type { ColumnDescription, ObjectRef, TableDescription } from '../core/model'
 import type { CellValue, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
 import type { QuotingRules } from '../core/driver'
 import {
@@ -97,6 +97,7 @@ type Source =
 export interface SqlExecutionOutcome {
   readonly result: QueryResult | null
   readonly error: string | null
+  readonly superseded?: boolean
 }
 
 export class ResultGrid implements TransactionParticipant {
@@ -150,6 +151,9 @@ export class ResultGrid implements TransactionParticipant {
   #quotingTried = false
   /** 排序重查进行中：禁用列头点击，防连点。 */
   #sorting = false
+  /** 查询轮次序号：保证并发或异步广播刷新时，较旧请求绝不覆盖较新结果集状态。 */
+  #queryEpoch = 0
+  #disposed = false
 
   // ---- 复制 / 右键菜单 / 全文模态 ----
   readonly #menuEl: HTMLElement
@@ -157,10 +161,15 @@ export class ResultGrid implements TransactionParticipant {
 
   // ---- 编辑状态 ----
   //
-  // 脏数据按「结果集行下标」分组，但**提交时用的是主键值**（见 core/resultset.ts 的
-  // RowUpdate 说明：下标会漂移，不能拿去拼 WHERE）。这里存下标只是为了让 UI
-  // 能把未提交的改动画回对应那行。
-  readonly #dirty = new Map<number, Map<string, CellValue>>()
+  // 脏数据按「稳定主键行身份」分组与持久化，绝不按「结果集行下标」索引。
+  // 行下标在跨标签广播刷新、排序、筛选、增删行后会发生漂移；若按下标索引，
+  // 刷新后从漂移后的行读取主键就会无声改错行（严重数据损坏风险）。
+  // 在用户编辑的那一刻立即锁定原始主键快照，用于后续 UPDATE ... WHERE 定位。
+  readonly #dirty = new Map<string, {
+    readonly rowKey: string
+    readonly keyValues: Record<string, CellValue>
+    readonly changes: Map<string, CellValue>
+  }>()
   /** 最近一次事务状态，用于按钮可用性与「有未提交改动」提示。 */
   #txActive = false
   #pendingAffected = 0
@@ -295,11 +304,12 @@ export class ResultGrid implements TransactionParticipant {
   getLocalDirtySummary(): { rows: number; cells: number } {
     return {
       rows: this.#dirty.size,
-      cells: [...this.#dirty.values()].reduce((total, row) => total + row.size, 0)
+      cells: [...this.#dirty.values()].reduce((total, r) => total + r.changes.size, 0)
     }
   }
 
   setTransactionStateFromController(state: { active: boolean; pendingAffected: number }): void {
+    if (this.#disposed) return
     this.#txActive = state.active
     this.#pendingAffected = state.pendingAffected
     this.#renderEditToolbar()
@@ -308,6 +318,8 @@ export class ResultGrid implements TransactionParticipant {
   reportTransactionControllerStatus(text: string, isError = false): void {
     this.#cb.onStatus(text, isError)
   }
+
+  get isDisposed(): boolean { return this.#disposed }
 
   async applyLocalEditsFromController(): Promise<boolean> {
     return this.#applyEditsDirect()
@@ -333,6 +345,35 @@ export class ResultGrid implements TransactionParticipant {
   /** Exposed for main/index lifecycle hooks through a registered grid. */
   async guardTransaction(action: string): Promise<boolean> {
     return this.#txController?.guardAll(action) ?? true
+  }
+
+  #getKeyCols(): ColumnDescription[] {
+    if (!this.#desc) return []
+    return this.#desc.columns
+      .filter((c) => c.primaryKeyOrdinal !== null)
+      .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
+  }
+
+  #extractKeyValuesFromRow(row: ResultRow): Record<string, CellValue> | null {
+    return extractKeyValues(row, this.#columns, this.#getKeyCols())
+  }
+
+  #findRowByDirtyRecord(record: { rowKey: string }): { rowIndex: number; row: ResultRow } | null {
+    for (const page of this.#pages.values()) {
+      for (const row of page.rows) {
+        const k = this.#extractKeyValuesFromRow(row)
+        if (k) {
+          try {
+            if (encodeRowKey(k) === record.rowKey) {
+              return { rowIndex: row.index, row }
+            }
+          } catch {
+            // 截断文本/BLOB等不完整主键不生成有效 rowKey
+          }
+        }
+      }
+    }
+    return null
   }
 
   #attachTransactionController(nodeId: string): void {
@@ -486,6 +527,7 @@ export class ResultGrid implements TransactionParticipant {
     desc: TableDescription,
     preserveLocalDirty: boolean
   ): Promise<void> {
+    if (this.#disposed) return
     const api = this.#requireApi()
     this.#source = { kind: 'table', ref, desc }
     this.#desc = desc
@@ -515,7 +557,8 @@ export class ResultGrid implements TransactionParticipant {
       this.#layoutScope = { dialect: '', connectionId: parsedNode.connectionId }
     }
     this.#layoutTableName = parsedNode?.tableName ?? null
-    await this.#openCursor(() => api.previewTable(ref.id), preserveLocalDirty)
+    const outcome = await this.#openCursor(() => api.previewTable(ref.id), preserveLocalDirty)
+    if (outcome.superseded) return
     // 必须在 openCursor 之后：那时 #columns 才就绪，才能校验列名是否还存在
     this.#applyPersistedLayout()
     if (this.#sort.col >= 0) {
@@ -553,6 +596,7 @@ export class ResultGrid implements TransactionParticipant {
     sql: string,
     preserveLocalDirty: boolean
   ): Promise<SqlExecutionOutcome> {
+    if (this.#disposed) return { result: null, error: null, superseded: true }
     const api = this.#requireApi()
     // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
     this.#source = { kind: 'sql', sql, nodeId }
@@ -566,6 +610,7 @@ export class ResultGrid implements TransactionParticipant {
       () => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }),
       preserveLocalDirty
     )
+    if (outcome.superseded) return outcome
     this.#applyEditability()
     await this.#refreshTransactionState()
     // 自由 SQL 同样可能跑很久，取消能力也要同步
@@ -591,10 +636,12 @@ export class ResultGrid implements TransactionParticipant {
     this.#columns = []
     this.#selectedRow = -1
     this.#selectedCol = -1
-    if (!preserveLocalDirty) this.#dirty.clear()
+    if (!preserveLocalDirty) {
+      this.#dirty.clear()
+      this.#txActive = false
+      this.#pendingAffected = 0
+    }
     this.#editing = null
-    this.#txActive = false
-    this.#pendingAffected = 0
     this.#headerEl.replaceChildren()
     this.#headerEl.appendChild(this.#headerInnerEl)
     this.#rowsEl.replaceChildren()
@@ -615,16 +662,30 @@ export class ResultGrid implements TransactionParticipant {
     exec: () => Promise<QueryResult>,
     preserveLocalDirty = false
   ): Promise<SqlExecutionOutcome> {
+    if (this.#disposed) return { result: null, error: null, superseded: true }
+    const epoch = ++this.#queryEpoch
     await this.#reset(preserveLocalDirty)
+    if (epoch !== this.#queryEpoch || this.#disposed) {
+      return { result: null, error: null, superseded: true }
+    }
     this.#cb.onStatus('正在执行查询…')
     let result: QueryResult
     try {
       result = await exec()
     } catch (e) {
+      if (epoch !== this.#queryEpoch) return { result: null, error: null, superseded: true }
       const message = errText(e)
       this.#cb.onStatus(`查询失败：${message}`, true)
       this.#showError(message)
       return { result: null, error: message }
+    }
+
+    if (epoch !== this.#queryEpoch) {
+      // 较旧查询迟于较新查询返回，丢弃，并释放它自己创建的游标。
+      if (result.cursorId) {
+        await this.#closeStaleCursor(result.cursorId)
+      }
+      return { result: null, error: null, superseded: true }
     }
 
     this.#cursorId = result.cursorId
@@ -644,6 +705,9 @@ export class ResultGrid implements TransactionParticipant {
         (result.hasMore ? ' · 可继续滚动加载' : ' · 已全部返回')
     )
     if (result.rows.length === 0) this.#showEmpty()
+    if (preserveLocalDirty && this.#txController) {
+      void this.#refreshTransactionState().catch(() => {})
+    }
     return { result, error: null }
   }
 
@@ -769,14 +833,22 @@ export class ResultGrid implements TransactionParticipant {
   // -------------------------------------------------------------------------
 
   #renderEditToolbar(): void {
+    if (this.#disposed) return
     // 工具条是整块重建的，先保住外部的「执行 SQL」条（它由外部 setToolbar 塞进来）。
     this.#toolbarEl.replaceChildren()
 
     const info = document.createElement('span')
     info.className = 'grid-tx-info'
-    const dirtyCells = [...this.#dirty.values()].reduce((n, m) => n + m.size, 0)
-    if (this.#txActive) {
-      info.textContent = `未提交：${this.#dirty.size} 行 / ${dirtyCells} 处改动`
+    const dirtySummary = this.getLocalDirtySummary()
+    const missingCount = [...this.#dirty.values()].filter(
+      (r) => this.#exhausted && this.#findRowByDirtyRecord(r) === null
+    ).length
+
+    if (missingCount > 0) {
+      info.textContent = `⚠ 暂存编辑中 ${missingCount} 行目标记录已丢失（可能已被删除）`
+      info.classList.add('is-warning')
+    } else if (this.#txActive) {
+      info.textContent = `未提交：${this.#dirty.size} 行 / ${dirtySummary.cells} 处改动`
       info.classList.add('is-pending')
     } else {
       info.textContent = this.#root.dataset['editable'] === 'true' ? '双击单元格可编辑' : '只读'
@@ -1000,7 +1072,7 @@ export class ResultGrid implements TransactionParticipant {
   ): Promise<void> {
     const api = this.#requireApi()
     const src = this.#source
-    if (!src) return
+    if (!src || this.#disposed) return
 
     this.#sorting = true
     this.#renderHeader() // 刷新箭头/禁用态
@@ -1010,15 +1082,17 @@ export class ResultGrid implements TransactionParticipant {
         sort === null
           ? ''
           : ` ORDER BY ${quoteIdentifier(sort.colName, sort.rules)} ${sort.dir === 'asc' ? 'ASC' : 'DESC'}`
+      let outcome: SqlExecutionOutcome
       if (src.kind === 'table') {
         const table = quoteIdentifier(src.ref.name, sort?.rules ?? (await this.#requireQuoting()))
         const sql = `SELECT * FROM ${table}${order}`
-        await this.#openCursor(() => api.runQuery(src.ref.id, sql, { limit: PAGE_SIZE }))
+        outcome = await this.#openCursor(() => api.runQuery(src.ref.id, sql, { limit: PAGE_SIZE }), true)
       } else {
         // 子查询别名固定且带下划线，避开与原 SQL 里的表别名撞名。
         const sql = `SELECT * FROM (${src.sql}) _dbstudio_sort${order}`
-        await this.#openCursor(() => api.runQuery(src.nodeId, sql, { limit: PAGE_SIZE }))
+        outcome = await this.#openCursor(() => api.runQuery(src.nodeId, sql, { limit: PAGE_SIZE }), true)
       }
+      if (outcome.superseded || outcome.error !== null) return
       this.#cb.onStatus(
         sort
           ? `已按「${sort.colName}」${sort.dir === 'asc' ? '升序' : '降序'}重新查询`
@@ -1375,6 +1449,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 把脏数据提交到事务（不 commit）。 */
   async applyEdits(): Promise<void> {
+    if (this.#disposed) return
     if (this.#txController) {
       await this.#txController.apply(this)
       return
@@ -1393,37 +1468,18 @@ export class ResultGrid implements TransactionParticipant {
     }
     if (this.#dirty.size === 0) return true
 
-    const keyCols = desc.columns
-      .filter((c) => c.primaryKeyOrdinal !== null)
-      .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
+    const keyCols = this.#getKeyCols()
     if (keyCols.length === 0) {
       this.#cb.onStatus('该表没有主键，无法定位行', true)
       return false
     }
 
     const updates: RowUpdate[] = []
-    for (const [rowIndex, changes] of this.#dirty) {
-      const row = this.#rowAt(rowIndex)
-      if (!row) {
-        this.#cb.onStatus(`第 ${rowIndex + 1} 行已不在缓存中，请重新加载后再改`, true)
-        return false
-      }
-      // 用**主键值**定位行，而不是下标——下标会漂移，改错行且无声。
-      const keyValues: Record<string, CellValue> = {}
-      for (const kc of keyCols) {
-        const ci = this.#columns.findIndex((c) => c.name === kc.name)
-        if (ci < 0) {
-          this.#cb.onStatus(`主键列「${kc.name}」不在结果集中，无法定位行`, true)
-          return false
-        }
-        const cell = row.cells[ci]
-        if (!cell || cell.kind === 'null') {
-          this.#cb.onStatus(`主键列「${kc.name}」值为 NULL，无法定位行`, true)
-          return false
-        }
-        keyValues[kc.name] = cell
-      }
-      updates.push({ keyValues, changes: Object.fromEntries(changes) })
+    for (const record of this.#dirty.values()) {
+      updates.push({
+        keyValues: record.keyValues,
+        changes: Object.fromEntries(record.changes)
+      })
     }
 
     this.#cb.onStatus(`正在应用 ${updates.length} 行改动…`)
@@ -1455,6 +1511,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 提交事务。 */
   async commit(): Promise<void> {
+    if (this.#disposed) return
     if (!this.#txController || !this.#source) {
       this.#cb.onStatus('自由 SQL 无事务上下文，无法提交', true)
       return
@@ -1464,6 +1521,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 回滚事务。 */
   async rollback(): Promise<void> {
+    if (this.#disposed) return
     if (!this.#txController || !this.#source) return
     await this.#txController.rollback(this)
   }
@@ -1524,6 +1582,7 @@ export class ResultGrid implements TransactionParticipant {
    * 让用户一次填完再提交，更安全。
    */
   #openInsertModal(): void {
+    if (this.#disposed) return
     const desc = this.#desc
     const tableId = this.#tableNodeId()
     if (!desc || !tableId) {
@@ -1633,6 +1692,7 @@ export class ResultGrid implements TransactionParticipant {
           if (typeof fn !== 'function') {
             throw new Error('insertRow 接口尚未就绪')
           }
+          if (this.#disposed) return
           const res = await fn(tableId, values)
           close()
           this.#cb.onStatus(`已插入 ${res.affected} 行（未提交，点「提交」生效）`)
@@ -1648,6 +1708,7 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 删除当前选中的行。用主键值定位，避免误删。 */
   async #deleteSelectedRow(): Promise<void> {
+    if (this.#disposed) return
     const desc = this.#desc
     const tableId = this.#tableNodeId()
     if (!desc || !tableId) {
@@ -1783,6 +1844,7 @@ export class ResultGrid implements TransactionParticipant {
   // -------------------------------------------------------------------------
 
   #renderHeader(): void {
+    if (this.#disposed) return
     this.#headerInnerEl.replaceChildren()
 
     const corner = document.createElement('div')
@@ -1845,6 +1907,7 @@ export class ResultGrid implements TransactionParticipant {
    * 区别是那边数据已全在内存、滚动到底只是换下标；这边到边界会真的去拉下一页。
    */
   #render(): void {
+    if (this.#disposed) return
     const viewportH = this.#viewportEl.clientHeight || 0
     const scrollTop = this.#viewportEl.scrollTop
 
@@ -1880,6 +1943,7 @@ export class ResultGrid implements TransactionParticipant {
   #loadPage(pageIndex: number): Promise<void> {
     const api = this.#requireApi()
     const cursorId = this.#cursorId
+    const epoch = this.#queryEpoch
     if (!cursorId || this.#exhausted) return Promise.resolve()
 
     const offset = pageIndex * PAGE_SIZE
@@ -1887,9 +1951,11 @@ export class ResultGrid implements TransactionParticipant {
     const existing = this.#inflight.get(pageIndex)
     if (existing) return existing
 
-    const task = (async () => {
+    let task: Promise<void> | null = null
+    task = (async () => {
       try {
         const page = await api.fetchResultPage(cursorId, offset, PAGE_SIZE)
+        if (epoch !== this.#queryEpoch || cursorId !== this.#cursorId) return
         this.#pages.set(pageIndex, { rows: [...page.rows], exhausted: !page.hasMore })
         this.#knownRows = Math.max(this.#knownRows, offset + page.returned)
         if (!page.hasMore) {
@@ -1897,11 +1963,16 @@ export class ResultGrid implements TransactionParticipant {
           this.#cb.onStatus(`已加载全部 ${this.#knownRows} 行`)
         }
       } catch (e) {
+        if (epoch !== this.#queryEpoch || cursorId !== this.#cursorId) return
         // 单页失败不能让整个网格崩掉：记状态，格子保持骨架。
         this.#cb.onStatus(`加载第 ${pageIndex + 1} 页失败：${errText(e)}`, true)
       } finally {
-        this.#inflight.delete(pageIndex)
-        this.#render()
+        if (task !== null && this.#inflight.get(pageIndex) === task) {
+          this.#inflight.delete(pageIndex)
+          if (epoch === this.#queryEpoch && cursorId === this.#cursorId) {
+            this.#render()
+          }
+        }
       }
     })()
     this.#inflight.set(pageIndex, task)
@@ -1952,11 +2023,21 @@ export class ResultGrid implements TransactionParticipant {
       if (rowIndex === this.#selectedRow && c === this.#selectedCol) {
         cell.classList.add('is-focused')
       }
-      // 脏标记：这一格有未提交的改动。视觉必须明显，否则用户会忘了改过什么。
-      const dirtyRow = this.#dirty.get(rowIndex)
+      // 脏标记：按稳定行身份定位未提交改动。
+      const keyValues = this.#extractKeyValuesFromRow(row)
+      let rowKey: string | null = null
+      if (keyValues) {
+        try {
+          rowKey = encodeRowKey(keyValues)
+        } catch {
+          rowKey = null
+        }
+      }
+      const dirtyRecord = rowKey ? this.#dirty.get(rowKey) : undefined
       const colName = this.#columns[c]?.name ?? ''
-      const dirtyValue = dirtyRow?.get(colName)
-      const value = dirtyValue ?? row.cells[c] ?? { kind: 'null' as const }
+      const dirtyValue = dirtyRecord?.changes.get(colName)
+      const dbValue = row.cells[c] ?? { kind: 'null' as const }
+      const value = dirtyValue ?? dbValue
       this.#paintCell(cell, value)
       if (dirtyValue !== undefined) cell.classList.add('is-dirty')
 
@@ -1972,7 +2053,7 @@ export class ResultGrid implements TransactionParticipant {
       })
       cell.addEventListener('dblclick', () => {
         if (this.#root.dataset['editable'] !== 'true') return
-        this.#beginCellEdit(cell, rowIndex, c, value)
+        this.#beginCellEdit(cell, rowIndex, c, value, dbValue)
       })
       // 右键：先选中该格，再弹出菜单（否则菜单操作的是上一次选中的格子）。
       cell.addEventListener('contextmenu', (e) => {
@@ -1997,8 +2078,22 @@ export class ResultGrid implements TransactionParticipant {
    * 这个两段式是刻意的：如果每敲一次回车就写库，用户改 5 个格子就是 5 次网络往返，
    * 而且中途放弃会留下一半改动。DBeaver 同样是攒批 + `autocommit=false`。
    */
-  #beginCellEdit(cell: HTMLElement, rowIndex: number, col: number, current: CellValue): void {
+  #beginCellEdit(
+    cell: HTMLElement,
+    rowIndex: number,
+    col: number,
+    current: CellValue,
+    dbValue: CellValue
+  ): void {
+    if (this.#disposed) return
     if (this.#editing) return // 已有输入框，先让上一个处理完
+    const row = this.#rowAt(rowIndex)
+    if (!row) return
+    const keyValues = this.#extractKeyValuesFromRow(row)
+    if (!keyValues) {
+      this.#cb.onStatus('该行主键不完整（如存在截断或BLOB主键）或列名存在歧义，无法唯一定位行进行编辑', true)
+      return
+    }
     this.#editing = { row: rowIndex, col }
 
     // 被截断的值不能直接编辑——回写会破坏原值（cellValueToSqlParam 也会拒）。
@@ -2041,7 +2136,7 @@ export class ResultGrid implements TransactionParticipant {
       this.#editing = null
       const raw = input.value
       if (commit) {
-        this.#applyCellChange(rowIndex, col, current, raw)
+        this.#applyCellChange(col, dbValue, raw, keyValues)
       }
       this.#render()
     }
@@ -2062,10 +2157,10 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 把输入框内容转换成一个 `CellValue` 并记入脏池。 */
   #applyCellChange(
-    rowIndex: number,
     col: number,
     original: CellValue,
-    raw: string
+    raw: string,
+    keyValues: Record<string, CellValue>
   ): void {
     const colName = this.#columns[col]?.name
     if (!colName) return
@@ -2073,7 +2168,6 @@ export class ResultGrid implements TransactionParticipant {
     // 空输入：对原本是 NULL 的列视为不改；对原本有值的列视为「设为 NULL」。
     let next: CellValue
     if (raw === '') {
-      if (original.kind === 'null') return
       next = { kind: 'null' }
     } else if (original.kind === 'number') {
       const n = Number(raw)
@@ -2092,21 +2186,31 @@ export class ResultGrid implements TransactionParticipant {
       next = { kind: 'text', text: raw }
     }
 
-    let row = this.#dirty.get(rowIndex)
-    if (!row) {
-      row = new Map<string, CellValue>()
-      this.#dirty.set(rowIndex, row)
-    }
+    const rowKey = encodeRowKey(keyValues)
+    const record = this.#dirty.get(rowKey)
     // 改回原值时把脏标记去掉，避免用户来回改后还显示"有改动"
     if (isSameValue(next, original)) {
-      row.delete(colName)
-      if (row.size === 0) this.#dirty.delete(rowIndex)
+      if (record) {
+        record.changes.delete(colName)
+        if (record.changes.size === 0) this.#dirty.delete(rowKey)
+      }
     } else {
-      row.set(colName, next)
+      let r = record
+      if (!r) {
+        r = {
+          rowKey,
+          keyValues,
+          changes: new Map<string, CellValue>()
+        }
+        this.#dirty.set(rowKey, r)
+      }
+      r.changes.set(colName, next)
     }
     this.#renderEditToolbar()
     this.#cb.onStatus(
-      this.#dirty.size > 0 ? `已暂存 ${this.#dirty.size} 行改动，点「应用修改」写入事务` : '没有未提交的改动'
+      this.#dirty.size > 0
+        ? `已暂存：${this.getLocalDirtySummary().rows} 行 / ${this.getLocalDirtySummary().cells} 处改动`
+        : '所有暂存改动已撤回'
     )
   }
 
@@ -2233,12 +2337,23 @@ export class ResultGrid implements TransactionParticipant {
 
   /** 页面卸载/切换时释放游标。 */
   async dispose(): Promise<void> {
+    if (this.#disposed) return
+    this.#disposed = true
+    this.#queryEpoch += 1
     await this.#reset()
     this.#txUnregister?.()
     this.#txUnregister = null
     this.#txController = null
     this.#menuEl.remove()
     this.#modalEl.remove()
+  }
+
+  async #closeStaleCursor(cursorId: string): Promise<void> {
+    try {
+      await this.#requireApi().closeCursor(cursorId)
+    } catch {
+      // 旧游标可能已随连接异常退出，清理路径不应覆盖当前查询结果。
+    }
   }
 }
 
@@ -2405,4 +2520,84 @@ export function quoteIdentifier(name: string, rules: QuotingRules): string {
 export function buildCsvFileName(now: Date = new Date()): string {
   const iso = now.toISOString().replace(/[:.]/g, '-')
   return `dbstudio-${iso}.csv`
+}
+
+/**
+ * 解析结果集列中对应的主键列下标。
+ * 优先真实列名精确全字匹配（大小写敏感）；若无精确匹配，且大小写不敏感匹配唯一时才回退；
+ * 若结果集中存在同名歧义列或大小写多重候选，则返回 null（明确拒绝编辑，防止身份错位）。
+ */
+export function resolveKeyColumnIndex(
+  columns: readonly ResultColumn[],
+  keyColName: string
+): number | null {
+  const exactIndices: number[] = []
+  const ciIndices: number[] = []
+  const targetLower = keyColName.toLowerCase()
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i]
+    if (!col) continue
+    if (col.name === keyColName) {
+      exactIndices.push(i)
+    }
+    if (col.name.toLowerCase() === targetLower) {
+      ciIndices.push(i)
+    }
+  }
+
+  if (exactIndices.length === 1) {
+    return exactIndices[0] ?? null
+  }
+  if (exactIndices.length > 1) {
+    // 结果集中存在多个精确重名列（例如 SELECT id, id FROM ...），产生歧义，无法唯一定位
+    return null
+  }
+  // 无精确匹配时，尝试大小写不敏感回退；若候选不唯一则拒绝
+  if (ciIndices.length === 1) {
+    return ciIndices[0] ?? null
+  }
+  return null
+}
+
+/**
+ * 从一行中提取主键各列的快照值。
+ * 必须取得完整、非截断、非BLOB预览的确定主键；若列名有歧义或主键不完整，返回 null。
+ */
+export function extractKeyValues(
+  row: ResultRow,
+  columns: readonly ResultColumn[],
+  keyCols: readonly ColumnDescription[]
+): Record<string, CellValue> | null {
+  if (keyCols.length === 0) return null
+  const keyValues: Record<string, CellValue> = {}
+  for (const kc of keyCols) {
+    const ci = resolveKeyColumnIndex(columns, kc.name)
+    if (ci === null) return null
+    const cell = row.cells[ci]
+    if (!cell || cell.kind === 'null') return null
+    // 截断文本与 BLOB 预览不能代表完整主键，明确拒绝作为稳定行身份
+    if (cell.kind === 'text' && cell.truncated) return null
+    if (cell.kind === 'blob') return null
+    keyValues[kc.name] = cell
+  }
+  return keyValues
+}
+
+/** 把行主键各列值编码为稳定唯一键，供脏编辑与多标签同步索引。 */
+export function encodeRowKey(keyValues: Record<string, CellValue>): string {
+  const keys = Object.keys(keyValues).sort()
+  return keys
+    .map((k) => {
+      const v = keyValues[k]
+      if (!v || v.kind === 'null') throw new Error(`主键列「${k}」值不能为 NULL`)
+      if (v.kind === 'number') return `${k}:n:${v.value}`
+      if (v.kind === 'boolean') return `${k}:b:${v.value}`
+      if (v.kind === 'text') {
+        if (v.truncated) throw new Error(`主键列「${k}」文本被截断，不能作为稳定行身份`)
+        return `${k}:t:${JSON.stringify(v.text)}`
+      }
+      throw new Error(`主键列「${k}」类型（${v.kind}）不支持作为稳定行身份`)
+    })
+    .join(';')
 }

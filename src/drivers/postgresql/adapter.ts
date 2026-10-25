@@ -95,6 +95,7 @@ import {
   buildUpdate,
   normalizeValues,
   resolveColumns,
+  resolveRequiredColumns,
   mustGetValue,
   type ColumnMatch
 } from './edits'
@@ -1408,28 +1409,20 @@ export class PostgresDriverAdapter implements DriverAdapter {
     actionLabel: string
   ): readonly ColumnMatch[] {
     const keyKeys = Object.keys(keyValues)
-    const keyResolved = resolveColumns(keyKeys, target.availableColumns)
-    if (keyResolved.unknown.length > 0) {
+    const keyResolved = resolveRequiredColumns(target.keyColumns, keyKeys, target.availableColumns)
+    if (keyResolved.resolved.unknown.length > 0) {
       throw new PostgresAdapterError(
         'bad_params',
-        `第 ${position} 条${actionLabel}的主键列不存在：${keyResolved.unknown.join('、')}。「${target.tableName}」的可用列：${target.availableColumns.join('、')}`
+        `第 ${position} 条${actionLabel}的主键列不存在：${keyResolved.resolved.unknown.join('、')}。「${target.tableName}」的可用列：${target.availableColumns.join('、')}`
       )
     }
-    const missingKeys = target.keyColumns.filter(
-      (key) => !keyKeys.some((candidate) => candidate.toLowerCase() === key.toLowerCase())
-    )
-    if (missingKeys.length > 0) {
+    if (keyResolved.missing.length > 0) {
       throw new PostgresAdapterError(
         'bad_params',
-        `第 ${position} 条${actionLabel}缺少主键列的值：${missingKeys.join('、')}。在线编辑必须用完整主键定位行。`
+        `第 ${position} 条${actionLabel}缺少主键列的值：${keyResolved.missing.join('、')}。在线编辑必须用完整主键定位行。`
       )
     }
-    const ordered: ColumnMatch[] = []
-    for (const key of target.keyColumns) {
-      const match = keyResolved.matched.find((candidate) => candidate.canonical.toLowerCase() === key.toLowerCase())
-      if (match !== undefined) ordered.push(match)
-    }
-    return ordered
+    return keyResolved.ordered
   }
 
   #validateUpdate(target: EditableTarget, update: RowUpdate, position: number): void {
@@ -1455,11 +1448,12 @@ export class PostgresDriverAdapter implements DriverAdapter {
     index: number
   ): Promise<RowEditOutcome> {
     const changeResolved = resolveColumns(Object.keys(update.changes), target.availableColumns)
-    const keyResolved = resolveColumns(Object.keys(update.keyValues), target.availableColumns)
-    const keyMatches = target.keyColumns.map((key) =>
-      keyResolved.matched.find((candidate) => candidate.canonical.toLowerCase() === key.toLowerCase())
+    const keyResolved = resolveRequiredColumns(
+      target.keyColumns,
+      Object.keys(update.keyValues),
+      target.availableColumns
     )
-    const orderedKeyMatches = keyMatches.filter((match) => match !== undefined)
+    const orderedKeyMatches = keyResolved.ordered
     const keyColumns = orderedKeyMatches.map((match) => match.canonical)
 
     let built

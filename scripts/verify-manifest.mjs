@@ -49,6 +49,7 @@ export const STEPS = [
   { id: 'test:mutations', title: '增删改与完整取值 e2e', group: 'node' },
   { id: 'test:ddl', title: 'DDL 与编辑连接 e2e', group: 'node' },
   { id: 'test:connection-lifecycle', title: '连接故障恢复与并发建连', group: 'node' },
+  { id: 'test:postgres-edits', title: 'PostgreSQL 编辑列名与组合主键契约', group: 'node' },
   { id: 'test:sql-library', title: 'SQL 历史与收藏存储', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，
@@ -73,6 +74,7 @@ export const STEPS = [
   { id: 'test:gui-export-integrity', title: '导出完整性 GUI（截断拒绝导出）', group: 'gui' },
   { id: 'test:gui-transaction-lifecycle', title: '事务生命周期 GUI（离开保护/提交/回滚）', group: 'gui' },
   { id: 'test:gui-mutation-transaction', title: '增删改的事务归属 GUI（跨标签同步）', group: 'gui' },
+  { id: 'test:gui-grid-lifecycle', title: '网格真实查询、分页与销毁竞争', group: 'gui' },
 
   // ---- 需要外部服务 ----
   {
