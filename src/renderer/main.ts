@@ -146,6 +146,24 @@ async function boot(): Promise<void> {
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
 
+  const DRAFT_PREFIX = 'dbstudio.sql-draft.'
+  const saveDraft = (connId: string | null, text: string): void => {
+    if (!connId || typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(DRAFT_PREFIX + connId, text)
+    } catch {
+      /* ignore storage quota errors */
+    }
+  }
+  const loadDraft = (connId: string | null): string => {
+    if (!connId || typeof localStorage === 'undefined') return ''
+    try {
+      return localStorage.getItem(DRAFT_PREFIX + connId) ?? ''
+    } catch {
+      return ''
+    }
+  }
+
   /**
    * 取方言的标识符引用规则。
    *
@@ -188,10 +206,19 @@ async function boot(): Promise<void> {
     if (!ref) return
     // 子节点 id 形如 `connection:c1|table:users`；连接节点形如 `connection:c1`。
     // runQuery 需要的正是 `connection:<id>` 这个前缀部分。
+    let nextConnNodeId: string | null = null
     if (ref.kind === 'connection') {
-      currentConnectionNodeId = ref.id
+      nextConnNodeId = ref.id
     } else if (ref.id.startsWith('connection:')) {
-      currentConnectionNodeId = ref.id.split('|')[0] ?? null
+      nextConnNodeId = ref.id.split('|')[0] ?? null
+    }
+
+    if (nextConnNodeId && nextConnNodeId !== currentConnectionNodeId) {
+      if (currentConnectionNodeId) {
+        saveDraft(currentConnectionNodeId, sqlEditor.getValue())
+      }
+      currentConnectionNodeId = nextConnNodeId
+      sqlEditor.setValue(loadDraft(nextConnNodeId))
     }
 
     if (ref.kind === 'table' || ref.kind === 'view') {
@@ -368,6 +395,11 @@ async function boot(): Promise<void> {
   const sqlEditor = new SqlEditor(el('sql-editor-host'), {
     onExecute: (sql) => void executeSql(sql),
     onStatus: (t, isErr) => setStatus(t, isErr),
+    onChange: (text) => {
+      if (currentConnectionNodeId) {
+        saveDraft(currentConnectionNodeId, text)
+      }
+    },
     getMetadataCandidates: async () => {
       const connId = currentConnectionNodeId
       if (!connId) return []
