@@ -267,6 +267,15 @@ async function boot(): Promise<void> {
    * 切分用 sql-format.ts 的 splitStatements —— 它能正确处理字符串/注释里的分号
    * （`SELECT 'a;b'` 不会被切成两条）。
    */
+  const findStatementLine = (fullSql: string, stmt: string, fromIndex = 0): { line: number; nextIndex: number } => {
+    const trimmed = stmt.trim()
+    const snippet = trimmed.slice(0, 30)
+    const idx = fullSql.indexOf(snippet, fromIndex)
+    if (idx === -1) return { line: 1, nextIndex: fromIndex }
+    const line = fullSql.slice(0, idx).split('\n').length
+    return { line, nextIndex: idx + snippet.length }
+  }
+
   const executeSql = async (sql: string): Promise<void> => {
     if (!sql.trim()) return
     if (!currentConnectionNodeId) {
@@ -285,8 +294,11 @@ async function boot(): Promise<void> {
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
     const connectionNodeId = currentConnectionNodeId
+    let cursorIndex = 0
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i] as string
+      const lineInfo = findStatementLine(sql, stmt, cursorIndex)
+      cursorIndex = lineInfo.nextIndex
       const startedAt = performance.now()
       try {
         const stmtRes = await api.executeStatement(connectionNodeId, stmt)
@@ -302,7 +314,7 @@ async function boot(): Promise<void> {
           )
           if (opened.outcome.error !== null) {
             const where =
-              statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+              statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
             setStatus(`${where}${opened.outcome.error}`, true)
             return
           }
@@ -334,7 +346,7 @@ async function boot(): Promise<void> {
           errText(e),
           null
         )
-        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
         setStatus(`${where}${errText(e)}`, true)
         return
       }
