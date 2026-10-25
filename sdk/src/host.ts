@@ -60,7 +60,7 @@ export interface DriverHostOptions {
    */
   readonly execPath?: string
   /** 额外环境变量。 */
-  readonly env?: NodeJS.ProcessEnv
+  readonly env?: Readonly<Record<string, string | undefined>>
   /** 日志回调。宿主进程的 stderr 全部从这里出来。默认丢弃。 */
   readonly onLog?: (level: DriverHostLogLevel, message: string) => void
 }

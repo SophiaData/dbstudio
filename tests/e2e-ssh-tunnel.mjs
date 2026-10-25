@@ -214,7 +214,7 @@ const pg = parsePgUrl(URL.canParse(PG_URL) ? PG_URL : `postgres://${PG_URL}`)
 function fingerprintForFixture() {
   const env = process.env['DBSTUDIO_SSH_HOST_KEY']
   if (env) return env
-  const pub = resolve(root, 'tests/.ssh-fixture/host_ed25519.pub')
+  const pub = process.env['DBSTUDIO_SSH_HOST_PUBLIC_KEY'] ?? resolve(root, 'tests/.ssh-fixture/host_ed25519.pub')
   if (!existsSync(pub)) return undefined
   const text = execFileSync('ssh-keygen', ['-lf', pub], { encoding: 'utf8' }).trim()
   const match = /(SHA256:[A-Za-z0-9+/]+)/.exec(text)
@@ -456,7 +456,7 @@ async function main() {
   // ---- 3. 认证失败：用错误私钥必须拒绝 ----
   {
     console.log('\n[3] SSH 认证失败必须明确')
-    const wrongKey = resolve(root, 'tests/.ssh-fixture/not-authorized-key')
+    const wrongKey = resolve(dirname(SSH_KEY), 'not-authorized-key')
     // 为这条用例临时造一个不在 authorized_keys 里的密钥；失败也比跳过有意义。
     let hasWrongKey = existsSync(wrongKey)
     if (!hasWrongKey) {

@@ -96,6 +96,7 @@ interface Pending {
 export interface DriverHostOptions {
   readonly dialectId: string
   readonly onLog?: (level: 'info' | 'warn' | 'error', message: string) => void
+  readonly onExit?: (error: Error) => void
 }
 
 /**
@@ -108,13 +109,17 @@ export class DriverHostHandle {
   readonly #child: ChildProcessWithoutNullStreams
   readonly #pending = new Map<number, Pending>()
   readonly #onLog: (level: 'info' | 'warn' | 'error', message: string) => void
+  readonly #onExit: (error: Error) => void
+  readonly #exited: Promise<void>
   #nextId = 1
   #stdoutBuffer = ''
   #closed = false
+  #closing: Promise<void> | null = null
   readonly handshake: Promise<RpcHandshake>
 
   constructor(options: DriverHostOptions) {
     this.#onLog = options.onLog ?? (() => {})
+    this.#onExit = options.onExit ?? (() => {})
 
     const script = resolveDriverHostScript()
     this.#child = spawn(process.execPath, [script, '--dialect', options.dialectId], {
@@ -128,12 +133,8 @@ export class DriverHostHandle {
     // 握手是构造后立刻就会到达的一帧，用它确认「这个进程是谁」。
     this.handshake = new Promise<RpcHandshake>((resolveHandshake, rejectHandshake) => {
       const timer = setTimeout(() => {
-        rejectHandshake(new Error(`驱动宿主 ${options.dialectId} 在 10s 内未完成握手`))
+        this.#terminate(new Error(`驱动宿主 ${options.dialectId} 在 10s 内未完成握手`))
       }, 10_000)
-      this.#child.once('error', (err) => {
-        clearTimeout(timer)
-        rejectHandshake(err)
-      })
       // 握手帧由下面的 stdout 解析器捕获后 resolve。
       this.#handshakeSettler = {
         resolve: (hs) => {
@@ -158,12 +159,37 @@ export class DriverHostHandle {
     })
 
     // 关键：进程退出必须清算所有挂起请求，否则 UI 会永远转圈。
-    this.#child.on('exit', (code, signal) => {
-      this.#closed = true
-      this.#failAllPending(
-        new Error(`驱动宿主进程已退出（code=${code ?? 'null'}, signal=${signal ?? 'null'}）`)
-      )
+    this.#exited = new Promise<void>((resolveExit) => {
+      this.#child.once('exit', (code, signal) => {
+        this.#finish(
+          new Error(`驱动宿主进程已退出（code=${code ?? 'null'}, signal=${signal ?? 'null'}）`)
+        )
+        resolveExit()
+      })
+      this.#child.on('error', (err) => {
+        this.#terminate(err)
+        // spawn 失败时没有 exit 事件。
+        if (this.#child.pid === undefined) resolveExit()
+      })
     })
+    this.#child.stdin.on('error', (err) => this.#terminate(err))
+  }
+
+  get closed(): boolean {
+    return this.#closed
+  }
+
+  #finish(error: Error): void {
+    if (this.#closed) return
+    this.#closed = true
+    this.#failAllPending(error)
+    this.#onExit(error)
+  }
+
+  #terminate(error: Error): void {
+    if (this.#closed) return
+    this.#finish(error)
+    this.#child.kill('SIGKILL')
   }
 
   #handshakeSettler: { resolve: (hs: RpcHandshake) => void; reject: (e: Error) => void } | null =
@@ -235,7 +261,7 @@ export class DriverHostHandle {
    * 方法悄悄用了 15s；显式传参时这个选择至少会在 code review 里被看到。
    */
   #requestWithTimeout<T>(method: RpcMethod, params: unknown, timeoutMs: number): Promise<T> {
-    if (this.#closed) {
+    if (this.#closed || (this.#closing && method !== 'disconnect')) {
       return Promise.reject(new Error(`驱动宿主已关闭，无法调用 ${method}`))
     }
     const id = this.#nextId++
@@ -252,7 +278,9 @@ export class DriverHostHandle {
         method
       })
       try {
-        this.#child.stdin.write(`${JSON.stringify(frame)}\n`)
+        this.#child.stdin.write(`${JSON.stringify(frame)}\n`, (err) => {
+          if (err) this.#terminate(err)
+        })
       } catch (e) {
         clearTimeout(timer)
         this.#pending.delete(id)
@@ -448,41 +476,27 @@ export class DriverHostHandle {
   }
 
   /** 优雅关闭：先 disconnect，再关 stdin 让宿主自行退出；超时则强杀。 */
-  async close(): Promise<void> {
-    if (this.#closed) return
-    try {
-      await this.request<unknown>('disconnect')
-    } catch {
-      // 断开失败不影响后续退出流程，忽略。
-    }
-    await this.#endChild()
+  close(): Promise<void> {
+    if (!this.#closing) this.#closing = this.#close()
+    return this.#closing
   }
 
-  async #endChild(): Promise<void> {
-    if (this.#closed) return
-    const exited = new Promise<void>((res) => this.#child.once('exit', () => res()))
+  async #close(): Promise<void> {
+    if (this.#closed) return this.#exited
+    // 限时覆盖 disconnect RPC 本身，不能先等 15s RPC 超时再开始退出计时。
+    const timer = setTimeout(() => this.kill(), SHUTDOWN_GRACE_MS)
     try {
-      this.#child.stdin.end()
-    } catch {
-      /* stdin 可能已关闭 */
-    }
-    const timeout = new Promise<void>((res) => setTimeout(res, SHUTDOWN_GRACE_MS))
-    await Promise.race([exited, timeout])
-    if (!this.#closed) {
-      this.#child.kill('SIGTERM')
-      this.#closed = true
+      await this.request<unknown>('disconnect').catch(() => undefined)
+      if (!this.#closed) this.#child.stdin.end()
+      await this.#exited
+    } finally {
+      clearTimeout(timer)
     }
   }
 
   /** 强制回收（应用退出时兜底）。 */
   kill(): void {
-    if (this.#closed) return
-    this.#closed = true
-    try {
-      this.#child.kill('SIGKILL')
-    } catch {
-      /* 忽略 */
-    }
+    this.#terminate(new Error('驱动宿主已强制关闭'))
   }
 }
 

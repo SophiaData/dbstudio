@@ -28,6 +28,7 @@ import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
+import pg from 'pg'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const hostEntry = resolve(root, 'out/driver-host/index.js')
@@ -454,6 +455,52 @@ async function main() {
     const shape = await host.call('describeTable', { id: 'table:public.pg_users' })
     const serializable = JSON.stringify(shape.result) === JSON.stringify(JSON.parse(JSON.stringify(shape.result)))
     check('22a. describeTable 返回值是纯数据（可 JSON 序列化，无函数/句柄泄漏到协议）', shape.ok === true && serializable, formatDetail(shape.result?.columns?.length))
+
+    // A1: exercise the adapter and SQL on a real server, then verify committed
+    // values through an independent connection (not through the host cache).
+    const caseTable = `pg_a1_keys_${process.pid}`
+    const caseTableId = `table:public.${caseTable}`
+    const verifierClient = new pg.Client({ connectionString: PG_URL })
+    await verifierClient.connect()
+    try {
+      await verifierClient.query(`CREATE TABLE public."${caseTable}" (
+        "id" integer, "ID" integer, value text, PRIMARY KEY ("id", "ID")
+      )`)
+      await verifierClient.query(`INSERT INTO public."${caseTable}" VALUES
+        (7, 10, 'first'), (7, 20, 'second')`)
+      const keys = { id: { kind: 'number', value: 7 }, ID: { kind: 'number', value: 10 } }
+      const update = await host.call('applyEdits', {
+        tableId: caseTableId, updates: [{ keyValues: keys, changes: { value: { kind: 'text', text: 'changed' } } }]
+      })
+      check('A1 PG UPDATE preserves both case-sensitive primary keys',
+        update.ok && update.result?.ok && update.result?.affected === 1, update)
+      await host.call('commitTransaction', {})
+      const updated = (await verifierClient.query(`SELECT * FROM public."${caseTable}" ORDER BY "ID"`)).rows
+      check('A1 PG independent read: only (7,10) changed',
+        updated.length === 2 && updated[0].value === 'changed' && updated[1].value === 'second', updated)
+      for (const keyValues of [{ id: keys.id }, { ID: keys.ID }]) {
+        const incompleteUpdate = await host.call('applyEdits', {
+          tableId: caseTableId, updates: [{ keyValues, changes: { value: { kind: 'text', text: 'wrong' } } }]
+        })
+        const incompleteDelete = await host.call('deleteRows', { tableId: caseTableId, keys: [keyValues] })
+        check(`A1 PG incomplete keys ${Object.keys(keyValues)} reject UPDATE and DELETE`,
+          !incompleteUpdate.ok && !incompleteDelete.ok, { incompleteUpdate, incompleteDelete })
+      }
+      const unchanged = (await verifierClient.query(`SELECT * FROM public."${caseTable}" ORDER BY "ID"`)).rows
+      check('A1 PG rejected incomplete operations leave data unchanged',
+        JSON.stringify(unchanged) === JSON.stringify(updated), unchanged)
+      const removed = await host.call('deleteRows', { tableId: caseTableId, keys: [keys] })
+      check('A1 PG DELETE preserves both case-sensitive primary keys',
+        removed.ok && removed.result?.ok && removed.result?.affected === 1, removed)
+      await host.call('commitTransaction', {})
+      const remaining = (await verifierClient.query(`SELECT * FROM public."${caseTable}"`)).rows
+      check('A1 PG independent read: DELETE leaves (7,20) intact',
+        remaining.length === 1 && remaining[0].ID === 20 && remaining[0].value === 'second', remaining)
+    } finally {
+      await host.call('rollbackTransaction', {})
+      await verifierClient.query(`DROP TABLE IF EXISTS public."${caseTable}"`)
+      await verifierClient.end()
+    }
 
     // ---- disconnect 必须显式回滚未提交事务 ----
     //

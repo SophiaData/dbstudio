@@ -35,6 +35,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const hostEntry = resolve(root, 'out/driver-host/index.js')
 const fixturePath = resolve(root, 'tests/fixtures/sample.db')
 const PG_URL = process.env['DBSTUDIO_PG_URL']
+const mode = process.argv.includes('--sqlite-only')
+  ? 'sqlite'
+  : process.argv.includes('--pg-only')
+    ? 'postgres'
+    : 'all'
 
 const RPC_TIMEOUT_MS = 20_000
 const HANDSHAKE_TIMEOUT_MS = 15_000
@@ -344,8 +349,8 @@ async function main() {
     process.exit(1)
   }
 
-  await testSqlite()
-  await testPostgres()
+  if (mode !== 'postgres') await testSqlite()
+  if (mode !== 'sqlite') await testPostgres()
 
   const failed = results.filter((r) => !r.passed)
   console.log(`\n${results.length - failed.length}/${results.length} 通过`)

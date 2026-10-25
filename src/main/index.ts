@@ -11,7 +11,7 @@
  * 主进程即使遇到某个驱动的原生崩溃，也只是那一个宿主进程挂掉。
  */
 
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
 import type { ConnectionConfig } from '../core/dialect'
@@ -27,6 +27,7 @@ import { SqlLibraryStore } from './SqlLibraryStore'
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
 let sqlLibrary: SqlLibraryStore | null = null
+let windowCleanup: Promise<void> = Promise.resolve()
 
 /**
  * GUI 自动化测试是否以“完全后台”方式运行。
@@ -165,8 +166,27 @@ function createWindow(): void {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  const win = mainWindow
+  let closeApproved = false
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+    const closingManager = manager
+    manager = null
+    windowCleanup = closingManager?.disposeAll() ?? Promise.resolve()
+  })
+  win.on('close', (event) => {
+    if (quitConfirmed || closeApproved) return
+    event.preventDefault()
+    if (quitGuardRunning) return
+    quitGuardRunning = true
+    void (async () => {
+      if (!(await askRendererToGuard(win))) return
+      if (win.isDestroyed()) return
+      closeApproved = true
+      quitGuardRunning = false
+      win.close()
+    })().catch((error) => console.error('[main] 关闭确认失败:', error))
+      .finally(() => { quitGuardRunning = false })
   })
 
   // 自检钩子：设置 DBSTUDIO_SMOKE=1 时，窗口加载完成后在渲染进程里跑一段断言，
@@ -567,7 +587,9 @@ app.whenReady().then(() => {
   createWindow()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    void windowCleanup.then(() => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
 })
 
@@ -577,10 +599,82 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
-  // 不 await：before-quit 里异步操作可能来不及。这里发信号即可，
-  // 子进程有 SIGTERM 兜底，且它们是我们的子进程，父进程退出后不会变成孤儿常驻。
-  void manager?.disposeAll()
+// One pending request covers both window close and application quit. Repeated
+// requests must still preventDefault while the renderer is asking the user.
+let quitConfirmed = false
+let quitGuardRunning = false
+
+async function askRendererToGuard(win: BrowserWindow): Promise<boolean> {
+  if (win.isDestroyed()) return false
+  const contents = win.webContents
+  const askForce = async (): Promise<boolean> => {
+    if (win.isDestroyed()) return false
+    const result = await dialog.showMessageBox(win, {
+      type: 'warning', title: '无法确认未保存改动',
+      message: '页面无响应或已崩溃，无法检查当前连接上的未提交事务。',
+      detail: '取消会保留窗口；退出并放弃可能丢失未应用编辑，并回滚未提交事务。',
+      buttons: ['取消', '退出并放弃'], defaultId: 0, cancelId: 0, noLink: true
+    })
+    return result.response === 1
+  }
+  if (contents.isDestroyed() || contents.isCrashed()) return askForce()
+
+  let finishUnavailable: (value: boolean) => void = () => {}
+  const unavailable = new Promise<boolean>((resolve) => { finishUnavailable = resolve })
+  let nativePending = false
+  const recover = async (crashed: boolean): Promise<void> => {
+    if (nativePending) return
+    nativePending = true
+    try {
+      const force = await askForce()
+      // On an unresponsive but living renderer, cancel leaves its original
+      // confirmation pending. A crash cannot ever deliver that decision.
+      if (force || crashed) finishUnavailable(force)
+    } finally { nativePending = false }
+  }
+  const onGone = (): void => { void recover(true) }
+  const onUnresponsive = (): void => { void recover(false) }
+  const onDestroyed = (): void => finishUnavailable(false)
+  contents.on('render-process-gone', onGone)
+  contents.on('unresponsive', onUnresponsive)
+  contents.on('destroyed', onDestroyed)
+  // This is a diagnostic deadline only; a user considering a dialog never
+  // loses either the pending decision or their data because a timer fired.
+  const timer = setTimeout(() => {
+    console.warn('[main] 仍在等待退出确认，窗口和未保存改动保持不变')
+  }, 60_000)
+  try {
+    const decision = contents.executeJavaScript(`(async () => {
+      if (typeof window.dbstudioGuardTransactions !== 'function') throw new Error('页面事务检查尚未就绪')
+      return (await window.dbstudioGuardTransactions('退出应用')) === true
+    })()`).catch(async (error) => {
+      console.warn('[main] 无法读取退出确认:', error)
+      if (!nativePending) return askForce()
+      return unavailable
+    })
+    return (await Promise.race([decision, unavailable])) === true
+  } finally {
+    clearTimeout(timer)
+    contents.removeListener('render-process-gone', onGone)
+    contents.removeListener('unresponsive', onUnresponsive)
+    contents.removeListener('destroyed', onDestroyed)
+  }
+}
+
+app.on('before-quit', (event) => {
+  if (quitConfirmed) return
+  event.preventDefault()
+  if (quitGuardRunning) return
+  quitGuardRunning = true
+  void (async () => {
+    const win = mainWindow
+    if (win && !win.isDestroyed() && !(await askRendererToGuard(win))) return
+    await Promise.all([windowCleanup, manager?.disposeAll()])
+    manager = null
+    quitConfirmed = true
+    app.quit()
+  })().catch((error) => console.error('[main] 退出确认失败:', error))
+    .finally(() => { quitGuardRunning = false })
 })
 
 // 任何未捕获异常都要有日志，不能静默——Electron 主进程静默崩溃最难查。

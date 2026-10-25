@@ -20,21 +20,16 @@
  */
 
 import { build } from 'vite'
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { buildDriverHost } from '../scripts/build-driver-host.mjs'
 
 const sdkDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(sdkDir, '..')
 const dist = resolve(sdkDir, 'dist')
 const jsTmp = resolve(sdkDir, '.tmp-js')
-
-const hostSrc = resolve(repoRoot, 'out/driver-host/index.js')
-if (!existsSync(hostSrc)) {
-  console.error(`[sdk:build] 缺少驱动宿主产物: ${hostSrc}\n请先在仓库根目录执行: pnpm run build`)
-  process.exit(1)
-}
 
 console.log('[sdk:build] 1/4 清空 dist 与临时目录')
 rmSync(dist, { recursive: true, force: true })
@@ -51,6 +46,27 @@ try {
 } catch {
   console.error('[sdk:build] 类型声明生成失败')
   process.exit(1)
+}
+
+// 共享的 core 源码用打包器解析相对路径；但发布出去的 ESM 声明文件还要能被
+// 普通 NodeNext 消费者解析——那种模式要求写明文件扩展名。
+for (const file of readdirSync(dist, { recursive: true })) {
+  if (!file.endsWith('.d.ts')) continue
+  const path = resolve(dist, file)
+  const source = readFileSync(path, 'utf8')
+  writeFileSync(path, source.replace(
+    /(from\s+['"])(\.[^'"]+)(['"])/g,
+    (_, prefix, specifier, suffix) =>
+      `${prefix}${/\.[cm]?js$/.test(specifier) ? specifier : `${specifier}.js`}${suffix}`
+  ))
+}
+for (const file of readdirSync(resolve(dist, 'src/core'))) {
+  if (!file.endsWith('.d.ts')) continue
+  const jsPath = resolve(dist, 'src/core', file.replace(/\.d\.ts$/, '.js'))
+  // 类型再导出是 `export * from '../../../src/core/x.js'`，
+  // 目标必须是**存在的** .js 文件，否则 NodeNext 下解析会直接失败。
+  // 这里给每个声明文件配一个空实现占位。
+  writeFileSync(jsPath, 'export {}\n')
 }
 
 console.log('[sdk:build] 3/4 打包 JS（ESM 单文件，先打到临时目录）')
@@ -81,11 +97,8 @@ if (existsSync(resolve(jsTmp, 'index.js.map'))) {
 }
 rmSync(jsTmp, { recursive: true, force: true })
 
-console.log('[sdk:build] 4/4 复制驱动宿主')
-cpSync(hostSrc, resolve(dist, 'driver-host/index.js'), { force: true })
-if (existsSync(hostSrc + '.map')) {
-  cpSync(hostSrc + '.map', resolve(dist, 'driver-host/index.js.map'), { force: true })
-}
+console.log('[sdk:build] 4/4 从源码构建驱动宿主')
+await buildDriverHost(resolve(dist, 'driver-host'))
 
 /**
  * ★ 必须给 driver-host 单独声明 CommonJS。

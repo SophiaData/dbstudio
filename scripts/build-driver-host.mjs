@@ -26,37 +26,41 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const outDir = resolve(root, 'out/driver-host')
-
-await build({
-  // 库模式：单入口、单文件输出，不需要任何 web 相关处理。
-  configFile: false,
-  root,
-  logLevel: 'warn',
-  build: {
-    outDir,
-    emptyOutDir: true,
-    target: 'node22',
-    minify: false, // 保留可读性，宿主进程出问题时可以直接看产物排查
-    sourcemap: true,
-    ssr: true,
-    lib: {
-      entry: resolve(root, 'src/driver-host/index.ts'),
-      formats: ['cjs'],
-      fileName: () => 'index.js'
-    },
-    rollupOptions: {
-      // 内置模块与 electron 一律外置，交给宿主 Node 在运行时提供。
-      // node:sqlite 必须外置——内置模块无法被 bundle，内联会直接失败。
-      external: [/^node:/, 'electron']
+export async function buildDriverHost(outDir = resolve(root, 'out/driver-host')) {
+  await build({
+    // 库模式：单入口、单文件输出，不需要任何 web 相关处理。
+    configFile: false,
+    root,
+    logLevel: 'warn',
+    build: {
+      outDir,
+      emptyOutDir: true,
+      target: 'node22',
+      minify: false, // 保留可读性，宿主进程出问题时可以直接看产物排查
+      sourcemap: true,
+      ssr: true,
+      lib: {
+        entry: resolve(root, 'src/driver-host/index.ts'),
+        formats: ['cjs'],
+        fileName: () => 'index.js'
+      },
+      rollupOptions: {
+        // 内置模块与 electron 一律外置，交给宿主 Node 在运行时提供。
+        // node:sqlite 必须外置——内置模块无法被 bundle，内联会直接失败。
+        external: [/^node:/, 'electron']
+      }
     }
-  }
-})
+  })
 
-const outFile = resolve(outDir, 'index.js')
-if (!existsSync(outFile)) {
-  console.error(`[build-driver-host] 构建失败：未产出 ${outFile}`)
-  process.exit(1)
+  const outFile = resolve(outDir, 'index.js')
+  if (!existsSync(outFile)) {
+    console.error(`[build-driver-host] 构建失败：未产出 ${outFile}`)
+    process.exit(1)
+  }
+  const kb = (statSync(outFile).size / 1024).toFixed(1)
+  console.log(`[build-driver-host] ✅ ${outFile} (${kb} KB)`)
 }
-const kb = (statSync(outFile).size / 1024).toFixed(1)
-console.log(`[build-driver-host] ✅ ${outFile} (${kb} KB)`)
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await buildDriverHost()
+}

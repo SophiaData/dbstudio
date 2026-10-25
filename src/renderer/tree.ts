@@ -56,6 +56,7 @@ import {
   type DdlApi
 } from './ddl'
 import { NodeId } from '../core/api'
+import { runConnectionOperation } from './transaction-controller'
 
 /**
  * 一组 DDL 菜单项描述。为什么拆成 create/rename/drop 三槽而不是一个数组：
@@ -1153,7 +1154,8 @@ export class MetadataTree {
           }
           const fn = api.updateConnection
           if (typeof fn !== 'function') throw new Error('updateConnection 不可用')
-          await fn(connId, cfg, Object.keys(secret).length === 0 ? undefined : secret)
+          await runConnectionOperation(api, connId, '更新连接配置',
+            () => fn(connId, cfg, Object.keys(secret).length === 0 ? undefined : secret))
 
           close()
           document.removeEventListener('keydown', onKey)
@@ -1426,8 +1428,15 @@ export class MetadataTree {
     this.#cb.onStatus(connect ? '正在连接…' : '正在断开…')
     try {
       if (connect) await api.connectConnection(connId)
-      else await api.disconnectConnection(connId)
+      else {
+        await runConnectionOperation(api, connId, '断开连接', () => api.disconnectConnection(connId))
+      }
       // 连接状态变了 → 该连接的子树必须作废重取（目录可能完全不同）。
+      if (!connect) {
+        await this.loadRoots()
+        this.#cb.onStatus('已断开')
+        return
+      }
       node.children = null
       node.expanded = true
       await this.#loadChildren(node)

@@ -1,28 +1,18 @@
-# 发布构建：打 tag 时自动为三个平台出安装包并上传到 GitHub Release
-#
-# ===== 为什么必须用 CI 而不是本地打 =====
-#
-# electron-builder 可以跨平台打包，但**不可靠**：
-#   - Windows 的 NSIS 安装器在 macOS 上打需要 wine
-#   - macOS 的签名/公证只能在 macOS 上做
-#   - Linux 的 AppImage 在 macOS 上打容易缺库
-# 官方明确建议「每个平台在各自的 runner 上打」。
-#
-# 所以这里用 matrix：每个平台跑在自己的原生 runner 上。
-#
-# 触发方式：推送形如 v0.1.0 的 tag。
-
 name: release
 
 on:
   push:
-    tags:
-      - 'v*'
-  # 允许手动触发，便于先验证流程而不发版
+    tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # 发版前先跑一遍验证，避免把测试不过的版本发出去
   verify:
     uses: ./.github/workflows/verify.yml
 
@@ -32,66 +22,111 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 每个条目跑在一个原生 runner 上。
-          # macOS 的 electron-builder 一次会同时产出 dmg 与 zip，
-          # 所以一个平台只需一条，不要按产物拆成两条（会重复构建、白烧 runner 时间）。
-          - os: macos-latest
+          - os: macos-15
             platform: mac
-            # 多个 glob 用 YAML 多行标量（| 或 >-）；这里用 |- 保持换行
-            artifacts: |-
-              release/*.dmg
-              release/*.zip
+            arch: arm64
+            executable: release/mac-arm64/dbstudio.app/Contents/MacOS/dbstudio
+          - os: macos-15-intel
+            platform: mac
+            arch: x64
+            executable: release/mac/dbstudio.app/Contents/MacOS/dbstudio
           - os: windows-latest
             platform: win
-            artifacts: 'release/*.exe'
+            arch: x64
+            executable: release/win-unpacked/dbstudio.exe
           - os: ubuntu-latest
             platform: linux
-            artifacts: 'release/*.AppImage'
-
+            arch: x64
+            executable: release/linux-unpacked/dbstudio
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 11
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
-
-      - name: 安装依赖
-        run: pnpm install --frozen-lockfile
-
-      - name: 构建
-        run: pnpm run build
-
-      - name: 打包（macOS）
-        if: matrix.platform == 'mac'
-        run: npx electron-builder --config electron-builder.config.mjs --mac --publish never
-
-      - name: 打包（Windows）
-        if: matrix.platform == 'win'
-        run: npx electron-builder --config electron-builder.config.mjs --win --publish never
-
-      - name: 打包（Linux）
+      - name: Check version and trigger
+        run: node scripts/check-release-version.mjs
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Build native packages without publishing
+        run: pnpm exec electron-builder --config electron-builder.config.mjs --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - name: Packaged application smoke (macOS and Windows)
+        if: matrix.platform != 'linux'
+        run: node scripts/smoke-packaged-app.mjs ${{ matrix.platform }} ${{ matrix.arch }} "${{ matrix.executable }}" smoke.json
+      - name: Packaged application smoke (Linux)
         if: matrix.platform == 'linux'
-        run: npx electron-builder --config electron-builder.config.mjs --linux --publish never
-
-      - name: 上传产物到 Release
-        uses: softprops/action-gh-release@v2
-        with:
-          # ★ glob 用**换行**分隔，不要用空格。
-          # softprops/action-gh-release 把 files 当多行 glob 解析；
-          # 写成一行 `release/*.dmg release/*.zip` 时它会把整串当成一个模式，
-          # 结果匹配不到、又不报错（fail_on_unmatched_files: false），
-          # 表现为「job 绿了但 macOS 产物没上传」——正是踩过的坑。
-          files: |
-            ${{ matrix.artifacts }}
-          draft: false
-          # 明确要求至少匹配到一个文件：宁可报错，也不要静默漏传
-          fail_on_unmatched_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum node scripts/smoke-packaged-app.mjs linux x64 "${{ matrix.executable }}" smoke.json
+      - name: Validate package files and write manifest
+        run: node scripts/release-gate.mjs manifest ${{ matrix.platform }} ${{ matrix.arch }} release smoke.json bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: bundle/
+          if-no-files-found: error
+      - name: Preserve smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.platform }}-${{ matrix.arch }}
+          path: smoke.json*
+          if-no-files-found: warn
+
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: version
+        run: node scripts/check-release-version.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+      - name: Require every target from this commit and workflow attempt
+        run: node scripts/release-gate.mjs aggregate artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-bundles
+          path: artifacts/
+          if-no-files-found: error
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-bundles
+          path: artifacts
+      - name: Verify downloaded bundles again
+        run: node scripts/release-gate.mjs aggregate artifacts
+      - name: Upload draft, verify all attachments, then publish once
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { readFile } = await import('node:fs/promises')
+            const { pathToFileURL } = await import('node:url')
+            const { publishRelease } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/publish-release.mjs`).href)
+            const gate = JSON.parse(await readFile('artifacts/gate.json', 'utf8'))
+            await publishRelease({ github, ...context.repo, gate })

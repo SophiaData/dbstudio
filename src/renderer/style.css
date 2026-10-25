@@ -725,6 +725,53 @@ dialog::backdrop {
   color: var(--danger);
 }
 
+/* ---------- 事务离开保护对话框 ---------- */
+/*
+ * 为什么单独一套：这是**破坏性操作**的确认框（提交 / 回滚会作用于整个连接），
+ * 视觉上必须和普通表单对话框区分开——用户扫一眼就知道「这个会影响所有标签」。
+ */
+.transaction-dialog {
+  min-width: min(520px, calc(100vw - 32px));
+}
+
+.transaction-dialog-body {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.transaction-dialog-body h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.transaction-dialog-body p {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.transaction-dialog-body menu {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+.transaction-dialog-body button.is-primary {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.transaction-dialog-body button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
 .sql-library-empty {
   margin: 28px 0;
   color: var(--fg-dim);

@@ -18,8 +18,9 @@ import type {
 } from '../core/driver'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
-import { ResultTabs } from './tabs'
+import { ResultTabs, type ActiveTabContext } from './tabs'
 import { SqlEditor } from './sql-editor'
+import { extractKeyValues, resolveKeyColumnIndex, encodeRowKey } from './grid'
 import { SqlLibraryPanel } from './sql-library'
 import { splitStatements } from './sql-format'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
@@ -33,14 +34,25 @@ import {
   type ExportColumn,
   type ExportRow
 } from './export-formats'
-import type { ResultGrid } from './grid'
 import { pickQuotingRules, quoteIdentifier } from './grid'
 import type { QuotingRules } from '../core/driver'
 import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
+import { guardAllTransactions, runConnectionOperation } from './transaction-controller'
 
 declare global {
   interface Window {
     dbstudio?: DbStudioApi
+    /**
+     * 主进程在退出前调用它，询问渲染进程「还有未提交的改动吗」。
+     *
+     * 为什么由渲染进程回答：事务的**未应用编辑**只存在于网格实例里
+     * （`#dirty`），主进程看不到；只有渲染进程知道用户还改了哪些格子。
+     * 而已应用但未提交的数据库事务主进程知道（它握着驱动宿主）。
+     * 两边合起来才能回答「现在退出安全吗」。
+     *
+     * 返回 true 表示可以安全退出；false 表示用户选择取消。
+     */
+    dbstudioGuardTransactions?: (action: string) => Promise<boolean>
   }
 }
 
@@ -80,39 +92,59 @@ async function boot(): Promise<void> {
     return
   }
 
+  // 退出前的未提交事务询问。
+  //
+  // 为什么挂在 window 上而不是由主进程直接 import 渲染进程的模块：
+  // 主进程与渲染进程是**两个进程**，主进程拿不到渲染进程里的网格实例。
+  // 所以主进程只能通过 executeJavaScript 调用这里暴露的钩子，
+  // 由渲染进程自己弹框、自己读未应用编辑。
+  window.dbstudioGuardTransactions = async (action: string) => {
+    try {
+      return await guardAllTransactions(action)
+    } catch (e) {
+      setStatus(`退出前检查事务失败：${errText(e)}`, true)
+      // 检查失败时**不放行**：宁可让用户重试，也不能在不确定的情况下退出。
+      return false
+    }
+  }
+
+  // 暴露 A1 纯函数与核心身份契约，供 GUI/端到端自动化测试验证
+  ;(window as unknown as Record<string, unknown>).__dbstudioA1 = {
+    extractKeyValues,
+    resolveKeyColumnIndex,
+    encodeRowKey
+  }
+
   // ---- 结果集多标签接线 ----
   //
   // 之前这里是 `new ResultGrid(...)` 单实例。现在改成由 ResultTabs 统一管理：
   // 每查一次就**新开**一个标签，标签内部各自持有一个独立的 ResultGrid 实例
   // （见 tabs.ts 文件头：改外层、多实例化，绝不复制 grid.ts 的代码）。
+  let activeContext: ActiveTabContext | null = null
+  const syncToolsVisibility = (): void => {
+    el('result-tools').hidden = activeContext === null
+  }
   const tabs = new ResultTabs(
     el('result-tabs-scroll'),
     el('result-stack'),
     el('result-tabs-empty'),
     el<HTMLButtonElement>('btn-export-all'),
     api,
-    { onStatus: (t, isErr) => setStatus(t, isErr) }
+    {
+      onStatus: (t, isErr) => setStatus(t, isErr),
+      onActiveChange: (context) => {
+        activeContext = context
+        syncToolsVisibility()
+        const input = document.getElementById('filter-input') as HTMLInputElement | null
+        const bar = document.getElementById('filter-bar')
+        if (input) input.value = context?.filterDraft ?? ''
+        if (bar) bar.hidden = !(context?.filterVisible ?? false)
+      }
+    }
   )
 
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
-
-  // E1-C 追加：当前结果标签对应的表与 grid 实例。
-  // 为什么在 main.ts 记住 grid 而不是给 tabs 加 getter：tabs.ts 不在本轮写入范围，
-  // 而 openTable/runSql 本来就返回 ResultGrid，在这里留存是最小侵入的做法。
-  let activeGrid: ResultGrid | null = null
-  let activeTableRef: ObjectRef | null = null
-  /** 当前结果若是 SQL 来源，记住原 SQL（筛选要包一层子查询）。 */
-  let activeSql: string | null = null
-
-  /**
-   * 结果工具条的可见性：有活动结果才显示（导出/筛选都作用于"当前标签"）。
-   */
-  const syncToolsVisibility = (): void => {
-    el('result-tools').hidden = activeGrid === null
-  }
-
-
 
   /**
    * 取方言的标识符引用规则。
@@ -145,11 +177,7 @@ async function boot(): Promise<void> {
     try {
       const desc = await api.describeTable(ref.id)
       // 来源（ref + desc）在调用点记下，tabs 会把它绑定到该标签，供「导出全部」重查。
-      const g = await tabs.openTable(ref, desc)
-      // E1-C 追加：记住当前结果所属的表与 grid，供「导出已加载行 / 筛选」使用。
-      activeTableRef = ref
-      activeGrid = g
-      syncToolsVisibility()
+      await tabs.openTable(ref, desc)
     } catch (e) {
       setStatus(`打开表失败：${errText(e)}`, true)
     }
@@ -256,14 +284,12 @@ async function boot(): Promise<void> {
     // 单条：照旧（标签名用整条 SQL 的开头）。
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
-    let lastGrid: ResultGrid | null = null
     const connectionNodeId = currentConnectionNodeId
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i] as string
       const startedAt = performance.now()
       try {
         const opened = await tabs.runSql(connectionNodeId, stmt)
-        lastGrid = opened.grid
         await recordSqlHistory(
           stmt,
           connectionNodeId,
@@ -291,12 +317,6 @@ async function boot(): Promise<void> {
       }
     }
 
-    // 记录来源：多语句时 activeSql 置空（没有单一来源可重查），
-    // 但保留最后一个 grid 供导出/筛选使用。
-    activeGrid = lastGrid
-    activeTableRef = null
-    activeSql = statements.length === 1 ? (statements[0] as string) : null
-    syncToolsVisibility()
     if (statements.length > 1) {
       setStatus(`已执行 ${statements.length} 条语句`)
     }
@@ -426,9 +446,10 @@ async function boot(): Promise<void> {
   })
 
   const doExport = async (): Promise<void> => {
-    const grid = activeGrid
-    const tableRef = activeTableRef
-    if (!grid) {
+    const context = activeContext
+    const grid = context?.grid
+    const tableRef = context?.source.kind === 'table' ? context.source.ref : null
+    if (!context || !grid) {
       setStatus('没有可导出的结果', true)
       return
     }
@@ -446,12 +467,7 @@ async function boot(): Promise<void> {
        * 为什么不用 DOM 读单元格文本：文本无法还原 number / NULL / boolean 的区别，
        * 导出的 JSON/INSERT 类型会全错——这种静默错误比报错更糟。
        */
-      const g = activeGrid
-      if (!g) {
-        setStatus('导出失败：没有活动结果集', true)
-        return
-      }
-      const loaded = g.exportLoadedRows()
+      const loaded = grid.exportLoadedRows()
       if (loaded.loadedCount === 0) {
         setStatus('导出失败：当前结果集还没有加载任何行', true)
         return
@@ -511,7 +527,17 @@ async function boot(): Promise<void> {
 
   filterToggle.addEventListener('click', () => {
     filterBar.hidden = !filterBar.hidden
+    tabs.setFilterDraft(filterInput.value, !filterBar.hidden)
     if (!filterBar.hidden) filterInput.focus()
+  })
+  // 输入即存草稿。
+  //
+  // 为什么必须在这里回写：`onActiveChange` 在切标签时会把 `filter-input` 重置成
+  // 目标标签的草稿。若草稿只写进 DOM 输入框、不落到标签上，用户在标签 A 输入
+  // 的条件一切走就被清空——回到 A 时条件已经没了。这不是「显示问题」，是用户
+  // 辛苦写的筛选条件被静默丢弃。
+  filterInput.addEventListener('input', () => {
+    tabs.setFilterDraft(filterInput.value, !filterBar.hidden)
   })
   filterInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') void applyFilter()
@@ -520,13 +546,13 @@ async function boot(): Promise<void> {
   // 清除：把条件置空并**同样重查**——否则会停在筛选结果上，与输入框状态不符。
   el('btn-filter-clear').addEventListener('click', () => {
     filterInput.value = ''
+    tabs.setFilterDraft('', !filterBar.hidden)
     void applyFilter()
   })
 
   const applyFilter = async (): Promise<void> => {
-    const grid = activeGrid
-    const tableRef = activeTableRef
-    if (!grid) {
+    const context = activeContext
+    if (!context) {
       setStatus('没有可筛选的结果', true)
       return
     }
@@ -547,36 +573,27 @@ async function boot(): Promise<void> {
     //   表 → SELECT * FROM "t" WHERE ...
     //   SQL → SELECT * FROM (<原SQL>) _dbstudio_filter WHERE ...（WHERE 作用于原查询结果）
     //
-    // 为什么用 activeSql：自由 SQL 结果要包一层子查询，必须知道"原 SQL 是什么"。
-    // 表来源则由 tableRef 给出表名。
-    const base = activeSql
-      ? ({ sourceKind: 'sql', sql: activeSql } as const)
-      : tableRef
-        ? ({ sourceKind: 'table', tableName: tableRef.name } as const)
-        : null
-    if (!base) {
-      setStatus('当前结果不支持筛选（既不是表来源，也没有记住原 SQL）', true)
-      return
-    }
+    const base =
+      context.baseSource.kind === 'table'
+        ? ({ sourceKind: 'table', tableName: context.baseSource.ref.name } as const)
+        : ({ sourceKind: 'sql', sql: context.baseSource.sql } as const)
     const sql = buildFilteredSql(base, parsed.conditions, quote)
 
     setStatus(parsed.conditions.length === 0 ? '正在清除筛选（重新查询）…' : '正在按筛选重新查询…')
     try {
       // 关键：**重新查询**。走 tabs.runSql 新开一个标签（tabs.openTable/runSql 是
       // 唯一能"重跑任意 SQL"的公开入口；grid.ts 不归本轮改，不能加方法）。
-      // 旧标签保留：用户可对比"筛选前/筛选后"，也符合多标签的设计初衷。
+      // 旧标签保留，筛选结果通过 baseSource 继续关联原始查询。
       showPane('grid')
-      const connNodeId = currentConnectionNodeId
-      if (!connNodeId) {
-        setStatus('筛选失败：未知连接', true)
+      const opened = await tabs.runSql(context.connectionNodeId, sql, {
+        baseSource: context.baseSource,
+        filterText: filterInput.value.trim(),
+        filterConditions: parsed.conditions
+      })
+      if (opened.outcome.error !== null) {
+        setStatus(`筛选失败：${opened.outcome.error}`, true)
         return
       }
-      const opened = await tabs.runSql(connNodeId, sql)
-      activeGrid = opened.grid
-      syncToolsVisibility()
-      // 筛选结果是 SQL 来源，不再对应单表 → 清掉表引用，避免 INSERT 导出用它。
-      activeTableRef = null
-      activeSql = sql
       setStatus(
         parsed.conditions.length === 0
           ? '已清除筛选（重新查询）'
@@ -686,7 +703,7 @@ async function showDetail(
             actionButton('断开', async () => {
               setStatus('正在断开…')
               try {
-                await api.disconnectConnection(connId)
+                await runConnectionOperation(api, connId, '断开连接', () => api.disconnectConnection(connId))
                 setStatus(`已断开：${ref.name}（配置仍保留）`)
                 await reloadTree()
               } catch (e) {
@@ -702,7 +719,7 @@ async function showDetail(
               return
             }
             try {
-              await api.removeConnection(connId)
+              await runConnectionOperation(api, connId, '删除连接', () => api.removeConnection(connId))
               setStatus(`已删除：${ref.name}`)
               await reloadTree()
             } catch (e) {

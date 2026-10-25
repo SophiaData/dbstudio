@@ -18,7 +18,7 @@
  *   - 结果集游标（按页随机取，不在进程间搬全量数据）
  *   - 驱动宿主进程管理（spawn + NDJSON RPC + 生命周期）
  *
- * 所以它零 Electron 依赖，只用 Node 内置模块。Electron 应用可以用，
+ * 所以它零 Electron 依赖，宿主依赖 pg 与 ssh2。Electron 应用可以用，
  * 一个 CLI、一个 HTTP 服务、一个后台任务同样可以用。
  */
 

@@ -97,6 +97,7 @@ export default {
 
   // 各平台产物
   mac: {
+    artifactName: 'dbstudio-${version}-mac-${arch}.${ext}',
     category: 'public.app-category.developer-tools',
     target: [
       // dmg：拖进 Applications 安装
@@ -122,11 +123,13 @@ export default {
   },
 
   win: {
+    artifactName: 'dbstudio-${version}-win-${arch}.${ext}',
     target: [{ target: 'nsis', arch: ['x64'] }],
     icon: 'build/icon.png'
   },
 
   linux: {
+    artifactName: 'dbstudio-${version}-linux-${arch}.${ext}',
     target: ['AppImage'],
     category: 'Development',
     icon: 'build/icon.png'

@@ -57,28 +57,62 @@ export interface ColumnMatch {
  * 我们的列名一律来自 information_schema（真实名字），调用方（UI 从结果集拿到的列名）
  * 传的也是真实名字，所以正常路径是精确匹配。
  * 这里做**大小写不敏感**匹配是为了容忍 UI 侧的轻微大小写差异，
- * 但只要表里有 `"Users"` 与 `"users"` 两列，这种宽松匹配就有歧义——
- * 用 `byLower` 只保留第一次出现的，宁可让另一列匹配不到（显式 unknown），
- * 也不静默匹配到错的列。
+ * 先精确匹配真实列名；只有不存在精确匹配且小写候选唯一时才回退。
+ * `"Users"` 与 `"users"` 并存时，不猜测 `"USERS"` 指向哪一列。
  */
 export function resolveColumns(
   requested: readonly string[],
   available: readonly string[]
 ): { readonly matched: readonly ColumnMatch[]; readonly unknown: readonly string[] } {
-  const byLower = new Map<string, string>()
+  const availableSet = new Set(available)
+  const byLowerMap = new Map<string, string[]>()
   for (const name of available) {
     const key = name.toLowerCase()
-    if (!byLower.has(key)) byLower.set(key, name) // 只保留第一次，避免歧义下静默选错列
+    const list = byLowerMap.get(key) ?? []
+    list.push(name)
+    byLowerMap.set(key, list)
   }
 
   const matched: ColumnMatch[] = []
   const unknown: string[] = []
   for (const name of requested) {
-    const actual = byLower.get(name.toLowerCase())
-    if (actual === undefined) unknown.push(name)
-    else matched.push({ requested: name, canonical: actual })
+    if (availableSet.has(name)) {
+      matched.push({ requested: name, canonical: name })
+      continue
+    }
+    const candidates = byLowerMap.get(name.toLowerCase())
+    if (candidates && candidates.length === 1 && candidates[0] !== undefined) {
+      matched.push({ requested: name, canonical: candidates[0] })
+    } else {
+      unknown.push(name)
+    }
   }
   return { matched, unknown }
+}
+
+/**
+ * 按目标列的真实名字补齐并排序匹配结果。
+ *
+ * `resolveColumns` 允许唯一的大小写不敏感回退，但这里必须按 canonical
+ * 精确匹配目标列；否则组合主键 `("id", "ID")` 会把两个条件合并到同一列。
+ */
+export function resolveRequiredColumns(
+  required: readonly string[],
+  requested: readonly string[],
+  available: readonly string[]
+): {
+  readonly resolved: ReturnType<typeof resolveColumns>
+  readonly ordered: readonly ColumnMatch[]
+  readonly missing: readonly string[]
+} {
+  const resolved = resolveColumns(requested, available)
+  const ordered = required
+    .map((key) => resolved.matched.find((candidate) => candidate.canonical === key))
+    .filter((match): match is ColumnMatch => match !== undefined)
+  const missing = required.filter(
+    (key) => !resolved.matched.some((candidate) => candidate.canonical === key)
+  )
+  return { resolved, ordered, missing }
 }
 
 /** 从"列名 → 值"的记录里取值；取不到就抛（绑 undefined 会变 NULL = 静默写错数据）。 */
