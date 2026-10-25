@@ -62,7 +62,7 @@ tests/
 - Modify: `src/drivers/postgresql/adapter.ts`
 - Test: `tests/e2e-statement-execution.mjs`
 
-- [ ] **Step 1: 编写失败的端到端测试**
+- [x] **Step 1: 编写失败的端到端测试**
 
 在 `tests/e2e-statement-execution.mjs` 中编写测试，启动临时 SQLite 驱动宿主，发送 `executeStatement` RPC：
 1. `SELECT 1 AS num` 必须返回 `{ kind: 'rows', result: ... }`
@@ -142,12 +142,12 @@ try {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行：`node tests/e2e-statement-execution.mjs`
 期望：失败，报 `method_not_found: 未知方法 executeStatement` 或类似错误。
 
-- [ ] **Step 3: 实现核心类型与 SQLite/PG 的 executeStatement**
+- [x] **Step 3: 实现核心类型与 SQLite/PG 的 executeStatement**
 
 1. 在 `src/core/resultset.ts` 导出 `StatementResult`：
 ```typescript
@@ -190,7 +190,7 @@ case 'executeStatement': {
 4. 在 `src/drivers/sqlite/adapter.ts` 实现 `executeStatement`：判断语句首词，如果是 SELECT/PRAGMA 读取/EXPLAIN 则调用现有 `this.query(sql, options)` 返回 `{ kind: 'rows', result }`；如果是 INSERT/UPDATE/DELETE/REPLACE 则使用 `db.prepare(sql).run()` 返回 `{ kind: 'affected', affected: info.changes, inTransaction: state.active, transactionState: state, executedSql: sql, elapsedMs }`；如果是 CREATE/DROP/ALTER 则调用 `db.exec(sql)` 返回 `{ kind: 'ddl', summary: '执行成功', committed: true, executedSql: sql, elapsedMs }`。
 5. 在 `src/drivers/postgresql/adapter.ts` 实现相同分类并处理 `res.rowCount` 与 `res.command`。
 
-- [ ] **Step 4: 构建并验证测试通过**
+- [x] **Step 4: 构建并验证测试通过**
 
 运行：
 ```bash
@@ -199,7 +199,7 @@ node tests/e2e-statement-execution.mjs
 ```
 期望：`PASS e2e-statement-execution (driver-host RPC)`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/core/resultset.ts src/core/driver.ts src/driver-host/index.ts src/drivers/ tests/e2e-statement-execution.mjs
@@ -219,16 +219,16 @@ git commit -m "feat(core): 定义 StatementResult 并在 SQLite/PG 驱动实现 
 - Modify: `sdk/src/index.ts`
 - Test: `tests/e2e-statement-execution.mjs`
 
-- [ ] **Step 1: 扩充测试以覆盖 ConnectionManager 与游标作用域**
+- [x] **Step 1: 扩充测试以覆盖 ConnectionManager 与游标作用域**
 
 在 `tests/e2e-statement-execution.mjs` 尾部追加通过 `ConnectionManager` 调用的断言：验证当返回 `kind === 'rows'` 时，游标 ID 带有 `connection:c1|` 作用域前缀，且能通过 `fetchResultPage` 正常读取。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 运行：`pnpm run typecheck`
 期望：因 `ConnectionManager` 和 `DbStudioApi` 缺少 `executeStatement` 报错。
 
-- [ ] **Step 3: 实现主进程转发与 IPC**
+- [x] **Step 3: 实现主进程转发与 IPC**
 
 1. 在 `src/main/DriverHostHandle.ts` 增加：
 ```typescript
@@ -267,7 +267,7 @@ async executeStatement(nodeId: string, sql: string, options?: QueryOptions): Pro
 4. 在 `src/main/index.ts` 的 `registerIpc` 接入 `ipcMain.handle(IPC.executeStatement, ...)`。
 5. 在 `src/preload/index.ts` 暴露 `executeStatement`。
 
-- [ ] **Step 4: 构建并验证测试**
+- [x] **Step 4: 构建并验证测试**
 
 运行：
 ```bash
@@ -277,7 +277,7 @@ node tests/e2e-statement-execution.mjs
 ```
 期望：全部 PASS，无 TypeScript 类型错误。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/ src/core/api.ts src/preload/index.ts sdk/ tests/e2e-statement-execution.mjs
@@ -293,7 +293,7 @@ git commit -m "feat(main): 打通 executeStatement 的 IPC 与 ConnectionManager
 - Modify: `src/renderer/main.ts`
 - Test: `tests/gui-sql-transaction.mjs`
 
-- [ ] **Step 1: 编写 GUI 跨标签事务联动测试**
+- [x] **Step 1: 编写 GUI 跨标签事务联动测试**
 
 创建 `tests/gui-sql-transaction.mjs`：
 1. 启动应用，连接并打开 `items` 表（Tab A）。
@@ -303,12 +303,12 @@ git commit -m "feat(main): 打通 executeStatement 的 IPC 与 ConnectionManager
 5. 点击工具栏“回滚”按钮。
 6. 断言：Tab A 自动刷新，行 `100` 消失；直接读取磁盘 SQLite 文件确认行 `100` 从未被写入。
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行：`node tests/gui-sql-transaction.mjs`
 期望：失败，因为 SQL 编辑器目前未调用 `executeStatement` 且未通知 `TransactionController`。
 
-- [ ] **Step 3: 实现控制器外部突变通知与刷新**
+- [x] **Step 3: 实现控制器外部突变通知与刷新**
 
 1. 在 `src/renderer/transaction-controller.ts` 增加 `notifyExternalMutation`：
 ```typescript
@@ -327,7 +327,7 @@ async notifyExternalMutation(api?: DbStudioApi): Promise<void> {
 当 `res.kind === 'affected'` 时，调用 `getTransactionController(connId).notifyExternalMutation(api)`。
 当 `res.kind === 'ddl'` 时，调用 `tree.loadRoots()` 刷新左侧树结构，并在事务状态改变时通知控制器。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 运行：
 ```bash
@@ -336,7 +336,7 @@ node tests/gui-sql-transaction.mjs
 ```
 期望：`PASS SQL transaction lifecycle & cross-tab sync`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/renderer/transaction-controller.ts src/renderer/main.ts tests/gui-sql-transaction.mjs
@@ -352,7 +352,7 @@ git commit -m "feat(renderer): SQL 写入操作自动联动连接级事务控制
 - Modify: `src/renderer/style.css`
 - Test: `tests/gui-sql-workbench-results.mjs`
 
-- [ ] **Step 1: 编写命令结果卡片渲染测试**
+- [x] **Step 1: 编写命令结果卡片渲染测试**
 
 创建 `tests/gui-sql-workbench-results.mjs`：
 1. 执行 `UPDATE items SET name = 'updated' WHERE id = 1`。
@@ -362,12 +362,12 @@ git commit -m "feat(renderer): SQL 写入操作自动联动连接级事务控制
 5. 执行 `SELECT * FROM items`。
 6. 验证当前标签页呈现 `.grid-panel` 表格。
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行：`node tests/gui-sql-workbench-results.mjs`
 期望：失败，目前所有 SQL 无论返回什么都无条件创建 `ResultGrid`。
 
-- [ ] **Step 3: 实现多形态标签面板**
+- [x] **Step 3: 实现多形态标签面板**
 
 1. 改造 `src/renderer/tabs.ts`：
 为 `Tab` 增加 `kind: 'grid' | 'command-summary'` 模式。当 `StatementResult` 为 `affected` 或 `ddl` 时，创建或切换为卡片展示容器，渲染结构化状态：
@@ -375,7 +375,7 @@ git commit -m "feat(renderer): SQL 写入操作自动联动连接级事务控制
 - 提供“提交当前连接事务”与“回滚”的快捷点击操作。
 2. 在 `src/renderer/style.css` 添加 `.statement-summary-pane`、`.statement-stat`、`.statement-badge` 等样式，保证深浅色模式清晰一致。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 运行：
 ```bash
@@ -384,7 +384,7 @@ node tests/gui-sql-workbench-results.mjs
 ```
 期望：`PASS GUI workbench result cards (affected / ddl / rows)`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/renderer/tabs.ts src/renderer/style.css tests/gui-sql-workbench-results.mjs
@@ -399,7 +399,7 @@ git commit -m "feat(renderer): 为 DML 影响行数与 DDL 变更摘要提供结
 - Modify: `src/renderer/main.ts`
 - Test: `tests/gui-sql-script-execution.mjs`
 
-- [ ] **Step 1: 编写多语句顺序脚本测试**
+- [x] **Step 1: 编写多语句顺序脚本测试**
 
 创建 `tests/gui-sql-script-execution.mjs`：
 1. 执行复合脚本：
@@ -417,19 +417,19 @@ INSERT INTO items VALUES (31, 'should-not-run');
 ```
 验证第二条报错后立即中断；状态栏与错误面板明确标出“第 2/3 条语句失败：syntax error”；行 31 未被执行。
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行：`node tests/gui-sql-script-execution.mjs`
 期望：失败或报错信息不包含精准的语句序号与定位。
 
-- [ ] **Step 3: 优化 main.ts executeSql 脚本执行逻辑**
+- [x] **Step 3: 优化 main.ts executeSql 脚本执行逻辑**
 
 1. 使用 `splitStatements` 切分语句。
 2. 循环按序调用 `executeStatement`。
 3. 遇到异常或错误返回时，立即捕获并记录当前语句索引 `i + 1`、语句切片文本与行号，阻断后续语句执行。
 4. 精确将每一条语句的耗时、影响行数与状态记录到 SQL 历史库。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 运行：
 ```bash
@@ -438,7 +438,7 @@ node tests/gui-sql-script-execution.mjs
 ```
 期望：`PASS multi-statement script sequential execution & error abort`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/renderer/main.ts tests/gui-sql-script-execution.mjs
@@ -458,7 +458,7 @@ git commit -m "feat(renderer): 完善顺序多语句脚本执行流程与错误�
 - Test: `tests/gui-sql-draft.mjs`
 - Test: `tests/e2e-verify-manifest.mjs`
 
-- [ ] **Step 1: 编写草稿恢复测试**
+- [x] **Step 1: 编写草稿恢复测试**
 
 创建 `tests/gui-sql-draft.mjs`：
 1. 选中连接 1，在 SQL 编辑器输入 `SELECT 'draft-1'`。
@@ -466,12 +466,12 @@ git commit -m "feat(renderer): 完善顺序多语句脚本执行流程与错误�
 3. 切回连接 1，验证文本框自动恢复为 `SELECT 'draft-1'`。
 4. 切回连接 2，验证恢复为 `SELECT 'draft-2'`。
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行：`node tests/gui-sql-draft.mjs`
 期望：失败，当前切换连接不保存恢复草稿。
 
-- [ ] **Step 3: 实现草稿持久化与清单登记**
+- [x] **Step 3: 实现草稿持久化与清单登记**
 
 1. 在 `main.ts` 结合 `sql-editor.ts`：在用户输入时（防抖 200ms）将内容存入 `localStorage.setItem('dbstudio.sql-draft.' + connectionId, text)`。在切换当前连接或初始化时，读取并回显。
 2. 在 `package.json` 登记所有 B1–B6 新增的测试脚本：
@@ -483,7 +483,7 @@ git commit -m "feat(renderer): 完善顺序多语句脚本执行流程与错误�
 3. 在 `scripts/verify-manifest.mjs` 的对应分组（node / gui）登记上述步骤，保持清单唯一真相。
 4. 更新 `README.md`，说明 SQL 工作台已支持 DML/DDL 执行、影响行数反馈与草稿恢复。
 
-- [ ] **Step 4: 运行测试并执行全量清单校验**
+- [x] **Step 4: 运行测试并执行全量清单校验**
 
 运行：
 ```bash
@@ -493,7 +493,7 @@ pnpm run verify:node
 ```
 期望：所有测试通过，清单防漂移断言 100% 匹配。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/renderer/ package.json scripts/verify-manifest.mjs README.md tests/
