@@ -18,6 +18,11 @@
 下表已按实际执行结果更新；**A5 只标到"代码与负例完成"**，
 远端三平台发布验证仍未做，因此不宣布 Beta 发布就绪。
 
+**2026-10-26 M1 SQL 工作台核心能力收口（B1–B6 全部完成）：**
+已完成 M1 的 6 项任务卡（B1–B6），解除工作台只读限制，打通 DML/DDL 结果形态、连接级事务联动、顺序多语句行号定位与按连接草稿自动持久化。
+本地验证：`pnpm run verify:node` **22/22 全部通过**；新增 4 项 GUI 测试通过无头模式验证（事务联动 7/7、形态卡片 8/8、多语句脚本 7/7、草稿恢复 2/2）；清单一致性检查 `test:verify-manifest` 扩展至 **60/60 全部通过**。
+提交记录：`b998c90` (B1)、`1894698` (B2)、`75bf2ee` (B3)、`6d848dc` (B4)、`6b64f4b` (B5)、`3e94d29` (B6)。
+
 下列状态基于**本地实际跑过的测试**，不是计划值。未跑到的项目明确标注为未完成。
 
 | 任务卡 | 状态 | 证据 |
@@ -37,6 +42,12 @@
 | A3 连接操作事务保护 | ✅ 完成 | `tests/gui-connection-guard.mjs` 16/16：工具栏 / 树 / 删除 / 更新 × 取消 / 提交 / 放弃，逐项验证 UI + 磁盘数据 + 连接配置 |
 | A4 验证执行器 | ✅ 完成 | `scripts/verify.mjs` 严格参数解析与失败传播；CI 外部步骤改走 `--require-external`；清单防漂移 55/55 |
 | A6 集成验证与状态纠偏 | ✅ 完成 | 完整本地验证退出码 0、真实外部服务 4/4、验收报告已出、路线图状态已更新 |
+| B1 语句执行契约与三态类型 | ✅ 完成 | `StatementResult`（`rows` / `affected` / `ddl`）类型系统；SQLite/PG 驱动实现 `executeStatement`。`tests/e2e-statement-execution.mjs` 19/19 |
+| B2 主进程与游标作用域 | ✅ 完成 | 主进程 IPC 转发；`ConnectionManager` 作用域游标（`connection:<id>|cursor:<id>`）统一纳管。`tests/e2e-statement-execution.mjs` 24/24 |
+| B3 事务控制器联动与跨标签同步 | ✅ 完成 | DML 执行自动开启连接显式事务；`TransactionController.notifyExternalMutation` 跨标签广播刷新。`tests/gui-sql-transaction.mjs` 7/7 |
+| B4 Affected 卡片与 DDL 摘要 | ✅ 完成 | `tabs.ts` 支持 `grid` 与 `command-summary` 双形态面板；DML 渲染影响行数/耗时，DDL 提取 SQL 摘要。`tests/gui-sql-workbench-results.mjs` 8/8 |
+| B5 顺序多语句与行号错误定位 | ✅ 完成 | 多语句脚本顺序执行；遇错精准定位 `第 i/n 条语句（第 L 行）失败` 并立即阻断。`tests/gui-sql-script-execution.mjs` 7/7 |
+| B6 按连接草稿持久化与清单集成 | ✅ 完成 | SQL 编辑器内容变动自动按连接存取 `localStorage`。`tests/gui-sql-draft.mjs` 2/2；清单扩展至 60 项全过 |
 
 **统一验证清单带来的直接收益：**清单一致性测试在第一次运行时就抓到
 `test:gui:headless` 未登记进清单——它一直存在于 `package.json` 却从未被
