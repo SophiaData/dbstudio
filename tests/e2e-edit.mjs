@@ -48,6 +48,14 @@ const MAIN_DB = resolve(root, 'tests/fixtures/.tmp-edit-main.db')
 
 const results = []
 
+class SetupBlockedError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'SetupBlockedError'
+    this.status = 'blocked_by_setup'
+  }
+}
+
 function check(name, condition, detail) {
   const passed = Boolean(condition)
   results.push({ name, passed, detail })
@@ -58,6 +66,29 @@ function check(name, condition, detail) {
     if (detail !== undefined) console.log(`      ↳ ${formatDetail(detail)}`)
   }
   return passed
+}
+
+function blockedBySetup(name, detail) {
+  results.push({ name, passed: false, status: 'blocked_by_setup', detail })
+  console.log(`BLOCKED_BY_SETUP ${name}`)
+  if (detail !== undefined) console.log(`      ↳ ${formatDetail(detail)}`)
+}
+
+function reportFailure(name, error) {
+  if (error instanceof SetupBlockedError) {
+    blockedBySetup(name, error.message)
+    return
+  }
+  check(name, false, error instanceof Error ? error.message : String(error))
+}
+
+function requireConnected(summary, label) {
+  if (!summary || summary.connected !== true || typeof summary.id !== 'string') {
+    throw new SetupBlockedError(
+      `${label}: 连接前置条件失败，summary=${formatDetail(summary)}`
+    )
+  }
+  return summary
 }
 
 function skip(name, reason) {
@@ -602,9 +633,15 @@ async function runMainProcessProbe() {
    */
   const hostCalls = []
   const HostHandle = mod.DriverHostHandle
+  const originalHostMethods = {}
+  let applyEditsCalls = 0
   if (typeof HostHandle === 'function') {
     const origRollback = HostHandle.prototype.rollbackTransaction
     const origClose = HostHandle.prototype.close
+    const origApplyEdits = HostHandle.prototype.applyEdits
+    originalHostMethods.rollbackTransaction = origRollback
+    originalHostMethods.close = origClose
+    originalHostMethods.applyEdits = origApplyEdits
     HostHandle.prototype.rollbackTransaction = function (...args) {
       hostCalls.push('rollback')
       return origRollback.apply(this, args)
@@ -613,6 +650,10 @@ async function runMainProcessProbe() {
       hostCalls.push('close')
       return origClose.apply(this, args)
     }
+    HostHandle.prototype.applyEdits = function (...args) {
+      applyEditsCalls += 1
+      return origApplyEdits.apply(this, args)
+    }
   }
 
   /** 每条断言独立 try/catch：一条失败不该掩盖其余结论。 */
@@ -620,13 +661,16 @@ async function runMainProcessProbe() {
     try {
       await fn()
     } catch (err) {
-      check(name, false, err instanceof Error ? err.message : String(err))
+      reportFailure(name, err)
     }
   }
 
   /** 用「新开一条连接」读值，确保读到的是已落盘状态而不是某连接内的事务视图。 */
   const readFromFreshConnection = async (sql) => {
-    const s = await manager.add({ dialectId: 'sqlite', name: 'verifier', options: { file: MAIN_DB } })
+    const s = requireConnected(
+      await manager.add({ dialectId: 'sqlite', name: 'verifier', options: { file: MAIN_DB } }),
+      'readFromFreshConnection'
+    )
     try {
       const q = await manager.runQuery(`connection:${s.id}`, sql)
       return cellText(q?.rows?.[0]?.cells?.[0])
@@ -640,8 +684,14 @@ async function runMainProcessProbe() {
     check('P1. 读到初始值（作为恢复基准）', original.length > 0, original)
 
     // ===== 跨连接事务隔离 =====
-    const a = await manager.add({ dialectId: 'sqlite', name: 'conn-A', options: { file: MAIN_DB } })
-    const b = await manager.add({ dialectId: 'sqlite', name: 'conn-B', options: { file: MAIN_DB } })
+    const a = requireConnected(
+      await manager.add({ dialectId: 'sqlite', name: 'conn-A', options: { file: MAIN_DB } }),
+      'P2 connection A'
+    )
+    const b = requireConnected(
+      await manager.add({ dialectId: 'sqlite', name: 'conn-B', options: { file: MAIN_DB } }),
+      'P2 connection B'
+    )
     check('P2. 同时建立两条连接（两个独立宿主进程）', a?.id !== b?.id && !!a?.id && !!b?.id, {
       a: a?.id,
       b: b?.id
@@ -688,7 +738,10 @@ async function runMainProcessProbe() {
 
     // ===== remove 连接时先回滚 =====
     await probe('P8. ★ remove 有未提交改动的连接：不抛错且数据回滚', async () => {
-      const c = await manager.add({ dialectId: 'sqlite', name: 'conn-C', options: { file: MAIN_DB } })
+      const c = requireConnected(
+        await manager.add({ dialectId: 'sqlite', name: 'conn-C', options: { file: MAIN_DB } }),
+        'P8 connection C'
+      )
       const r = await manager.applyEdits(`connection:${c.id}|table:users`, [
         { keyValues: { id: cell.number(1) }, changes: { email: cell.text('c-discarded@example.com') } }
       ])
@@ -733,7 +786,10 @@ async function runMainProcessProbe() {
 
     // ===== 提交路径在 remove 后依然持久 =====
     await probe('P9. 已提交的改动在 remove 之后仍然持久', async () => {
-      const d = await manager.add({ dialectId: 'sqlite', name: 'conn-D', options: { file: MAIN_DB } })
+      const d = requireConnected(
+        await manager.add({ dialectId: 'sqlite', name: 'conn-D', options: { file: MAIN_DB } }),
+        'P9 connection D'
+      )
       const r = await manager.applyEdits(`connection:${d.id}|table:users`, [
         { keyValues: { id: cell.number(2) }, changes: { email: cell.text('d-committed@example.com') } }
       ])
@@ -752,7 +808,10 @@ async function runMainProcessProbe() {
 
     // ===== 边界：连接节点不能提交编辑 =====
     await probe('P10. 连接根节点不能 applyEdits', async () => {
-      const e = await manager.add({ dialectId: 'sqlite', name: 'conn-E', options: { file: MAIN_DB } })
+      const e = requireConnected(
+        await manager.add({ dialectId: 'sqlite', name: 'conn-E', options: { file: MAIN_DB } }),
+        'P10 connection E'
+      )
       let err = null
       try {
         await manager.applyEdits(`connection:${e.id}`, [
@@ -771,7 +830,11 @@ async function runMainProcessProbe() {
 
     // ===== 边界：空 updates 被本地拒绝 =====
     await probe('P11. 空 updates 被本地拒绝', async () => {
-      const f = await manager.add({ dialectId: 'sqlite', name: 'conn-F', options: { file: MAIN_DB } })
+      const f = requireConnected(
+        await manager.add({ dialectId: 'sqlite', name: 'conn-F', options: { file: MAIN_DB } }),
+        'P11 connection F'
+      )
+      const applyEditsCallsBefore = applyEditsCalls
       let err = null
       try {
         await manager.applyEdits(`connection:${f.id}|table:users`, [])
@@ -780,8 +843,12 @@ async function runMainProcessProbe() {
       }
       check(
         'P11. 空 updates 被本地拒绝（不发空事务给宿主）',
-        err !== null,
-        `实际: ${formatDetail(err?.message ?? '(未报错)')}`
+        err !== null && applyEditsCalls === applyEditsCallsBefore,
+        `实际: ${formatDetail({
+          error: err?.message ?? '(未报错)',
+          applyEditsCalls,
+          applyEditsCallsBefore
+        })}`
       )
       await manager.remove(f.id).catch(() => undefined)
     })
@@ -789,13 +856,18 @@ async function runMainProcessProbe() {
     // 收尾：B 连接也移除（它开过事务吗？没有，但确保清理路径也走一遍）
     await manager.remove(b.id).catch(() => undefined)
   } catch (err) {
-    check(
-      'Phase 2 探针初始化完成（未抛未捕获异常）',
-      false,
-      err instanceof Error ? err.message : String(err)
-    )
+    reportFailure('Phase 2 探针初始化完成（未抛未捕获异常）', err)
   } finally {
     await manager.disposeAll().catch(() => undefined)
+    if (typeof HostHandle === 'function') {
+      if (originalHostMethods.rollbackTransaction) {
+        HostHandle.prototype.rollbackTransaction = originalHostMethods.rollbackTransaction
+      }
+      if (originalHostMethods.close) HostHandle.prototype.close = originalHostMethods.close
+      if (originalHostMethods.applyEdits) {
+        HostHandle.prototype.applyEdits = originalHostMethods.applyEdits
+      }
+    }
   }
 }
 

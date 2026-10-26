@@ -66,6 +66,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.A4_CALL_LOG, JSON.stringify(args) + '\\n');
 console.log('EXECUTED ' + args.join(' '));
 if (process.env.A4_SKIP) console.log('SKIP  SSH assertions (sshd unavailable)');
+if (process.env.A4_BLOCKED) console.log('BLOCKED_BY_SETUP connection prerequisite failed');
 if (process.env.A4_EXIT) {
   console.error('fixture child failure');
   process.exit(Number(process.env.A4_EXIT));
@@ -185,6 +186,13 @@ if (process.env.A4_EXIT) {
     assert.equal(result.calls.length, 1)
     assert.match(result.output, /37/)
     assert.match(result.output, /fixture child failure/)
+  })
+
+  test('setup-blocked child cannot pass with exit code zero', () => {
+    const result = invoke(['--only', 'test:verify-manifest'], { A4_BLOCKED: '1' })
+    assert.equal(result.status, 1, result.output)
+    assert.match(result.output, /BLOCKED_BY_SETUP/)
+    summary(result, 1, 1, 0, 1)
   })
 
   test('missing executable is a failure with the actual launch reason', () => {

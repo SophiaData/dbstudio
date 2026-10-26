@@ -83,6 +83,10 @@ function hasExplicitSkip(output) {
   return /(?:^|\n)\s*(?:SKIP|跳过|⊘)/m.test(output)
 }
 
+function hasSetupBlock(output) {
+  return /(?:^|\n)\s*BLOCKED_BY_SETUP(?:\s|$)/m.test(output)
+}
+
 function runStep(step) {
   const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const result = spawnSync(pnpm, ['run', step.id], {
@@ -148,6 +152,11 @@ for (const step of selected) {
     failed += 1
     const exitReason = result.signal ? `信号 ${result.signal}` : `退出码 ${result.status}`
     console.error(`\n✗ [${step.id}] 失败（${exitReason}）`)
+    break
+  }
+  if (hasSetupBlock(result.output)) {
+    failed += 1
+    console.error(`\n✗ [${step.id}] 测试被 setup 前置条件阻塞（BLOCKED_BY_SETUP）`)
     break
   }
   if (step.group === 'external' && hasExplicitSkip(result.output)) {

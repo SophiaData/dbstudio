@@ -212,15 +212,15 @@ git commit -m "fix(connection): make driver host startup and failure cleanup obs
 - Modify: `scripts/verify.mjs`
 - Test: `tests/e2e-verify-runner.mjs`
 
-- [ ] **Step 1: 把连接建立和业务断言分开**
+- [x] **Step 1: 把连接建立和业务断言分开**
 
 所有使用 `manager.add()` 的测试必须先断言连接对象存在；连接失败时直接记录前置失败，不继续执行依赖该连接的本地断言。
 
-- [ ] **Step 2: 增加“测试执行了真正目标”的断言**
+- [x] **Step 2: 增加“测试执行了真正目标”的断言**
 
 负例测试需要证明 RPC/adapter 路径确实被调用。例如空 `updates` 测试要记录 `HostHandle.applyEdits` 调用次数，并断言为零；如果连接没有建立，则测试状态应为 `blocked_by_setup`，最终汇总为失败。
 
-- [ ] **Step 3: 验证**
+- [x] **Step 3: 验证**
 
 ```bash
 node tests/e2e-edit.mjs
@@ -228,7 +228,7 @@ node tests/e2e-verify-runner.mjs
 pnpm run verify:node
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add tests/e2e-edit.mjs tests/e2e-connection-lifecycle.mjs scripts/verify.mjs tests/e2e-verify-runner.mjs
