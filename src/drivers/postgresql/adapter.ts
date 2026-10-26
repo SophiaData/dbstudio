@@ -39,6 +39,7 @@ import type { DriverFactory } from '../../core/registry'
 import type {
   CellValue,
   EditApplyResult,
+  ExplainResult,
   QueryOptions,
   QueryResult as QueryResultContract,
   ResultPage,
@@ -788,6 +789,20 @@ export class PostgresDriverAdapter implements DriverAdapter {
       cursorId,
       executedSql,
       elapsedMs
+    }
+  }
+
+  async explain(sql: string): Promise<ExplainResult> {
+    const client = this.#requireClient()
+    const executedSql = this.dialect.buildExplainQuery(prepareReadOnlyStatement(sql))
+    const result = await this.#runQuery(client, executedSql)
+    const grid = buildGrid(result as unknown as PgResultLike)
+    return {
+      dialectId: this.dialect.id,
+      columns: buildColumns(grid.names, grid.rows),
+      rows: buildRows(grid.names, grid.rows, 0),
+      format: 'json',
+      executedSql
     }
   }
 

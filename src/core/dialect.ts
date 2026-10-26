@@ -76,6 +76,12 @@ export interface SqlDialect {
   /** 用于连接可用性探测的语句。SQLite 返回 `SELECT 1`。 */
   buildPingQuery(): string
 
+  /** 是否支持生成执行计划。 */
+  readonly supportsExplain: boolean
+
+  /** 根据当前方言生成执行计划 SQL。 */
+  buildExplainQuery(sql: string): string
+
   /** 脚本切分规则，供渲染层按当前连接方言定位语句。 */
   readonly scriptRules: SqlScriptRules
 }

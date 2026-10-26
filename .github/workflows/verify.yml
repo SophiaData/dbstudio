@@ -89,6 +89,7 @@ jobs:
           node scripts/build-driver-host.mjs
           node scripts/make-fixture-pg.mjs
           node scripts/verify.mjs external --only test:postgres --require-external
+          node scripts/verify.mjs external --only test:explain-postgres --require-external
 
       - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
         env:
@@ -243,6 +244,8 @@ jobs:
         # macOS 侧的隐藏窗口策略由 test:gui-hidden 自己断言锁定，防止回退。
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
+          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           sudo apt-get install -y xvfb
           xvfb-run --auto-servernum pnpm run verify:gui
+          xvfb-run --auto-servernum node scripts/verify.mjs external --only test:gui-explain-postgres --require-external

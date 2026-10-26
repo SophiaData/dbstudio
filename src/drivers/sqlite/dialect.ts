@@ -53,5 +53,11 @@ export const sqliteDialect: SqlDialect = {
     return 'SELECT 1'
   },
 
+  supportsExplain: true,
+
+  buildExplainQuery(sql: string): string {
+    return `EXPLAIN QUERY PLAN ${sql}`
+  },
+
   scriptRules: SQLITE_SCRIPT_RULES
 }

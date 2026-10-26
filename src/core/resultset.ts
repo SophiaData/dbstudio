@@ -112,6 +112,15 @@ export interface QueryResult extends ResultPage {
   readonly elapsedMs: number
 }
 
+/** 方言生成的执行计划，保持计划格式与原始 SQL 一起可追溯。 */
+export interface ExplainResult {
+  readonly dialectId: string
+  readonly columns: readonly ResultColumn[]
+  readonly rows: readonly ResultRow[]
+  readonly format: 'tabular' | 'text' | 'json'
+  readonly executedSql: string
+}
+
 /**
  * 网格编辑契约。
  *

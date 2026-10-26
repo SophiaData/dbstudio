@@ -72,5 +72,11 @@ export const postgresqlDialect: SqlDialect = {
     return 'SELECT 1'
   },
 
+  supportsExplain: true,
+
+  buildExplainQuery(sql: string): string {
+    return `EXPLAIN (FORMAT JSON) ${sql}`
+  },
+
   scriptRules: POSTGRESQL_SCRIPT_RULES
 }

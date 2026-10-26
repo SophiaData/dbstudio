@@ -18,7 +18,7 @@
 import type { ConnectionConfig } from './dialect'
 import type { TestConnectionResult, DialectInfo, SecretInput } from './driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
-import type { QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
+import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
 import type { CellValue } from './resultset'
 import type {
@@ -132,6 +132,9 @@ export interface DbStudioApi {
    * 返回 rows / affected / ddl 三态联合结果。
    */
   executeStatement(nodeId: string, sql: string, options?: QueryOptions): Promise<StatementResult>
+
+  /** 按当前连接方言生成执行计划。 */
+  explain(nodeId: string, sql: string): Promise<ExplainResult>
 
   /**
    * 从游标按偏移量取一页。
@@ -282,6 +285,7 @@ export const IPC = {
   describeTable: 'dbstudio:describeTable',
   runQuery: 'dbstudio:runQuery',
   executeStatement: 'dbstudio:executeStatement',
+  explain: 'dbstudio:explain',
   fetchResultPage: 'dbstudio:fetchResultPage',
   closeCursor: 'dbstudio:closeCursor',
   previewTable: 'dbstudio:previewTable',

@@ -20,7 +20,7 @@
 import type { ConnectionConfig, SqlDialect } from './dialect'
 import type { SqlScriptRules } from './sql-script'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
-import type { QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
+import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type {
   CellValue,
   EditApplyResult,
@@ -281,6 +281,9 @@ export interface DriverAdapter {
    */
   executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult>
 
+  /** 按当前方言生成并执行一条只读执行计划。 */
+  explain(sql: string): Promise<ExplainResult>
+
   /**
    * 从已打开的游标按偏移量取一页。
    *
@@ -536,6 +539,7 @@ export const RPC_METHODS = [
   'describeTable',
   'query',
   'executeStatement',
+  'explain',
   'fetchResultPage',
   'closeCursor',
   'applyEdits',

@@ -23,6 +23,7 @@ import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription }
 import type {
   CellValue,
   EditApplyResult,
+  ExplainResult,
   QueryOptions,
   QueryResult,
   ResultPage,
@@ -693,6 +694,16 @@ export class ConnectionManager {
           result: { ...qResult, cursorId: scoped }
         }
       }
+    }
+    return result
+  }
+
+  /** 按连接所属驱动生成执行计划，不在主进程拼接方言关键字。 */
+  async explain(nodeId: string, sql: string): Promise<ExplainResult> {
+    const { conn } = this.#resolveConnection(nodeId)
+    const result = await conn.host.explain(sql)
+    if (this.#connections.get(conn.id) !== conn) {
+      throw new Error(`执行计划所属的会话已断开: ${conn.id}`)
     }
     return result
   }

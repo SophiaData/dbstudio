@@ -48,10 +48,10 @@ export interface SqlEditorCallbacks {
   /** 请求补全候选（表名/列名）；返回空数组表示没有元数据可用。 */
   getMetadataCandidates(): Promise<readonly string[]>
   /**
-   * 可选：执行 `EXPLAIN QUERY PLAN <sql>` 并返回结果行。
+   * 可选：按当前连接的数据库方言生成执行计划并返回结果行。
    * 不提供时，"执行计划"按钮会提示"当前连接不支持执行计划"。
    * 返回值约定为 `{ columns: string[]; rows: unknown[][] }`，由调用方负责
-   * 通过 runQuery 取数（组件不碰 api.ts，避免把渲染组件和 IPC 契约耦合）。
+   * 通过对应的宿主能力取数（组件不碰 api.ts，避免把渲染组件和 IPC 契约耦合）。
    */
   runExplain?(sql: string): Promise<{ readonly columns: readonly string[]; readonly rows: readonly unknown[][] }>
   /** 打开历史与收藏面板。 */
@@ -303,7 +303,7 @@ export class SqlEditor {
     this.explainPanel.innerHTML = ''
     const title = document.createElement('div')
     title.className = 'sql-editor-explain-title'
-    title.textContent = '执行计划（EXPLAIN QUERY PLAN）'
+    title.textContent = '执行计划'
     this.explainPanel.appendChild(title)
 
     if (rows.length === 0) {
@@ -385,7 +385,7 @@ export class SqlEditor {
       }
       this.callbacks.onExecute(all)
     })
-    makeBtn('执行计划', '对当前语句执行 EXPLAIN QUERY PLAN', () => void this.runExplain())
+    makeBtn('执行计划', '按当前数据库方言查看执行计划', () => void this.runExplain())
     if (this.callbacks.onOpenLibrary) {
       makeBtn('历史 / 收藏', '浏览 SQL 执行历史与收藏', () => this.callbacks.onOpenLibrary?.())
     }
@@ -402,16 +402,21 @@ export class SqlEditor {
   }
 
   private async runExplain(): Promise<void> {
-    const stmt = this.getCurrentStatement()
-    if (!stmt) {
-      this.callbacks.onStatus('光标所在位置没有语句，无法查看执行计划', true)
-      return
-    }
-    if (!this.callbacks.runExplain) {
-      this.callbacks.onStatus('当前宿主未提供执行计划能力', true)
-      return
-    }
+    if (this.explainPanel.getAttribute('aria-busy') === 'true') return
+    this.explainPanel.innerHTML = ''
+    this.explainPanel.style.display = 'none'
+    this.explainPanel.setAttribute('aria-busy', 'true')
     try {
+      const stmt = this.getCurrentStatement()
+      if (!stmt) {
+        this.callbacks.onStatus('光标所在位置没有语句，无法查看执行计划', true)
+        return
+      }
+      if (!this.callbacks.runExplain) {
+        this.callbacks.onStatus('当前宿主未提供执行计划能力', true)
+        return
+      }
+      this.callbacks.onStatus('正在生成执行计划…')
       const result = await this.callbacks.runExplain(stmt)
       this.showExplainResult(result.columns, result.rows)
       this.callbacks.onStatus('执行计划已更新')
@@ -419,6 +424,8 @@ export class SqlEditor {
       // 关键：如实报告 adapter 只读护栏的拒绝，不做任何"绕过"。
       const msg = err instanceof Error ? err.message : String(err)
       this.callbacks.onStatus(`执行计划失败：${msg}`, true)
+    } finally {
+      this.explainPanel.setAttribute('aria-busy', 'false')
     }
   }
 

@@ -54,6 +54,7 @@ export const STEPS = [
   { id: 'test:postgres-edits', title: 'PostgreSQL 编辑列名与组合主键契约', group: 'node' },
   { id: 'test:sql-library', title: 'SQL 历史与收藏存储', group: 'node' },
   { id: 'test:statement-execution', title: '语句执行契约与三态结果 e2e', group: 'node' },
+  { id: 'test:explain', title: 'SQLite 执行计划 RPC 与错误恢复', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
@@ -74,6 +75,7 @@ export const STEPS = [
   { id: 'test:gui-features', title: '新功能 GUI（搜索/排序/统计/增删行）', group: 'gui' },
   { id: 'test:gui-round3', title: '第三轮 GUI（多标签/DDL/编辑连接）', group: 'gui' },
   { id: 'test:gui-sql', title: 'SQL 编辑器 GUI', group: 'gui' },
+  { id: 'test:gui-explain', title: 'SQLite 执行计划 GUI 与断线恢复', group: 'gui' },
   { id: 'test:gui-ssl-form', title: 'SSL 表单 GUI', group: 'gui' },
   { id: 'test:gui-ssh-form', title: 'SSH 表单 GUI', group: 'gui' },
   { id: 'test:gui-sql-library', title: 'SQL 历史与收藏 GUI', group: 'gui' },
@@ -100,6 +102,18 @@ export const STEPS = [
   {
     id: 'test:cancel',
     title: '查询取消能力（PG 真取消 / SQLite 如实不支持）',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
+  {
+    id: 'test:explain-postgres',
+    title: 'PostgreSQL JSON 执行计划 RPC',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
+  {
+    id: 'test:gui-explain-postgres',
+    title: 'PostgreSQL 执行计划 GUI 与断线恢复（需要显示器）',
     group: 'external',
     env: ['DBSTUDIO_PG_URL']
   },

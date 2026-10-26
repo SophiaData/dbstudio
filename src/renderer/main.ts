@@ -431,7 +431,7 @@ async function boot(): Promise<void> {
     runExplain: async (sql) => {
       const connId = currentConnectionNodeId
       if (!connId) throw new Error('未选择连接')
-      const r = await api.runQuery(connId, `EXPLAIN QUERY PLAN ${sql}`, { keepCursor: false })
+      const r = await api.explain(connId, sql)
       return {
         columns: r.columns.map((c) => c.name),
         rows: r.rows.map((row) =>

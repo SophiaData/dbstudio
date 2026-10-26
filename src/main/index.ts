@@ -427,6 +427,7 @@ function registerIpc(): void {
       getManager().runQuery(nodeId, sql, options),
     executeStatement: async (nodeId: string, sql: string, options?: QueryOptions) =>
       getManager().executeStatement(nodeId, sql, options),
+    explain: async (nodeId: string, sql: string) => getManager().explain(nodeId, sql),
     fetchResultPage: async (cursorId: string, offset: number, limit: number) =>
       getManager().fetchResultPage(cursorId, offset, limit),
     closeCursor: async (cursorId: string) => getManager().closeCursor(cursorId),
@@ -514,6 +515,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.executeStatement, (_e, nodeId: string, sql: string, options?: QueryOptions) =>
     api.executeStatement(nodeId, sql, options)
   )
+  ipcMain.handle(IPC.explain, (_e, nodeId: string, sql: string) => api.explain(nodeId, sql))
   ipcMain.handle(
     IPC.fetchResultPage,
     (_e, cursorId: string, offset: number, limit: number) =>

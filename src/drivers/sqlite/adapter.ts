@@ -28,6 +28,7 @@ import type { DriverFactory } from '../../core/registry'
 import type {
   CellValue,
   EditApplyResult,
+  ExplainResult,
   QueryOptions,
   QueryResult,
   ResultPage,
@@ -578,6 +579,17 @@ export class SqliteDriverAdapter implements DriverAdapter {
       cursorId,
       executedSql,
       elapsedMs
+    }
+  }
+
+  async explain(sql: string): Promise<ExplainResult> {
+    const result = await this.query(this.dialect.buildExplainQuery(sql), { keepCursor: false })
+    return {
+      dialectId: this.dialect.id,
+      columns: result.columns,
+      rows: result.rows,
+      format: 'tabular',
+      executedSql: result.executedSql
     }
   }
 

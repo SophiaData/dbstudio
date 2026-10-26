@@ -30,7 +30,7 @@ import type {
 } from '../core/driver'
 import { isRpcResponse } from '../core/driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
-import type { QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
+import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
 
@@ -399,6 +399,11 @@ export class DriverHostHandle {
       { sql, options },
       RESULT_SET_TIMEOUT_MS
     )
+  }
+
+  /** 按驱动方言生成执行计划。 */
+  explain(sql: string): Promise<ExplainResult> {
+    return this.#requestWithTimeout<ExplainResult>('explain', { sql }, RESULT_SET_TIMEOUT_MS)
   }
 
   /**

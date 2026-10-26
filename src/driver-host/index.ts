@@ -57,6 +57,7 @@ import type {
 import { DriverRegistry } from '../core/registry'
 import type {
   EditApplyResult,
+  ExplainResult,
   QueryOptions,
   QueryResult,
   ResultPage,
@@ -688,6 +689,16 @@ class DriverHost {
         const sql = parseSql(params.sql, req.method)
         const options = parseQueryOptions(params.options, req.method)
         const result: StatementResult = await this.#adapter.executeStatement(sql, options)
+        return result
+      }
+
+      case 'explain': {
+        this.#requireConnected(req.method)
+        const sql = parseSql(params.sql, req.method)
+        if (!this.#adapter.dialect.supportsExplain) {
+          throw new RpcFailure('unsupported_method', '当前驱动不支持执行计划')
+        }
+        const result: ExplainResult = await this.#adapter.explain(sql)
         return result
       }
 

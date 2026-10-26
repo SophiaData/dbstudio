@@ -331,7 +331,7 @@ git commit -m "feat(sql): add dialect-aware script parsing and source locations"
 - Test: `tests/e2e-explain.mjs`
 - Test: `tests/gui-explain.mjs`
 
-- [ ] **Step 1: 增加契约**
+- [x] **Step 1: 增加契约**
 
 ```ts
 interface ExplainResult {
@@ -348,15 +348,15 @@ interface SqlDialect {
 }
 ```
 
-- [ ] **Step 2: 实现 SQLite 和 PostgreSQL**
+- [x] **Step 2: 实现 SQLite 和 PostgreSQL**
 
 SQLite 使用 `EXPLAIN QUERY PLAN`。PostgreSQL 使用 `EXPLAIN (FORMAT JSON)` 或可配置的 text/json 模式。渲染层不能拼接数据库关键字。
 
-- [ ] **Step 3: 增加测试**
+- [x] **Step 3: 增加测试**
 
 验证两个驱动返回非空计划、错误 SQL 返回可读错误、连接断开时不会留下执行中状态。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证并提交**
 
 ```bash
 node tests/e2e-explain.mjs
