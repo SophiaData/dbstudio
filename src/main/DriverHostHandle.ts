@@ -59,6 +59,7 @@ const RESULT_SET_TIMEOUT_MS = 60_000
 
 /** 宿主优雅退出的等待上限，超时就强杀。 */
 const SHUTDOWN_GRACE_MS = 3_000
+const STDERR_TAIL_MAX_BYTES = 4_096
 
 /**
  * 定位驱动宿主脚本。
@@ -99,6 +100,25 @@ export interface DriverHostOptions {
   readonly onExit?: (error: Error) => void
 }
 
+export type HostLifecycle =
+  | 'spawning'
+  | 'awaiting_handshake'
+  | 'ready'
+  | 'closing'
+  | 'exited'
+  | 'failed'
+
+export interface DriverHostDiagnostics {
+  readonly dialectId: string
+  readonly script: string
+  readonly lifecycle: HostLifecycle
+  readonly pid: number | undefined
+  readonly stdoutBytes: number
+  readonly stderrTail: string
+  readonly exitCode: number | null
+  readonly exitSignal: NodeJS.Signals | null
+}
+
 /**
  * 一个驱动宿主进程的句柄。
  *
@@ -107,21 +127,30 @@ export interface DriverHostOptions {
  */
 export class DriverHostHandle {
   readonly #child: ChildProcessWithoutNullStreams
+  readonly #dialectId: string
+  readonly #script: string
   readonly #pending = new Map<number, Pending>()
   readonly #onLog: (level: 'info' | 'warn' | 'error', message: string) => void
   readonly #onExit: (error: Error) => void
   readonly #exited: Promise<void>
   #nextId = 1
   #stdoutBuffer = ''
+  #stdoutBytes = 0
+  #stderrTail = ''
+  #exitCode: number | null = null
+  #exitSignal: NodeJS.Signals | null = null
+  #lifecycle: HostLifecycle = 'spawning'
   #closed = false
   #closing: Promise<void> | null = null
   readonly handshake: Promise<RpcHandshake>
 
   constructor(options: DriverHostOptions) {
+    this.#dialectId = options.dialectId
     this.#onLog = options.onLog ?? (() => {})
     this.#onExit = options.onExit ?? (() => {})
 
     const script = resolveDriverHostScript()
+    this.#script = script
     this.#child = spawn(process.execPath, [script, '--dialect', options.dialectId], {
       // ELECTRON_RUN_AS_NODE=1：让 Electron 二进制以纯 Node 身份运行子进程，
       // 这样宿主里可以正常使用 node:sqlite 等内置模块，且不必依赖用户装了系统 node。
@@ -129,11 +158,12 @@ export class DriverHostHandle {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     })
+    this.#lifecycle = 'awaiting_handshake'
 
     // 握手是构造后立刻就会到达的一帧，用它确认「这个进程是谁」。
     this.handshake = new Promise<RpcHandshake>((resolveHandshake, rejectHandshake) => {
       const timer = setTimeout(() => {
-        this.#terminate(new Error(`驱动宿主 ${options.dialectId} 在 10s 内未完成握手`))
+        this.#terminate(this.#diagnosticError(`驱动宿主 ${options.dialectId} 在 10s 内未完成握手`))
       }, 10_000)
       // 握手帧由下面的 stdout 解析器捕获后 resolve。
       this.#handshakeSettler = {
@@ -154,6 +184,7 @@ export class DriverHostHandle {
     // stderr 是宿主的日志通道，与协议流分开，不会污染 JSON。
     this.#child.stderr.setEncoding('utf8')
     this.#child.stderr.on('data', (chunk: string) => {
+      this.#appendStderr(chunk)
       const text = chunk.trimEnd()
       if (text) this.#onLog('info', `[driver-host:${options.dialectId}] ${text}`)
     })
@@ -161,13 +192,19 @@ export class DriverHostHandle {
     // 关键：进程退出必须清算所有挂起请求，否则 UI 会永远转圈。
     this.#exited = new Promise<void>((resolveExit) => {
       this.#child.once('exit', (code, signal) => {
+        this.#exitCode = code
+        this.#exitSignal = signal
+        this.#lifecycle =
+          this.#closing !== null && code === 0 && signal === null ? 'exited' : 'failed'
         this.#finish(
-          new Error(`驱动宿主进程已退出（code=${code ?? 'null'}, signal=${signal ?? 'null'}）`)
+          this.#diagnosticError(
+            `驱动宿主进程已退出（code=${code ?? 'null'}, signal=${signal ?? 'null'}）`
+          )
         )
         resolveExit()
       })
       this.#child.on('error', (err) => {
-        this.#terminate(err)
+        this.#terminate(this.#diagnosticError(err.message))
         // spawn 失败时没有 exit 事件。
         if (this.#child.pid === undefined) resolveExit()
       })
@@ -179,6 +216,23 @@ export class DriverHostHandle {
     return this.#closed
   }
 
+  get lifecycle(): HostLifecycle {
+    return this.#lifecycle
+  }
+
+  get diagnostics(): DriverHostDiagnostics {
+    return {
+      dialectId: this.#dialectId,
+      script: this.#script,
+      lifecycle: this.#lifecycle,
+      pid: this.#child.pid,
+      stdoutBytes: this.#stdoutBytes,
+      stderrTail: this.#stderrTail,
+      exitCode: this.#exitCode,
+      exitSignal: this.#exitSignal
+    }
+  }
+
   #finish(error: Error): void {
     if (this.#closed) return
     this.#closed = true
@@ -188,8 +242,26 @@ export class DriverHostHandle {
 
   #terminate(error: Error): void {
     if (this.#closed) return
+    this.#lifecycle = 'failed'
     this.#finish(error)
     this.#child.kill('SIGKILL')
+  }
+
+  #diagnosticError(reason: string): Error {
+    const stderr = this.#stderrTail.trim() || '(empty)'
+    return new Error(
+      `${reason}; dialect=${this.#dialectId} pid=${this.#child.pid ?? 'unknown'} ` +
+        `script=${this.#script} stdoutBytes=${this.#stdoutBytes} stderr=${stderr}`
+    )
+  }
+
+  #appendStderr(chunk: string): void {
+    this.#stderrTail = `${this.#stderrTail}${chunk}`
+    const bytes = Buffer.byteLength(this.#stderrTail, 'utf8')
+    if (bytes <= STDERR_TAIL_MAX_BYTES) return
+    this.#stderrTail = Buffer.from(this.#stderrTail, 'utf8')
+      .subarray(-STDERR_TAIL_MAX_BYTES)
+      .toString('utf8')
   }
 
   #handshakeSettler: { resolve: (hs: RpcHandshake) => void; reject: (e: Error) => void } | null =
@@ -198,6 +270,7 @@ export class DriverHostHandle {
   /** 逐行切分 stdout。TCP/管道不保证一次 data 就是完整一行，必须自己攒。 */
   #onStdout(chunk: string): void {
     this.#stdoutBuffer += chunk
+    this.#stdoutBytes += Buffer.byteLength(chunk, 'utf8')
     let idx: number
     while ((idx = this.#stdoutBuffer.indexOf('\n')) !== -1) {
       const line = this.#stdoutBuffer.slice(0, idx).trim()
@@ -222,6 +295,7 @@ export class DriverHostHandle {
     }
     const event = frame as RpcEvent
     if (event?.kind === 'handshake') {
+      if (this.#lifecycle === 'awaiting_handshake') this.#lifecycle = 'ready'
       this.#handshakeSettler?.resolve(event)
       this.#handshakeSettler = null
     } else if (event?.kind === 'log') {
@@ -492,6 +566,7 @@ export class DriverHostHandle {
 
   async #close(): Promise<void> {
     if (this.#closed) return this.#exited
+    this.#lifecycle = 'closing'
     // 限时覆盖 disconnect RPC 本身，不能先等 15s RPC 超时再开始退出计时。
     const timer = setTimeout(() => this.kill(), SHUTDOWN_GRACE_MS)
     try {

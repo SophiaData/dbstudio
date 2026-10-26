@@ -49,6 +49,7 @@ export const STEPS = [
   { id: 'test:mutations', title: '增删改与完整取值 e2e', group: 'node' },
   { id: 'test:ddl', title: 'DDL 与编辑连接 e2e', group: 'node' },
   { id: 'test:connection-lifecycle', title: '连接故障恢复与并发建连', group: 'node' },
+  { id: 'test:driver-host-stress', title: '驱动宿主连续启动与退出压力', group: 'node' },
   { id: 'test:postgres-edits', title: 'PostgreSQL 编辑列名与组合主键契约', group: 'node' },
   { id: 'test:sql-library', title: 'SQL 历史与收藏存储', group: 'node' },
   { id: 'test:statement-execution', title: '语句执行契约与三态结果 e2e', group: 'node' },

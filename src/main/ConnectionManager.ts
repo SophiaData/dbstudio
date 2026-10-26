@@ -423,12 +423,16 @@ export class ConnectionManager {
     const host = new DriverHostHandle({
       dialectId: saved.config.dialectId,
       onLog: (level, msg) => this.#log(level, msg),
-      onExit: () => {
+      onExit: (error) => {
         // 旧宿主的退出事件不能清掉已经重连的新会话。
         if (this.#connections.get(connectionId)?.host === host) {
           this.#connections.delete(connectionId)
           this.#openCursors.delete(connectionId)
           this.#sessionSecrets.delete(connectionId)
+          this.#log(
+            'error',
+            `[manager] 连接 ${connectionId}（${saved.config.name}）的驱动宿主退出: ${error.message}`
+          )
         } else if (this.#connecting.get(connectionId)?.host === host) {
           this.#sessionSecrets.delete(connectionId)
         }

@@ -108,6 +108,29 @@ async function check(name, fn) {
 }
 
 try {
+  await check('failed handshake exposes lifecycle diagnostics', async () => {
+    const host = new DriverHostHandle({ dialectId: 'missing-lifecycle-dialect' })
+    try {
+      await assert.rejects(host.handshake, (error) => {
+        assert.match(error.message, /missing-lifecycle-dialect/)
+        assert.match(error.message, /pid=/)
+        assert.match(error.message, /script=/)
+        assert.match(error.message, /stdoutBytes=/)
+        assert.match(error.message, /stderr=/)
+        return true
+      })
+      assert.equal(host.lifecycle, 'failed')
+      assert.equal(host.diagnostics.dialectId, 'missing-lifecycle-dialect')
+      assert.equal(host.diagnostics.lifecycle, 'failed')
+      assert.equal(typeof host.diagnostics.pid, 'number')
+      assert.equal(host.diagnostics.exitCode, 1)
+      assert.match(host.diagnostics.stderrTail, /未知方言/)
+    } finally {
+      host.kill()
+      await host.close()
+    }
+  })
+
   await check('unexpected host exit clears live/cursors and permits an isolated reconnect', async () => {
     const { manager } = setup()
     const a = await manager.add(config('a'))

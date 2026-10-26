@@ -146,7 +146,7 @@ PostgreSQL：
 - Test: `tests/e2e-driver-host-stress.mjs`
 - Modify: `scripts/verify-manifest.mjs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新增连续启动、连接、断开 20 个 SQLite driver host 的测试，记录每次握手耗时、子进程 pid、退出码和 stdout/stderr。
 
@@ -162,7 +162,7 @@ for (let i = 0; i < 20; i += 1) {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败或暴露时序**
+- [x] **Step 2: 运行测试确认失败或暴露时序**
 
 运行：
 
@@ -172,7 +172,7 @@ node tests/e2e-driver-host-stress.mjs
 
 测试必须在任一握手失败时输出失败连接的完整上下文，不得只输出“10 秒超时”。
 
-- [ ] **Step 3: 完善宿主生命周期**
+- [x] **Step 3: 完善宿主生命周期**
 
 为 `DriverHostHandle` 增加以下状态记录：
 
@@ -188,7 +188,7 @@ type HostLifecycle =
 
 握手超时错误必须包含 dialect、pid、脚本路径、已接收字节数和最近一次 stderr。连接失败时由 `ConnectionManager` 清除 live 记录，并保证后续重连不会复用失效句柄。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证并提交**
 
 运行：
 
