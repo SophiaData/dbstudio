@@ -37,7 +37,7 @@ import {
 import { pickQuotingRules, quoteIdentifier } from './grid'
 import type { QuotingRules } from '../core/driver'
 import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
-import { guardAllTransactions, runConnectionOperation } from './transaction-controller'
+import { getTransactionController, guardAllTransactions, runConnectionOperation } from './transaction-controller'
 
 declare global {
   interface Window {
@@ -146,6 +146,24 @@ async function boot(): Promise<void> {
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
 
+  const DRAFT_PREFIX = 'dbstudio.sql-draft.'
+  const saveDraft = (connId: string | null, text: string): void => {
+    if (!connId || typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(DRAFT_PREFIX + connId, text)
+    } catch {
+      /* ignore storage quota errors */
+    }
+  }
+  const loadDraft = (connId: string | null): string => {
+    if (!connId || typeof localStorage === 'undefined') return ''
+    try {
+      return localStorage.getItem(DRAFT_PREFIX + connId) ?? ''
+    } catch {
+      return ''
+    }
+  }
+
   /**
    * 取方言的标识符引用规则。
    *
@@ -188,10 +206,19 @@ async function boot(): Promise<void> {
     if (!ref) return
     // 子节点 id 形如 `connection:c1|table:users`；连接节点形如 `connection:c1`。
     // runQuery 需要的正是 `connection:<id>` 这个前缀部分。
+    let nextConnNodeId: string | null = null
     if (ref.kind === 'connection') {
-      currentConnectionNodeId = ref.id
+      nextConnNodeId = ref.id
     } else if (ref.id.startsWith('connection:')) {
-      currentConnectionNodeId = ref.id.split('|')[0] ?? null
+      nextConnNodeId = ref.id.split('|')[0] ?? null
+    }
+
+    if (nextConnNodeId && nextConnNodeId !== currentConnectionNodeId) {
+      if (currentConnectionNodeId) {
+        saveDraft(currentConnectionNodeId, sqlEditor.getValue())
+      }
+      currentConnectionNodeId = nextConnNodeId
+      sqlEditor.setValue(loadDraft(nextConnNodeId))
     }
 
     if (ref.kind === 'table' || ref.kind === 'view') {
@@ -267,6 +294,15 @@ async function boot(): Promise<void> {
    * 切分用 sql-format.ts 的 splitStatements —— 它能正确处理字符串/注释里的分号
    * （`SELECT 'a;b'` 不会被切成两条）。
    */
+  const findStatementLine = (fullSql: string, stmt: string, fromIndex = 0): { line: number; nextIndex: number } => {
+    const trimmed = stmt.trim()
+    const snippet = trimmed.slice(0, 30)
+    const idx = fullSql.indexOf(snippet, fromIndex)
+    if (idx === -1) return { line: 1, nextIndex: fromIndex }
+    const line = fullSql.slice(0, idx).split('\n').length
+    return { line, nextIndex: idx + snippet.length }
+  }
+
   const executeSql = async (sql: string): Promise<void> => {
     if (!sql.trim()) return
     if (!currentConnectionNodeId) {
@@ -285,23 +321,49 @@ async function boot(): Promise<void> {
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
     const connectionNodeId = currentConnectionNodeId
+    let cursorIndex = 0
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i] as string
+      const lineInfo = findStatementLine(sql, stmt, cursorIndex)
+      cursorIndex = lineInfo.nextIndex
       const startedAt = performance.now()
       try {
-        const opened = await tabs.runSql(connectionNodeId, stmt)
-        await recordSqlHistory(
-          stmt,
-          connectionNodeId,
-          performance.now() - startedAt,
-          opened.outcome.error,
-          opened.outcome.result?.returned ?? null
-        )
-        if (opened.outcome.error !== null) {
-          const where =
-            statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
-          setStatus(`${where}${opened.outcome.error}`, true)
-          return
+        const stmtRes = await api.executeStatement(connectionNodeId, stmt)
+        const elapsed = performance.now() - startedAt
+        if (stmtRes.kind === 'rows') {
+          const opened = await tabs.runSql(connectionNodeId, stmt)
+          await recordSqlHistory(
+            stmt,
+            connectionNodeId,
+            elapsed,
+            opened.outcome.error,
+            opened.outcome.result?.returned ?? null
+          )
+          if (opened.outcome.error !== null) {
+            const where =
+              statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
+            setStatus(`${where}${opened.outcome.error}`, true)
+            return
+          }
+        } else if (stmtRes.kind === 'affected') {
+          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
+          const parsed = NodeId.parse(connectionNodeId)
+          if (parsed) {
+            const ctrl = getTransactionController(parsed.connectionId)
+            await ctrl.notifyExternalMutation(api)
+          }
+          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, stmtRes.affected)
+          setStatus(`执行成功，影响 ${stmtRes.affected} 行（耗时 ${Math.round(elapsed)}ms）`)
+        } else if (stmtRes.kind === 'ddl') {
+          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
+          tree.loadRoots()
+          const parsed = NodeId.parse(connectionNodeId)
+          if (parsed) {
+            const ctrl = getTransactionController(parsed.connectionId)
+            await ctrl.notifyExternalMutation(api)
+          }
+          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, 0)
+          setStatus(`DDL 执行成功：${stmtRes.summary}（耗时 ${Math.round(elapsed)}ms）`)
         }
       } catch (e) {
         await recordSqlHistory(
@@ -311,7 +373,7 @@ async function boot(): Promise<void> {
           errText(e),
           null
         )
-        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句失败：` : ''
+        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
         setStatus(`${where}${errText(e)}`, true)
         return
       }
@@ -333,6 +395,11 @@ async function boot(): Promise<void> {
   const sqlEditor = new SqlEditor(el('sql-editor-host'), {
     onExecute: (sql) => void executeSql(sql),
     onStatus: (t, isErr) => setStatus(t, isErr),
+    onChange: (text) => {
+      if (currentConnectionNodeId) {
+        saveDraft(currentConnectionNodeId, text)
+      }
+    },
     getMetadataCandidates: async () => {
       const connId = currentConnectionNodeId
       if (!connId) return []

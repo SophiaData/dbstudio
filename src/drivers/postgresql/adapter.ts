@@ -44,7 +44,8 @@ import type {
   ResultPage,
   RowEditOutcome,
   RowUpdate,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from '../../core/resultset'
 
 import { postgresqlDialect } from './dialect'
@@ -84,6 +85,8 @@ import {
   normalizeOffset,
   normalizePageSize,
   prepareReadOnlyStatement,
+  prepareGeneralStatement,
+  PAGINATABLE_KEYWORDS,
   toCellValue,
   toFullCellValue,
   type PgResultLike
@@ -784,6 +787,77 @@ export class PostgresDriverAdapter implements DriverAdapter {
       hasMore: grid.rows.length === limit,
       cursorId,
       executedSql,
+      elapsedMs
+    }
+  }
+
+  async executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
+    const client = this.#requireClient()
+    const analyzed = prepareGeneralStatement(sql)
+    const startedAt = performance.now()
+
+    if (analyzed.kind === 'rows') {
+      if (PAGINATABLE_KEYWORDS.has(analyzed.keyword)) {
+        const result = await this.query(analyzed.statementSql, options)
+        return { kind: 'rows', result }
+      }
+      const res = await this.#runQuery(client, analyzed.statementSql)
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      const grid = buildGrid(res as unknown as PgResultLike)
+      return {
+        kind: 'rows',
+        result: {
+          columns: buildColumns(grid.names, grid.rows),
+          rows: buildRows(grid.names, grid.rows, 0),
+          offset: 0,
+          returned: grid.rows.length,
+          hasMore: false,
+          cursorId: null,
+          executedSql: analyzed.statementSql,
+          elapsedMs
+        }
+      }
+    }
+
+    if (analyzed.kind === 'affected') {
+      const inOwnTransaction = await this.#ensureTransaction(client)
+      let rowCount = 0
+      try {
+        const res = await client.query(analyzed.statementSql)
+        rowCount = res.rowCount ?? 0
+        this.#pendingAffected += rowCount
+      } catch (thrown) {
+        await this.#releaseFailedOwnTransaction(client, inOwnTransaction)
+        throw wrapPgError(thrown, 'query_failed', '执行语句失败')
+      }
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      const txState = await this.transactionState()
+      return {
+        kind: 'affected',
+        affected: rowCount,
+        inTransaction: txState.active,
+        transactionState: txState,
+        executedSql: analyzed.statementSql,
+        elapsedMs
+      }
+    }
+
+    // ddl
+    let command = ''
+    try {
+      const res = await client.query(analyzed.statementSql)
+      command = res.command ?? `${analyzed.keyword.toUpperCase()} 语句执行完成`
+    } catch (thrown) {
+      throw wrapPgError(thrown, 'query_failed', '执行 DDL 失败')
+    }
+    const elapsedMs = Math.round(performance.now() - startedAt)
+    const txState = await this.transactionState()
+    const snippet = analyzed.statementSql.replace(/\s+/g, ' ').trim().slice(0, 50)
+    return {
+      kind: 'ddl',
+      summary: `${snippet} 已完成`,
+      committed: !txState.active,
+      executedSql: analyzed.statementSql,
       elapsedMs
     }
   }

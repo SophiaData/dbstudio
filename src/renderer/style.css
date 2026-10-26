@@ -1725,3 +1725,132 @@ dialog::backdrop {
     color: #8b949e;
   }
 }
+
+/* ============================================================
+   SQL 工作台结果形态卡片 (Affected / DDL)
+   ============================================================ */
+.statement-summary-pane {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  max-width: 800px;
+  gap: 16px;
+  background: #ffffff;
+  border-radius: 8px;
+  margin: 16px;
+  border: 1px solid #e1e4e8;
+}
+
+.statement-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.statement-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.statement-badge.is-affected {
+  background: #dafbe1;
+  color: #1a7f37;
+}
+
+.statement-badge.is-ddl {
+  background: #ddf4ff;
+  color: #0969da;
+}
+
+.statement-title {
+  margin: 0;
+  font-size: 15px;
+  font-family: monospace;
+  font-weight: 600;
+  color: #24292f;
+}
+
+.statement-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.statement-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  min-width: 140px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #57606a;
+}
+
+.stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #24292f;
+}
+
+.stat-value.is-pending {
+  color: #b08800;
+}
+
+.statement-sql-box {
+  background: #f6f8fa;
+  border-radius: 6px;
+  padding: 12px 16px;
+  overflow-x: auto;
+}
+
+.statement-sql-box code {
+  font-family: monospace;
+  font-size: 13px;
+  color: #24292f;
+  white-space: pre-wrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .statement-summary-pane {
+    background: #161b22;
+    border-color: #30363d;
+  }
+  .statement-badge.is-affected {
+    background: #238636;
+    color: #ffffff;
+  }
+  .statement-badge.is-ddl {
+    background: #1f6feb;
+    color: #ffffff;
+  }
+  .statement-title {
+    color: #c9d1d9;
+  }
+  .statement-stat {
+    background: #21262d;
+  }
+  .stat-label {
+    color: #8b949e;
+  }
+  .stat-value {
+    color: #c9d1d9;
+  }
+  .stat-value.is-pending {
+    color: #d29922;
+  }
+  .statement-sql-box {
+    background: #21262d;
+  }
+  .statement-sql-box code {
+    color: #c9d1d9;
+  }
+}

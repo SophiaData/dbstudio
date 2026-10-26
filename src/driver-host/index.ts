@@ -61,7 +61,8 @@ import type {
   QueryResult,
   ResultPage,
   RowUpdate,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
 import { registerBuiltinDrivers } from '../drivers'
@@ -679,6 +680,14 @@ class DriverHost {
         const sql = parseSql(params.sql, req.method)
         const options = parseQueryOptions(params.options, req.method)
         const result: QueryResult = await this.#adapter.query(sql, options)
+        return result
+      }
+
+      case 'executeStatement': {
+        this.#requireConnected(req.method)
+        const sql = parseSql(params.sql, req.method)
+        const options = parseQueryOptions(params.options, req.method)
+        const result: StatementResult = await this.#adapter.executeStatement(sql, options)
         return result
       }
 

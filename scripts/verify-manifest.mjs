@@ -51,6 +51,7 @@ export const STEPS = [
   { id: 'test:connection-lifecycle', title: '连接故障恢复与并发建连', group: 'node' },
   { id: 'test:postgres-edits', title: 'PostgreSQL 编辑列名与组合主键契约', group: 'node' },
   { id: 'test:sql-library', title: 'SQL 历史与收藏存储', group: 'node' },
+  { id: 'test:statement-execution', title: '语句执行契约与三态结果 e2e', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
@@ -82,6 +83,10 @@ export const STEPS = [
 
   { id: 'test:gui-app-close-guard', title: '真实窗口关闭、退出与崩溃保护', group: 'gui' },
   { id: 'test:gui-connection-guard', title: '连接断开、删除和更新的事务保护', group: 'gui' },
+  { id: 'test:gui-sql-transaction', title: 'SQL 工作台写操作与连接事务联动 GUI', group: 'gui' },
+  { id: 'test:gui-sql-workbench-results', title: '工作台结果形态卡片 (Affected / DDL) GUI', group: 'gui' },
+  { id: 'test:gui-sql-script-execution', title: '多语句脚本顺序执行与错误中断 GUI', group: 'gui' },
+  { id: 'test:gui-sql-draft', title: 'SQL 编辑器按连接草稿恢复 GUI', group: 'gui' },
 
   // ---- 需要外部服务 ----
   {

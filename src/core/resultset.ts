@@ -172,6 +172,37 @@ export interface EditApplyResult {
   readonly inTransaction: boolean
 }
 
+/**
+ * 语句执行的统一结果。
+ *
+ * 为什么必须是 Discriminated Union 而不是把所有字段塞进一个扁平对象：
+ * 1. 查询返回结果集与游标，供网格分页展示；
+ * 2. DML 返回受影响行数与当前事务状态；
+ * 3. DDL 返回变更摘要与提交标志。
+ * 绝不能把 affected 塞进 QueryResult.rows（那会让返回 0 行与影响 0 行混淆）。
+ */
+export type StatementResult =
+  | {
+      readonly kind: 'rows'
+      readonly result: QueryResult
+    }
+  | {
+      readonly kind: 'affected'
+      readonly affected: number
+      readonly inTransaction: boolean
+      readonly transactionState: TransactionState
+      readonly executedSql: string
+      readonly elapsedMs: number
+    }
+  | {
+      readonly kind: 'ddl'
+      readonly summary: string
+      readonly affected?: number
+      readonly committed: boolean
+      readonly executedSql: string
+      readonly elapsedMs: number
+    }
+
 /** 事务状态。UI 用它决定「应用」按钮是否可用、要不要提示未提交改动。 */
 export interface TransactionState {
   readonly active: boolean

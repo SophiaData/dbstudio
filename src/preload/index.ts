@@ -107,7 +107,7 @@ import type { ConnectionConfig } from '../core/dialect'
 import type { SecretInput } from '../core/driver'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
-import type { CellValue, QueryOptions, QueryResult, ResultPage } from '../core/resultset'
+import type { CellValue, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type {
   RecordSqlHistoryInput,
   SavedSql,
@@ -152,6 +152,9 @@ const api: DbStudioApi = {
 
   runQuery: (nodeId: string, sql: string, options?: QueryOptions) =>
     ipcRenderer.invoke(IPC.runQuery, nodeId, sql, options) as Promise<QueryResult>,
+
+  executeStatement: (nodeId: string, sql: string, options?: QueryOptions) =>
+    ipcRenderer.invoke(IPC.executeStatement, nodeId, sql, options) as Promise<StatementResult>,
 
   /**
    * 注意 `cursorId` 必须**原样**回传 runQuery 给的那个值。

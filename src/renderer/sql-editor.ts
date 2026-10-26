@@ -53,6 +53,8 @@ export interface SqlEditorCallbacks {
   onOpenLibrary?(): void
   /** 把当前语句（没有则整段）保存为收藏。 */
   onSaveCurrent?(sql: string): void
+  /** 内容变更（用于按连接草稿自动持久化）。 */
+  onChange?(text: string): void
 }
 
 interface CompletionItemView {
@@ -466,6 +468,7 @@ export class SqlEditor {
     this.textarea.addEventListener('input', () => {
       this.scheduleHighlight()
       this.scheduleCompletionUpdate()
+      this.callbacks.onChange?.(this.textarea.value)
     })
     this.textarea.addEventListener('scroll', () => this.syncScroll())
     this.textarea.addEventListener('keydown', (e) => this.onKeyDown(e))

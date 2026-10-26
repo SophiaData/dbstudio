@@ -62,7 +62,12 @@
     "test:verify-runner": "node tests/e2e-verify-runner.mjs",
     "test:cancel-sqlite": "node tests/e2e-cancel.mjs --sqlite-only",
     "test:release-gate": "node tests/e2e-release-gate.mjs",
-    "test:packaged-smoke": "node tests/e2e-packaged-smoke.mjs"
+    "test:packaged-smoke": "node tests/e2e-packaged-smoke.mjs",
+    "test:statement-execution": "node tests/e2e-statement-execution.mjs",
+    "test:gui-sql-transaction": "node tests/gui-sql-transaction.mjs",
+    "test:gui-sql-workbench-results": "node tests/gui-sql-workbench-results.mjs",
+    "test:gui-sql-script-execution": "node tests/gui-sql-script-execution.mjs",
+    "test:gui-sql-draft": "node tests/gui-sql-draft.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

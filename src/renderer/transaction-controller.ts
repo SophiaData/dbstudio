@@ -320,6 +320,22 @@ export class TransactionController {
     })
   }
 
+  /**
+   * SQL 编辑器或其他外部 DML/DDL 变更通知。
+   * 重新拉取连接级事务状态并广播刷新所有参与者网格。
+   */
+  async notifyExternalMutation(api?: DbStudioApi): Promise<void> {
+    await this.#enqueue(async () => {
+      const activeApi = api ?? this.#api
+      if (activeApi) {
+        const nodeId = this.#firstParticipant()?.transactionNodeId ?? `connection:${this.connectionId}`
+        const state = await activeApi.transactionState(nodeId).catch(() => null)
+        if (state) this.#broadcastState(state)
+      }
+      this.#broadcastRefresh()
+    })
+  }
+
   #enqueue<T>(task: () => Promise<T>): Promise<T> {
     const next = this.#queue.then(task, task)
     this.#queue = next.then(() => undefined, () => undefined)

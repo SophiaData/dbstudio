@@ -27,7 +27,8 @@ import type {
   QueryResult,
   ResultPage,
   RowUpdate,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from '../core/resultset'
 import { DriverHostHandle } from './DriverHostHandle'
 import { ConnectionStore, SecretStorageUnavailableError } from './ConnectionStore'
@@ -663,6 +664,31 @@ export class ConnectionManager {
       const scoped = CursorId.scope(conn.id, result.cursorId)
       this.#trackCursor(conn.id, result.cursorId)
       return { ...result, cursorId: scoped }
+    }
+    return result
+  }
+
+  /**
+   * 执行一条 SQL 语句（查询、DML 或 DDL）。
+   * 若结果包含游标，同样进行连接归属作用域包装与账本登记。
+   */
+  async executeStatement(nodeId: string, sql: string, options?: QueryOptions): Promise<StatementResult> {
+    const { conn } = this.#resolveConnection(nodeId)
+    const result = await conn.host.executeStatement(sql, options)
+    if (this.#connections.get(conn.id) !== conn) {
+      throw new Error(`语句执行所属的会话已断开: ${conn.id}`)
+    }
+
+    if (result.kind === 'rows') {
+      const qResult = result.result
+      if (qResult.cursorId !== null && qResult.cursorId !== undefined) {
+        const scoped = CursorId.scope(conn.id, qResult.cursorId)
+        this.#trackCursor(conn.id, qResult.cursorId)
+        return {
+          ...result,
+          result: { ...qResult, cursorId: scoped }
+        }
+      }
     }
     return result
   }

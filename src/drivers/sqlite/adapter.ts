@@ -33,7 +33,8 @@ import type {
   ResultPage,
   RowEditOutcome,
   RowUpdate,
-  TransactionState
+  TransactionState,
+  StatementResult
 } from '../../core/resultset'
 
 import { sqliteDialect } from './dialect'
@@ -79,6 +80,7 @@ import {
   normalizeOffset,
   normalizePageSize,
   prepareReadOnlyStatement,
+  prepareGeneralStatement,
   readGrid,
   toFullCellValue,
   cellByName,
@@ -575,6 +577,59 @@ export class SqliteDriverAdapter implements DriverAdapter {
       hasMore: grid.rows.length === limit,
       cursorId,
       executedSql,
+      elapsedMs
+    }
+  }
+
+  async executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
+    const db = this.#requireDb()
+    const analyzed = prepareGeneralStatement(sql)
+    const startedAt = performance.now()
+
+    if (analyzed.kind === 'rows') {
+      const result = await this.query(analyzed.statementSql, options)
+      return { kind: 'rows', result }
+    }
+
+    if (analyzed.kind === 'affected') {
+      const inOwnTransaction = this.#ensureTransaction(db)
+      let changes = 0
+      try {
+        const stmt = db.prepare(analyzed.statementSql)
+        const info = stmt.run()
+        changes = Number(info.changes)
+        this.#pendingAffected += changes
+      } catch (thrown) {
+        this.#releaseFailedOwnTransaction(db, inOwnTransaction)
+        if (thrown instanceof SqliteAdapterError) throw thrown
+        throw new SqliteAdapterError('query_failed', `执行语句失败：${describeThrown(thrown)}`, thrown)
+      }
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      const txState = await this.transactionState()
+      return {
+        kind: 'affected',
+        affected: changes,
+        inTransaction: txState.active,
+        transactionState: txState,
+        executedSql: analyzed.statementSql,
+        elapsedMs
+      }
+    }
+
+    // ddl
+    try {
+      db.exec(analyzed.statementSql)
+    } catch (thrown) {
+      if (thrown instanceof SqliteAdapterError) throw thrown
+      throw new SqliteAdapterError('query_failed', `执行 DDL 失败：${describeThrown(thrown)}`, thrown)
+    }
+    const elapsedMs = Math.round(performance.now() - startedAt)
+    const snippet = analyzed.statementSql.replace(/\s+/g, ' ').trim().slice(0, 50)
+    return {
+      kind: 'ddl',
+      summary: `${snippet} 已完成`,
+      committed: true,
+      executedSql: analyzed.statementSql,
       elapsedMs
     }
   }
