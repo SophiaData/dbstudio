@@ -24,6 +24,12 @@
  */
 
 import { isSqlKeyword } from './sql-keywords'
+import {
+  SQLITE_SCRIPT_RULES,
+  splitStatements as splitSqlScriptStatements,
+  type SqlScriptRules,
+  type SqlScriptStatement
+} from '../core/sql-script'
 
 /** 去掉**所有**空白字符（含换行、制表）。用于"语义不变"自检。 */
 export function stripAllWhitespace(sql: string): string {
@@ -157,27 +163,19 @@ export function scanContexts(sql: string): ScanState[] {
  *   - 不保留分隔符；自动 trim；丢弃纯空白/纯注释产生的空片段。
  *   - 末尾没有分号的最后一段也算一条（`SELECT 1` → ["SELECT 1"]）。
  */
-export function splitStatements(sql: string): string[] {
-  const contexts = scanContexts(sql)
-  const parts: string[] = []
-  let start = 0
-  for (let i = 0; i < sql.length; i += 1) {
-    if (sql[i] === ';' && contexts[i] === 'normal') {
-      pushIfMeaningful(parts, sql.slice(start, i))
-      start = i + 1
-    }
-  }
-  pushIfMeaningful(parts, sql.slice(start))
-  return parts
+export function splitStatements(
+  sql: string,
+  rules: SqlScriptRules = SQLITE_SCRIPT_RULES
+): string[] {
+  return splitSqlScriptStatements(sql, rules).map((statement) => statement.sql)
 }
 
-/** 去掉注释后若仍无任何"可见字符"，就不算一条语句。 */
-function pushIfMeaningful(out: string[], raw: string): void {
-  const text = raw.trim()
-  if (text.length === 0) return
-  // 纯注释（例如末尾只剩 `-- done`）不算语句
-  if (stripComments(text).trim().length === 0) return
-  out.push(text)
+/** 执行器与编辑器需要源码位置时使用的完整结果。 */
+export function splitScriptStatements(
+  sql: string,
+  rules: SqlScriptRules = SQLITE_SCRIPT_RULES
+): SqlScriptStatement[] {
+  return splitSqlScriptStatements(sql, rules)
 }
 
 /** 把注释替换为空（用于判断"是否只剩注释"）。保留字符串内容。 */

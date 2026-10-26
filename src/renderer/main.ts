@@ -20,9 +20,14 @@ import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs, type ActiveTabContext } from './tabs'
 import { SqlEditor } from './sql-editor'
+import { SqlScriptRunner } from './sql-script-runner'
 import { extractKeyValues, resolveKeyColumnIndex, encodeRowKey } from './grid'
 import { SqlLibraryPanel } from './sql-library'
-import { splitStatements } from './sql-format'
+import {
+  SQLITE_SCRIPT_RULES,
+  splitStatements,
+  type SqlScriptStatement
+} from '../core/sql-script'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
 import { renderErDiagram } from './er-diagram'
 import {
@@ -145,6 +150,8 @@ async function boot(): Promise<void> {
 
   // 网格需要知道「当前在哪个连接上执行 SQL」，所以记住最近选中的连接子树节点。
   let currentConnectionNodeId: string | null = null
+  let currentScriptRules = SQLITE_SCRIPT_RULES
+  const scriptRunner = new SqlScriptRunner()
 
   const DRAFT_PREFIX = 'dbstudio.sql-draft.'
   const saveDraft = (connId: string | null, text: string): void => {
@@ -161,6 +168,22 @@ async function boot(): Promise<void> {
       return localStorage.getItem(DRAFT_PREFIX + connId) ?? ''
     } catch {
       return ''
+    }
+  }
+
+  const refreshScriptRules = async (connectionNodeId: string): Promise<void> => {
+    try {
+      const connectionId = NodeId.parse(connectionNodeId)?.connectionId ?? connectionNodeId
+      const [connections, dialects] = await Promise.all([
+        api.listConnections(),
+        api.listDialects()
+      ])
+      const connection = connections.find((item) => item.id === connectionId)
+      currentScriptRules =
+        dialects.find((dialect) => dialect.id === connection?.dialectId)?.scriptRules ??
+        SQLITE_SCRIPT_RULES
+    } catch {
+      currentScriptRules = SQLITE_SCRIPT_RULES
     }
   }
 
@@ -219,6 +242,7 @@ async function boot(): Promise<void> {
       }
       currentConnectionNodeId = nextConnNodeId
       sqlEditor.setValue(loadDraft(nextConnNodeId))
+      void refreshScriptRules(nextConnNodeId)
     }
 
     if (ref.kind === 'table' || ref.kind === 'view') {
@@ -283,26 +307,6 @@ async function boot(): Promise<void> {
 
   // ---- SQL 编辑器（替换原来的单行 input）----
   /** 执行一段 SQL（单条/全部同一条路径，区别只在传入内容）。 */
-  /**
-   * 执行 SQL。**支持多语句**：按 `;` 切分后逐条执行，每条结果开一个新标签。
-   *
-   * ⚠️ 这里曾经是个真 bug：编辑器有「执行全部」按钮，但它把整段 SQL
-   * 原样传给 `runQuery`，而适配器只接受单条语句 —— 于是多语句 100% 失败
-   * （`bad_params: 一次只能执行一条语句`）。功能等于没做。
-   * 实测截图才发现，GUI 测试只测了单条 SQL 所以没暴露。
-   *
-   * 切分用 sql-format.ts 的 splitStatements —— 它能正确处理字符串/注释里的分号
-   * （`SELECT 'a;b'` 不会被切成两条）。
-   */
-  const findStatementLine = (fullSql: string, stmt: string, fromIndex = 0): { line: number; nextIndex: number } => {
-    const trimmed = stmt.trim()
-    const snippet = trimmed.slice(0, 30)
-    const idx = fullSql.indexOf(snippet, fromIndex)
-    if (idx === -1) return { line: 1, nextIndex: fromIndex }
-    const line = fullSql.slice(0, idx).split('\n').length
-    return { line, nextIndex: idx + snippet.length }
-  }
-
   const executeSql = async (sql: string): Promise<void> => {
     if (!sql.trim()) return
     if (!currentConnectionNodeId) {
@@ -311,7 +315,13 @@ async function boot(): Promise<void> {
     }
     showPane('grid')
 
-    const statements = splitStatements(sql)
+    let statements: SqlScriptStatement[]
+    try {
+      statements = splitStatements(sql, currentScriptRules)
+    } catch (e) {
+      setStatus(`SQL 脚本解析失败：${errText(e)}`, true)
+      return
+    }
     if (statements.length === 0) {
       setStatus('没有可执行的语句', true)
       return
@@ -321,66 +331,62 @@ async function boot(): Promise<void> {
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
     const connectionNodeId = currentConnectionNodeId
-    let cursorIndex = 0
-    for (let i = 0; i < statements.length; i++) {
-      const stmt = statements[i] as string
-      const lineInfo = findStatementLine(sql, stmt, cursorIndex)
-      cursorIndex = lineInfo.nextIndex
-      const startedAt = performance.now()
-      try {
-        const stmtRes = await api.executeStatement(connectionNodeId, stmt)
-        const elapsed = performance.now() - startedAt
-        if (stmtRes.kind === 'rows') {
-          const opened = await tabs.runSql(connectionNodeId, stmt)
+    try {
+      await scriptRunner.run(statements, async (statement) => {
+        const stmt = statement.sql
+        const startedAt = performance.now()
+        try {
+          const stmtRes = await api.executeStatement(connectionNodeId, stmt)
+          const elapsed = performance.now() - startedAt
+          if (stmtRes.kind === 'rows') {
+            const opened = await tabs.runSql(connectionNodeId, stmt)
+            if (opened.outcome.error !== null) throw new Error(opened.outcome.error)
+            await recordSqlHistory(
+              stmt,
+              connectionNodeId,
+              elapsed,
+              null,
+              opened.outcome.result?.returned ?? null
+            )
+          } else if (stmtRes.kind === 'affected') {
+            await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
+            const parsed = NodeId.parse(connectionNodeId)
+            if (parsed) {
+              const ctrl = getTransactionController(parsed.connectionId)
+              await ctrl.notifyExternalMutation(api)
+            }
+            await recordSqlHistory(stmt, connectionNodeId, elapsed, null, stmtRes.affected)
+            setStatus(`执行成功，影响 ${stmtRes.affected} 行（耗时 ${Math.round(elapsed)}ms）`)
+          } else if (stmtRes.kind === 'ddl') {
+            await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
+            tree.loadRoots()
+            const parsed = NodeId.parse(connectionNodeId)
+            if (parsed) {
+              const ctrl = getTransactionController(parsed.connectionId)
+              await ctrl.notifyExternalMutation(api)
+            }
+            await recordSqlHistory(stmt, connectionNodeId, elapsed, null, 0)
+            setStatus(`DDL 执行成功：${stmtRes.summary}（耗时 ${Math.round(elapsed)}ms）`)
+          }
+        } catch (e) {
           await recordSqlHistory(
             stmt,
             connectionNodeId,
-            elapsed,
-            opened.outcome.error,
-            opened.outcome.result?.returned ?? null
+            performance.now() - startedAt,
+            errText(e),
+            null
           )
-          if (opened.outcome.error !== null) {
-            const where =
-              statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
-            setStatus(`${where}${opened.outcome.error}`, true)
-            return
-          }
-        } else if (stmtRes.kind === 'affected') {
-          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
-          const parsed = NodeId.parse(connectionNodeId)
-          if (parsed) {
-            const ctrl = getTransactionController(parsed.connectionId)
-            await ctrl.notifyExternalMutation(api)
-          }
-          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, stmtRes.affected)
-          setStatus(`执行成功，影响 ${stmtRes.affected} 行（耗时 ${Math.round(elapsed)}ms）`)
-        } else if (stmtRes.kind === 'ddl') {
-          await tabs.showCommandResult(connectionNodeId, stmt, stmtRes)
-          tree.loadRoots()
-          const parsed = NodeId.parse(connectionNodeId)
-          if (parsed) {
-            const ctrl = getTransactionController(parsed.connectionId)
-            await ctrl.notifyExternalMutation(api)
-          }
-          await recordSqlHistory(stmt, connectionNodeId, elapsed, null, 0)
-          setStatus(`DDL 执行成功：${stmtRes.summary}（耗时 ${Math.round(elapsed)}ms）`)
+          throw e
         }
-      } catch (e) {
-        await recordSqlHistory(
-          stmt,
-          connectionNodeId,
-          performance.now() - startedAt,
-          errText(e),
-          null
-        )
-        const where = statements.length > 1 ? `第 ${i + 1}/${statements.length} 条语句（第 ${lineInfo.line} 行）失败：` : ''
-        setStatus(`${where}${errText(e)}`, true)
-        return
-      }
-    }
-
-    if (statements.length > 1) {
-      setStatus(`已执行 ${statements.length} 条语句`)
+      })
+      if (statements.length > 1) setStatus(`已执行 ${statements.length} 条语句`)
+    } catch (e) {
+      const statement = scriptRunner.state.current
+      const where =
+        statements.length > 1 && statement !== undefined
+          ? `第 ${statement.index + 1}/${statements.length} 条语句（第 ${statement.startLine} 行）失败：`
+          : ''
+      setStatus(`${where}${errText(e)}`, true)
     }
   }
 
@@ -400,6 +406,7 @@ async function boot(): Promise<void> {
         saveDraft(currentConnectionNodeId, text)
       }
     },
+    getScriptRules: () => currentScriptRules,
     getMetadataCandidates: async () => {
       const connId = currentConnectionNodeId
       if (!connId) return []

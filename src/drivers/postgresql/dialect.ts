@@ -19,6 +19,7 @@
  */
 
 import type { SqlDialect } from '../../core/dialect'
+import { POSTGRESQL_SCRIPT_RULES } from '../../core/sql-script'
 
 /** 方言 id。注册表键、`ConnectionConfig.dialectId`、`RpcHandshake.dialectId` 三处必须是同一个值。 */
 export const POSTGRESQL_DIALECT_ID = 'postgresql'
@@ -69,5 +70,7 @@ export const postgresqlDialect: SqlDialect = {
    */
   buildPingQuery(): string {
     return 'SELECT 1'
-  }
+  },
+
+  scriptRules: POSTGRESQL_SCRIPT_RULES
 }

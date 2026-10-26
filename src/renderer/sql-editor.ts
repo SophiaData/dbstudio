@@ -32,7 +32,12 @@
  */
 
 import { SQL_COMPLETION_KEYWORDS } from './sql-keywords'
-import { formatSql, scanContexts, splitStatements } from './sql-format'
+import { formatSql, scanContexts } from './sql-format'
+import {
+  SQLITE_SCRIPT_RULES,
+  splitStatements,
+  type SqlScriptRules
+} from '../core/sql-script'
 
 /** 外部注入的回调。编辑器不直接调 IPC——保持组件可单测、可替换宿主。 */
 export interface SqlEditorCallbacks {
@@ -55,6 +60,8 @@ export interface SqlEditorCallbacks {
   onSaveCurrent?(sql: string): void
   /** 内容变更（用于按连接草稿自动持久化）。 */
   onChange?(text: string): void
+  /** 当前连接对应的脚本切分规则。 */
+  getScriptRules?(): SqlScriptRules
 }
 
 interface CompletionItemView {
@@ -241,31 +248,29 @@ export class SqlEditor {
 
   /**
    * 光标所在的语句（多语句时用于"执行当前语句"）。
-   * 实现：先用 splitStatements 得到各语句文本，再在原文里按顺序定位
-   * 每条的 [start,end)，找包含光标的那条。找不到（光标在空白/注释间）时，
+   * 解析器直接提供每条语句的源码 offset。找不到（光标在空白/注释间）时，
    * 退化为"最后一条非空语句"，都没有则返回空串。
    */
   getCurrentStatement(): string {
     const sql = this.textarea.value
     const caret = this.textarea.selectionStart ?? 0
-    const statements = splitStatements(sql)
+    const rules = this.callbacks.getScriptRules?.() ?? SQLITE_SCRIPT_RULES
+    const statements = splitStatements(sql, rules)
     if (statements.length === 0) return ''
 
-    // 重新扫描找每条语句在原文中的区间（splitStatements 只给文本，这里配位置）
-    const ranges = locateStatementRanges(sql)
-    for (const r of ranges) {
-      if (caret >= r.start && caret <= r.end) {
-        return sql.slice(r.start, r.end).trim()
+    for (const statement of statements) {
+      if (caret >= statement.startOffset && caret <= statement.endOffset) {
+        return statement.sql
       }
     }
     // 光标不在任何语句体内（常见于语句之间或末尾注释里）：
     // 取光标之前最近的一条；没有就取第一条。
     let picked = ''
-    for (const r of ranges) {
-      if (r.end <= caret) picked = sql.slice(r.start, r.end).trim()
+    for (const statement of statements) {
+      if (statement.endOffset <= caret) picked = statement.sql
     }
     if (picked) return picked
-    return (ranges[0] ? sql.slice(ranges[0].start, ranges[0].end).trim() : '')
+    return statements[0]?.sql ?? ''
   }
 
   focus(): void {
@@ -787,24 +792,4 @@ function mapCaretByNonWhitespace(original: string, caret: number, formatted: str
     if (!/\s/.test(formatted[i] as string)) seen += 1
   }
   return formatted.length
-}
-
-/** 找出每条语句在原文中的 [start,end) 区间（与 splitStatements 同源规则）。 */
-function locateStatementRanges(sql: string): Array<{ start: number; end: number }> {
-  const contexts = scanContexts(sql)
-  const ranges: Array<{ start: number; end: number }> = []
-  let start = 0
-  const pushIfMeaningful = (from: number, to: number): void => {
-    const text = sql.slice(from, to)
-    if (text.trim() === '') return
-    ranges.push({ start: from, end: to })
-  }
-  for (let i = 0; i < sql.length; i += 1) {
-    if (sql[i] === ';' && contexts[i] === 'normal') {
-      pushIfMeaningful(start, i)
-      start = i + 1
-    }
-  }
-  pushIfMeaningful(start, sql.length)
-  return ranges
 }

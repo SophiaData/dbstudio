@@ -1,3 +1,5 @@
+import type { SqlScriptRules } from './sql-script'
+
 /**
  * SQL 方言契约。
  *
@@ -73,4 +75,7 @@ export interface SqlDialect {
 
   /** 用于连接可用性探测的语句。SQLite 返回 `SELECT 1`。 */
   buildPingQuery(): string
+
+  /** 脚本切分规则，供渲染层按当前连接方言定位语句。 */
+  readonly scriptRules: SqlScriptRules
 }

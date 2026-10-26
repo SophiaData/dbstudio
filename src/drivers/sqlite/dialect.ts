@@ -9,6 +9,7 @@
  */
 
 import type { SqlDialect } from '../../core/dialect'
+import { SQLITE_SCRIPT_RULES } from '../../core/sql-script'
 
 /** 方言 id。注册表键、`ConnectionConfig.dialectId`、`RpcHandshake.dialectId` 三处必须是同一个值。 */
 export const SQLITE_DIALECT_ID = 'sqlite'
@@ -50,5 +51,7 @@ export const sqliteDialect: SqlDialect = {
   /** 连通性探测：不需要任何表，也不产生副作用。 */
   buildPingQuery(): string {
     return 'SELECT 1'
-  }
+  },
+
+  scriptRules: SQLITE_SCRIPT_RULES
 }

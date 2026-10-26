@@ -9,6 +9,7 @@
  */
 
 import type { DialectInfo } from '../../core/driver'
+import { SQLITE_SCRIPT_RULES } from '../../core/sql-script'
 import { SQLITE_DIALECT_ID } from './dialect'
 
 export const SQLITE_INFO: DialectInfo = {
@@ -37,5 +38,6 @@ export const SQLITE_INFO: DialectInfo = {
    * 所以这条规则的含义被刻意定义成"quoteIdentifier 的声明式描述"，
    * 而不是另一套独立的引号设置。
    */
-  quoting: { open: '"', close: '"', escape: 'double' }
+  quoting: { open: '"', close: '"', escape: 'double' },
+  scriptRules: SQLITE_SCRIPT_RULES
 }

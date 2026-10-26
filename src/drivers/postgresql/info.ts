@@ -11,6 +11,7 @@
  */
 
 import type { DialectInfo } from '../../core/driver'
+import { POSTGRESQL_SCRIPT_RULES } from '../../core/sql-script'
 import { POSTGRESQL_DIALECT_ID } from './dialect'
 
 export const POSTGRESQL_INFO: DialectInfo = {
@@ -173,5 +174,6 @@ export const POSTGRESQL_INFO: DialectInfo = {
    * 普通表名上看不出问题，一到含引号的标识符就炸，而且只在一侧炸。
    * （SQLite 与 PG 都是 `double`，但仍是各自的声明式描述，不是共享常量。）
    */
-  quoting: { open: '"', close: '"', escape: 'double' }
+  quoting: { open: '"', close: '"', escape: 'double' },
+  scriptRules: POSTGRESQL_SCRIPT_RULES
 }

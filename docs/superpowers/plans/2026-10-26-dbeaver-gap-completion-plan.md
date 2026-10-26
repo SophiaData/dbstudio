@@ -248,7 +248,7 @@ git commit -m "test: prevent setup failures from becoming false-positive asserti
 - Modify: `src/renderer/main.ts`
 - Test: `tests/e2e-sql-script-parser.mjs`
 
-- [ ] **Step 1: 定义脚本模型**
+- [x] **Step 1: 定义脚本模型**
 
 ```ts
 export interface SqlScriptStatement {
@@ -269,7 +269,7 @@ export interface SqlScriptRules {
 }
 ```
 
-- [ ] **Step 2: 先写覆盖边界的失败测试**
+- [x] **Step 2: 先写覆盖边界的失败测试**
 
 测试必须覆盖：
 
@@ -283,11 +283,11 @@ export interface SqlScriptRules {
 - 末尾注释和空语句；
 - 不闭合字符串/块注释的可读错误。
 
-- [ ] **Step 3: 按方言实现最小状态机**
+- [x] **Step 3: 按方言实现最小状态机**
 
 `splitStatements(sql, rules)` 必须返回带 offset/line 的语句对象。`sql-format.ts` 只负责格式化和 token 高亮，不能继续承担执行语句定位。
 
-- [ ] **Step 4: 接入执行器**
+- [x] **Step 4: 接入执行器**
 
 `src/renderer/sql-script-runner.ts` 负责：
 
@@ -302,7 +302,7 @@ interface ScriptRunState {
 
 执行错误必须使用 parser 产生的 `startLine`，不能再次通过字符串片段搜索行号。
 
-- [ ] **Step 5: 验证并提交**
+- [x] **Step 5: 验证并提交**
 
 ```bash
 node tests/e2e-sql-script-parser.mjs

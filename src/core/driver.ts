@@ -18,6 +18,7 @@
  */
 
 import type { ConnectionConfig, SqlDialect } from './dialect'
+import type { SqlScriptRules } from './sql-script'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
 import type { QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type {
@@ -425,6 +426,8 @@ export interface DialectInfo {
    * 完全不需要跨进程调用，也不需要认识任何具体驱动。
    */
   readonly quoting: QuotingRules
+  /** 供 SQL 编辑器切分脚本与报告源码行号。 */
+  readonly scriptRules: SqlScriptRules
 }
 
 /**

@@ -33,6 +33,7 @@
     "test:sdk-package": "node tests/e2e-sdk-package.mjs",
     "test:connection-lifecycle": "node tests/e2e-connection-lifecycle.mjs",
     "test:driver-host-stress": "node tests/e2e-driver-host-stress.mjs",
+    "test:sql-script-parser": "node tests/e2e-sql-script-parser.mjs",
     "test:postgres-edits": "node tests/e2e-postgres-edits.mjs",
     "test:verify-manifest": "node tests/e2e-verify-manifest.mjs",
     "test:gui-flow": "node tests/gui-flow.mjs",
