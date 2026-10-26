@@ -73,7 +73,12 @@
     "test:gui-sql-transaction": "node tests/gui-sql-transaction.mjs",
     "test:gui-sql-workbench-results": "node tests/gui-sql-workbench-results.mjs",
     "test:gui-sql-script-execution": "node tests/gui-sql-script-execution.mjs",
-    "test:gui-sql-draft": "node tests/gui-sql-draft.mjs"
+    "test:gui-sql-draft": "node tests/gui-sql-draft.mjs",
+    "test:gui-sql-cancel": "node tests/gui-sql-cancel.mjs --sqlite-only",
+    "test:sql-params": "node tests/e2e-sql-params.mjs --sqlite-only",
+    "test:sql-parameters-parser": "node tests/e2e-sql-parameters-parser.mjs",
+    "test:sql-params-postgres": "node tests/e2e-sql-params.mjs --pg-only",
+    "test:gui-sql-cancel-postgres": "node tests/gui-sql-cancel.mjs --pg-only"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

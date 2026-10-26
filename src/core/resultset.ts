@@ -91,7 +91,21 @@ export interface ResultPage {
   readonly hasMore: boolean
 }
 
-export interface QueryOptions {
+export type SqlParameterValue = string | number | boolean | null | Uint8Array
+
+export interface SqlParameter {
+  readonly name: string
+  readonly value: SqlParameterValue
+}
+
+export interface ExecuteOptions {
+  /** SQL 占位符对应的绑定值；缺失或多余参数都会被驱动拒绝。 */
+  readonly parameters?: readonly SqlParameter[]
+  /** 用于标识一次执行，供 UI 防止重复提交和后续取消扩展使用。 */
+  readonly signalId?: string
+}
+
+export interface QueryOptions extends ExecuteOptions {
   /** 本次请求的页大小，服务端会 clamp 到合理范围。 */
   readonly limit?: number
   /** 起始偏移（默认 0）。 */

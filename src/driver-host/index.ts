@@ -66,6 +66,7 @@ import type {
   StatementResult
 } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
+import { normalizeSqlParameterValue } from '../core/sql-parameters'
 import { registerBuiltinDrivers } from '../drivers'
 
 /**
@@ -274,21 +275,48 @@ function parsePositiveInt(raw: unknown, field: string, method: RpcMethod): numbe
   return raw
 }
 
-/**
- * 校验 `QueryOptions`。
- *
- * 三个字段都是可选的，所以「缺失」是合法输入；只校验**给了的值**是否合法。
- * 这里刻意不在宿主侧做上限 clamp（比如把 limit 压到 200）——
- * 页大小策略属于 adapter/上层，宿主越权 clamp 会让「UI 要 500 行却拿到 200 行」
- * 变成一个没有任何日志的静默行为。
- */
-function parseQueryOptions(raw: unknown, method: RpcMethod): QueryOptions {
+function parseExecuteOptions(raw: unknown, method: RpcMethod): QueryOptions {
   if (raw === undefined || raw === null) return {}
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     throw new RpcFailure('bad_params', `${method}: options 必须是对象`)
   }
   const o = raw as Params
-  const out: { limit?: number; offset?: number; keepCursor?: boolean } = {}
+  const out: {
+    parameters?: { readonly name: string; readonly value: ReturnType<typeof normalizeSqlParameterValue> }[]
+    signalId?: string
+    limit?: number
+    offset?: number
+    keepCursor?: boolean
+  } = {}
+
+  if (o.parameters !== undefined) {
+    if (!Array.isArray(o.parameters)) {
+      throw new RpcFailure('bad_params', `${method}: options.parameters 必须是数组`)
+    }
+    out.parameters = o.parameters.map((rawParameter, index) => {
+      if (typeof rawParameter !== 'object' || rawParameter === null || Array.isArray(rawParameter)) {
+        throw new RpcFailure('bad_params', `${method}: options.parameters[${index}] 必须是对象`)
+      }
+      const parameter = rawParameter as Params
+      if (typeof parameter.name !== 'string' || parameter.name.trim() === '') {
+        throw new RpcFailure('bad_params', `${method}: options.parameters[${index}].name 必须是非空字符串`)
+      }
+      try {
+        return {
+          name: parameter.name,
+          value: normalizeSqlParameterValue(parameter.value, `${method}: options.parameters[${index}].value`)
+        }
+      } catch (error) {
+        throw new RpcFailure('bad_params', error instanceof Error ? error.message : String(error))
+      }
+    })
+  }
+  if (o.signalId !== undefined) {
+    if (typeof o.signalId !== 'string' || o.signalId.trim() === '') {
+      throw new RpcFailure('bad_params', `${method}: options.signalId 必须是非空字符串`)
+    }
+    out.signalId = o.signalId
+  }
   if (o.limit !== undefined) out.limit = parsePositiveInt(o.limit, 'options.limit', method)
   if (o.offset !== undefined) out.offset = parseNonNegativeInt(o.offset, 'options.offset', method)
   if (o.keepCursor !== undefined) {
@@ -298,6 +326,18 @@ function parseQueryOptions(raw: unknown, method: RpcMethod): QueryOptions {
     out.keepCursor = o.keepCursor
   }
   return out
+}
+
+/**
+ * 校验 `QueryOptions`。
+ *
+ * 三个字段都是可选的，所以「缺失」是合法输入；只校验**给了的值**是否合法。
+ * 这里刻意不在宿主侧做上限 clamp（比如把 limit 压到 200）——
+ * 页大小策略属于 adapter/上层，宿主越权 clamp 会让「UI 要 500 行却拿到 200 行」
+ * 变成一个没有任何日志的静默行为。
+ */
+function parseQueryOptions(raw: unknown, method: RpcMethod): QueryOptions {
+  return parseExecuteOptions(raw, method)
 }
 
 // ---------------------------------------------------------------------------
@@ -583,9 +623,22 @@ class DriverHost {
   #connected = false
   /** 优雅退出时兜底调用，保证幂等（adapter 契约要求 disconnect 幂等）。 */
   #disposed = false
+  #activeExecution: { signalId?: string } | null = null
 
   constructor(adapter: DriverAdapter) {
     this.#adapter = adapter
+  }
+
+  async #executeSql<T>(options: QueryOptions, execute: () => Promise<T>): Promise<T> {
+    if (this.#activeExecution !== null) {
+      throw new RpcFailure('bad_params', '当前连接已有 SQL 正在执行，请等待完成或取消。')
+    }
+    this.#activeExecution = { signalId: options.signalId }
+    try {
+      return await execute()
+    } finally {
+      this.#activeExecution = null
+    }
   }
 
   #handshake(): RpcHandshake {
@@ -680,16 +733,14 @@ class DriverHost {
         this.#requireConnected(req.method)
         const sql = parseSql(params.sql, req.method)
         const options = parseQueryOptions(params.options, req.method)
-        const result: QueryResult = await this.#adapter.query(sql, options)
-        return result
+        return this.#executeSql(options, () => this.#adapter.query(sql, options))
       }
 
       case 'executeStatement': {
         this.#requireConnected(req.method)
         const sql = parseSql(params.sql, req.method)
         const options = parseQueryOptions(params.options, req.method)
-        const result: StatementResult = await this.#adapter.executeStatement(sql, options)
-        return result
+        return this.#executeSql(options, () => this.#adapter.executeStatement(sql, options))
       }
 
       case 'explain': {
@@ -827,6 +878,10 @@ class DriverHost {
       }
 
       case 'cancelQuery': {
+        if (params.signalId !== undefined) {
+          const signalId = parseObjectId(params.signalId, req.method, 'signalId')
+          if (signalId !== this.#activeExecution?.signalId) return false
+        }
         /**
          * 刻意**不** requireConnected：取消是"尽力而为"的动作。
          * 未连接时返回 false 比报 not_connected 更合适——

@@ -352,7 +352,9 @@ export class DriverHostHandle {
         method
       })
       try {
-        this.#child.stdin.write(`${JSON.stringify(frame)}\n`, (err) => {
+        this.#child.stdin.write(`${JSON.stringify(frame, (_key, value: unknown) =>
+          value instanceof Uint8Array ? { type: 'dbstudio-sql-bytes', data: Array.from(value) } : value
+        )}\n`, (err) => {
           if (err) this.#terminate(err)
         })
       } catch (e) {
@@ -551,8 +553,8 @@ export class DriverHostHandle {
    * 超时用较短的 10s：取消请求本身不该让用户再等 60s——
    * 如果这么久都没有响应，说明后端有问题，宁可报超时。
    */
-  cancelQuery(): Promise<boolean> {
-    return this.#requestWithTimeout<boolean>('cancelQuery', {}, 10_000)
+  cancelQuery(signalId?: string): Promise<boolean> {
+    return this.#requestWithTimeout<boolean>('cancelQuery', { signalId }, 10_000)
   }
 
   renameTable(nodeId: string, newName: string): Promise<void> {

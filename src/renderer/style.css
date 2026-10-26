@@ -1501,6 +1501,54 @@ dialog::backdrop {
   color: var(--accent);
 }
 
+.sql-editor-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sql-editor-parameters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr);
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.sql-editor-parameters-title {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.sql-editor-parameters-warning {
+  color: var(--danger);
+}
+
+.sql-editor-parameter-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.35fr) 100px minmax(140px, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.sql-editor-parameter-row > span {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+.sql-editor-parameter-type,
+.sql-editor-parameter-value {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
 /* 编辑区：textarea 与高亮层必须共享同一套排版参数，
    否则光标位置与高亮文字会错位（这是 textarea+pre 方案唯一真正的坑）。 */
 .sql-editor-area {

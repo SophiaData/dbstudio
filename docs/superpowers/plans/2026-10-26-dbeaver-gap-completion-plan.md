@@ -370,6 +370,7 @@ git commit -m "feat(sql): make explain execution dialect aware"
 **Files:**
 
 - Modify: `src/core/resultset.ts`
+- Create: `src/core/sql-parameters.ts`
 - Modify: `src/core/driver.ts`
 - Modify: `src/core/api.ts`
 - Modify: `src/driver-host/index.ts`
@@ -377,10 +378,13 @@ git commit -m "feat(sql): make explain execution dialect aware"
 - Modify: `src/drivers/postgresql/adapter.ts`
 - Modify: `src/renderer/sql-editor.ts`
 - Modify: `src/renderer/main.ts`
+- Modify: `src/renderer/grid.ts`
+- Modify: `src/renderer/tabs.ts`
+- Modify: `src/renderer/style.css`
 - Test: `tests/e2e-sql-params.mjs`
 - Test: `tests/gui-sql-cancel.mjs`
 
-- [ ] **Step 1: 定义参数模型**
+- [x] **Step 1: 定义参数模型**
 
 ```ts
 export type SqlParameterValue = string | number | boolean | null | Uint8Array
@@ -396,15 +400,15 @@ export interface ExecuteOptions {
 }
 ```
 
-- [ ] **Step 2: UI 显示参数面板**
+- [x] **Step 2: UI 显示参数面板**
 
 从脚本 parser 识别 PostgreSQL `$1`、`$2` 和 SQLite `?`/`:name` 占位符；无法安全识别时必须要求用户显式输入参数，而不是猜测。
 
-- [ ] **Step 3: 接入取消**
+- [x] **Step 3: 接入取消**
 
 SQL 工作台执行必须显示取消按钮。PostgreSQL 调用已有真实取消能力；SQLite 明确显示“当前驱动无法中断同步查询”，同时阻止重复提交。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 node tests/e2e-sql-params.mjs
@@ -412,6 +416,10 @@ node tests/e2e-cancel.mjs
 node tests/e2e-cancel.mjs --sqlite-only
 node tests/gui-sql-cancel.mjs
 ```
+
+验证结果：SQLite 参数绑定、注入字面值、BLOB、查询游标翻页、参数错误和
+SQL 工作台参数面板/取消状态均通过；`DBSTUDIO_PG_URL` 未配置时 PostgreSQL
+参数 e2e 跳过。PostgreSQL 真实取消继续由 `e2e-cancel.mjs` 的外部服务步骤验证。
 
 ## 6. P2：数据传输
 

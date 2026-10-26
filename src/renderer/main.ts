@@ -16,18 +16,20 @@ import type {
   SecretMap,
   SshHostKeyCheck
 } from '../core/driver'
+import type { ExecuteOptions } from '../core/resultset'
 import type { ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs, type ActiveTabContext } from './tabs'
 import { SqlEditor } from './sql-editor'
 import { SqlScriptRunner } from './sql-script-runner'
-import { extractKeyValues, resolveKeyColumnIndex, encodeRowKey } from './grid'
+import { extractKeyValues, resolveKeyColumnIndex, encodeRowKey, PAGE_SIZE } from './grid'
 import { SqlLibraryPanel } from './sql-library'
 import {
   SQLITE_SCRIPT_RULES,
   splitStatements,
   type SqlScriptStatement
 } from '../core/sql-script'
+import { bindSqlParameters, extractSqlParameters, type SqlParameterDialect } from '../core/sql-parameters'
 // E1-C 追加：ER 图渲染 + 多格式导出纯函数 + 筛选条件解析。
 import { renderErDiagram } from './er-diagram'
 import {
@@ -152,6 +154,10 @@ async function boot(): Promise<void> {
   let currentConnectionNodeId: string | null = null
   let currentScriptRules = SQLITE_SCRIPT_RULES
   const scriptRunner = new SqlScriptRunner()
+  let currentParameterDialect: SqlParameterDialect = 'sqlite'
+  let sqlExecutionBusy = false
+  let activeSqlExecution: { connectionNodeId: string; signalId: string; cancelled: boolean; cancelling: boolean; supportsCancel: boolean | null } | null = null
+  let sqlEditor: SqlEditor
 
   const DRAFT_PREFIX = 'dbstudio.sql-draft.'
   const saveDraft = (connId: string | null, text: string): void => {
@@ -179,11 +185,17 @@ async function boot(): Promise<void> {
         api.listDialects()
       ])
       const connection = connections.find((item) => item.id === connectionId)
+      if (currentConnectionNodeId !== connectionNodeId) return
+      currentParameterDialect = connection?.dialectId === 'postgresql' ? 'postgresql' : 'sqlite'
+      sqlEditor.setCancelCapability(connection?.capabilities?.supportsCancel ?? null)
       currentScriptRules =
         dialects.find((dialect) => dialect.id === connection?.dialectId)?.scriptRules ??
         SQLITE_SCRIPT_RULES
     } catch {
+      if (currentConnectionNodeId !== connectionNodeId) return
       currentScriptRules = SQLITE_SCRIPT_RULES
+      currentParameterDialect = 'sqlite'
+      sqlEditor.setCancelCapability(null)
     }
   }
 
@@ -307,23 +319,34 @@ async function boot(): Promise<void> {
 
   // ---- SQL 编辑器（替换原来的单行 input）----
   /** 执行一段 SQL（单条/全部同一条路径，区别只在传入内容）。 */
-  const executeSql = async (sql: string): Promise<void> => {
+  const executeSql = async (sql: string, options?: ExecuteOptions): Promise<void> => {
     if (!sql.trim()) return
+    if (sqlExecutionBusy) {
+      setStatus('已有 SQL 正在执行，请等待完成或点击取消执行', true)
+      return
+    }
     if (!currentConnectionNodeId) {
       setStatus('请先在左侧选择一个连接再执行 SQL', true)
       return
     }
+    sqlExecutionBusy = true
+    sqlEditor.setExecutionState(true, null)
     showPane('grid')
 
     let statements: SqlScriptStatement[]
     try {
       statements = splitStatements(sql, currentScriptRules)
+      bindSqlParameters(sql, options?.parameters, currentParameterDialect)
     } catch (e) {
       setStatus(`SQL 脚本解析失败：${errText(e)}`, true)
+      sqlExecutionBusy = false
+      sqlEditor.setExecutionState(false)
       return
     }
     if (statements.length === 0) {
       setStatus('没有可执行的语句', true)
+      sqlExecutionBusy = false
+      sqlEditor.setExecutionState(false)
       return
     }
 
@@ -331,15 +354,48 @@ async function boot(): Promise<void> {
     // 多条：逐条执行，**前一条失败就停止**——后面的语句可能依赖前一条的结果，
     // 继续执行只会产生一堆连带错误，掩盖真正的问题。
     const connectionNodeId = currentConnectionNodeId
+    const parameterDialect = currentParameterDialect
+    const placeholders = extractSqlParameters(sql, parameterDialect)
+    const execution = { connectionNodeId, signalId: crypto.randomUUID(), cancelled: false, cancelling: false, supportsCancel: null as boolean | null }
+    activeSqlExecution = execution
     try {
+      try {
+        const connectionId = NodeId.parse(connectionNodeId)?.connectionId ?? connectionNodeId
+        const connection = (await api.listConnections()).find((item) => item.id === connectionId)
+        const supportsCancel = connection?.capabilities?.supportsCancel ?? null
+        execution.supportsCancel = supportsCancel
+        sqlEditor.setExecutionState(true, supportsCancel)
+        if (supportsCancel === false) {
+          setStatus('当前驱动无法中断同步查询（SQLite）；执行期间请等待语句完成')
+        }
+      } catch {
+        // 能力未知时保持取消按钮可用，实际结果由 cancelQuery 如实返回。
+      }
+      if (execution.cancelled) { setStatus('已取消 SQL 执行'); return }
       await scriptRunner.run(statements, async (statement) => {
         const stmt = statement.sql
+        let anonymousIndex = 0
+        const parameters = placeholders
+          .filter((placeholder) => placeholder.start >= statement.startOffset && placeholder.end <= statement.endOffset)
+          .map((placeholder) => {
+            const name = placeholder.name.startsWith('?') ? `?${++anonymousIndex}` : placeholder.name
+            const supplied = options?.parameters?.find((parameter) =>
+              parameter.name.replace(/^:/, '') === placeholder.name)
+            return supplied ? { name, value: supplied.value } : null
+          })
+          .filter((parameter, index, all): parameter is NonNullable<typeof parameter> =>
+            parameter !== null && all.findIndex((item) => item?.name === parameter.name) === index)
+        const statementOptions = {
+          parameters,
+          signalId: execution.signalId,
+          limit: PAGE_SIZE
+        }
         const startedAt = performance.now()
         try {
-          const stmtRes = await api.executeStatement(connectionNodeId, stmt)
+          const stmtRes = await api.executeStatement(connectionNodeId, stmt, statementOptions)
           const elapsed = performance.now() - startedAt
           if (stmtRes.kind === 'rows') {
-            const opened = await tabs.runSql(connectionNodeId, stmt)
+            const opened = await tabs.runSql(connectionNodeId, stmt, undefined, { parameters: statementOptions.parameters }, stmtRes.result)
             if (opened.outcome.error !== null) throw new Error(opened.outcome.error)
             await recordSqlHistory(
               stmt,
@@ -379,15 +435,45 @@ async function boot(): Promise<void> {
           throw e
         }
       })
-      if (statements.length > 1) setStatus(`已执行 ${statements.length} 条语句`)
+      if (execution.cancelled || scriptRunner.state.status === 'cancelled') {
+        setStatus('已取消 SQL 执行')
+      } else if (statements.length > 1) {
+        setStatus(`已执行 ${statements.length} 条语句`)
+      }
     } catch (e) {
       const statement = scriptRunner.state.current
       const where =
         statements.length > 1 && statement !== undefined
           ? `第 ${statement.index + 1}/${statements.length} 条语句（第 ${statement.startLine} 行）失败：`
           : ''
-      setStatus(`${where}${errText(e)}`, true)
+      setStatus(execution.cancelled ? `SQL 执行已停止：${errText(e)}` : `${where}${errText(e)}`, !execution.cancelled)
+    } finally {
+      if (execution.cancelling) await cancellationRequest
+      activeSqlExecution = null
+      sqlExecutionBusy = false
+      sqlEditor.setExecutionState(false)
     }
+  }
+
+  let cancellationRequest: Promise<void> | null = null
+  const cancelSql = (): void => {
+    const execution = activeSqlExecution
+    if (!execution || execution.cancelling) return
+    if (execution.supportsCancel === false) {
+      setStatus('当前驱动无法中断同步查询（SQLite）；请等待语句完成', true)
+      return
+    }
+    execution.cancelled = true
+    execution.cancelling = true
+    scriptRunner.cancel()
+    setStatus('正在取消 SQL 执行…')
+    cancellationRequest = (async () => {
+      try {
+        await api.cancelQuery(execution.connectionNodeId, execution.signalId)
+      } catch (e) {
+        if (activeSqlExecution === execution) setStatus(`取消 SQL 失败：${errText(e)}`, true)
+      }
+    })()
   }
 
   /**
@@ -398,8 +484,9 @@ async function boot(): Promise<void> {
    * 缓存 30s，避免每次按键都查库。失败时返回空数组，编辑器会退化为只补关键字。
    */
   let metaCandidatesCache: { at: number; items: string[] } | null = null
-  const sqlEditor = new SqlEditor(el('sql-editor-host'), {
-    onExecute: (sql) => void executeSql(sql),
+  sqlEditor = new SqlEditor(el('sql-editor-host'), {
+    onExecute: (sql, options) => void executeSql(sql, options),
+    onCancel: () => void cancelSql(),
     onStatus: (t, isErr) => setStatus(t, isErr),
     onChange: (text) => {
       if (currentConnectionNodeId) {
@@ -407,6 +494,7 @@ async function boot(): Promise<void> {
       }
     },
     getScriptRules: () => currentScriptRules,
+    getParameterDialect: () => currentParameterDialect,
     getMetadataCandidates: async () => {
       const connId = currentConnectionNodeId
       if (!connId) return []
@@ -458,7 +546,10 @@ async function boot(): Promise<void> {
       sqlEditor.setValue(sql)
       sqlEditor.focus()
     },
-    runSql: (sql) => void executeSql(sql),
+    runSql: (sql) => {
+      sqlEditor.setValue(sql)
+      sqlEditor.executeAll()
+    },
     onStatus: (text, isError) => setStatus(text, isError)
   })
 
@@ -478,6 +569,7 @@ async function boot(): Promise<void> {
        * 这个 bug 是真实点击测试抓到的，不是理论问题。
        */
       currentConnectionNodeId = NodeId.connection(summary.id)
+      void refreshScriptRules(currentConnectionNodeId)
       void tree.loadRoots()
     })
   })
@@ -663,7 +755,7 @@ async function boot(): Promise<void> {
         baseSource: context.baseSource,
         filterText: filterInput.value.trim(),
         filterConditions: parsed.conditions
-      })
+      }, context.baseSource.kind === 'sql' ? context.baseSource.options : undefined)
       if (opened.outcome.error !== null) {
         setStatus(`筛选失败：${opened.outcome.error}`, true)
         return

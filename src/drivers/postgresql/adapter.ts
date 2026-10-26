@@ -42,12 +42,14 @@ import type {
   ExplainResult,
   QueryOptions,
   QueryResult as QueryResultContract,
+  SqlParameterValue,
   ResultPage,
   RowEditOutcome,
   RowUpdate,
   TransactionState,
   StatementResult
 } from '../../core/resultset'
+import { bindSqlParameters } from '../../core/sql-parameters'
 
 import { postgresqlDialect } from './dialect'
 import { POSTGRESQL_INFO } from './info'
@@ -168,6 +170,7 @@ interface EditableTarget {
 
 interface CursorState {
   readonly sql: string
+  readonly params: readonly SqlParameterValue[]
 }
 
 function readOptionString(config: ConnectionConfig, key: string): string {
@@ -768,17 +771,27 @@ export class PostgresDriverAdapter implements DriverAdapter {
 
   async query(sql: string, options?: QueryOptions): Promise<QueryResultContract> {
     const client = this.#requireClient()
-    const statementSql = prepareReadOnlyStatement(sql)
+    const bound = bindSqlParameters(sql, options?.parameters, 'postgresql')
+    const statementSql = prepareReadOnlyStatement(bound.sql)
+    return this.#queryBound(client, statementSql, toPgValues(bound.values), options)
+  }
+
+  async #queryBound(
+    client: Client,
+    statementSql: string,
+    params: readonly unknown[],
+    options?: QueryOptions
+  ): Promise<QueryResultContract> {
     const limit = normalizePageSize(options?.limit)
     const offset = normalizeOffset(options?.offset)
     const executedSql = buildPagedSql(statementSql, limit, offset)
 
     const startedAt = performance.now()
-    const result = await this.#runQuery(client, executedSql)
+    const result = await this.#runQuery(client, executedSql, params)
     const elapsedMs = Math.round(performance.now() - startedAt)
 
     const grid = buildGrid(result as unknown as PgResultLike)
-    const cursorId = options?.keepCursor === false ? null : this.#openCursor(statementSql)
+    const cursorId = options?.keepCursor === false ? null : this.#openCursor(statementSql, params)
 
     return {
       columns: buildColumns(grid.names, grid.rows),
@@ -808,15 +821,16 @@ export class PostgresDriverAdapter implements DriverAdapter {
 
   async executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
     const client = this.#requireClient()
-    const analyzed = prepareGeneralStatement(sql)
+    const bound = bindSqlParameters(sql, options?.parameters, 'postgresql')
+    const analyzed = prepareGeneralStatement(bound.sql)
     const startedAt = performance.now()
 
     if (analyzed.kind === 'rows') {
       if (PAGINATABLE_KEYWORDS.has(analyzed.keyword)) {
-        const result = await this.query(analyzed.statementSql, options)
+        const result = await this.#queryBound(client, analyzed.statementSql, toPgValues(bound.values), options)
         return { kind: 'rows', result }
       }
-      const res = await this.#runQuery(client, analyzed.statementSql)
+      const res = await this.#runQuery(client, analyzed.statementSql, toPgValues(bound.values))
       const elapsedMs = Math.round(performance.now() - startedAt)
       const grid = buildGrid(res as unknown as PgResultLike)
       return {
@@ -838,7 +852,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
       const inOwnTransaction = await this.#ensureTransaction(client)
       let rowCount = 0
       try {
-        const res = await client.query(analyzed.statementSql)
+        const res = await client.query(analyzed.statementSql, toPgValues(bound.values))
         rowCount = res.rowCount ?? 0
         this.#pendingAffected += rowCount
       } catch (thrown) {
@@ -860,7 +874,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
     // ddl
     let command = ''
     try {
-      const res = await client.query(analyzed.statementSql)
+      const res = await client.query(analyzed.statementSql, toPgValues(bound.values))
       command = res.command ?? `${analyzed.keyword.toUpperCase()} 语句执行完成`
     } catch (thrown) {
       throw wrapPgError(thrown, 'query_failed', '执行 DDL 失败')
@@ -885,7 +899,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
     const pageSize = normalizePageSize(limit)
     const start = normalizeOffset(offset)
-    const result = await this.#runQuery(client, buildPagedSql(cursor.sql, pageSize, start))
+    const result = await this.#runQuery(client, buildPagedSql(cursor.sql, pageSize, start), toPgValues(cursor.params))
     const grid = buildGrid(result as unknown as PgResultLike)
     return {
       columns: buildColumns(grid.names, grid.rows),
@@ -1045,7 +1059,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
     const row = normalizeOffset(rowIndex)
     const column = normalizeOffset(columnIndex)
-    const result = await this.#runQuery(client, buildPagedSql(cursor.sql, 1, row))
+    const result = await this.#runQuery(client, buildPagedSql(cursor.sql, 1, row), toPgValues(cursor.params))
     const grid = buildGrid(result as unknown as PgResultLike)
     const targetRow = grid.rows[0]
     if (targetRow === undefined) {
@@ -1209,9 +1223,9 @@ export class PostgresDriverAdapter implements DriverAdapter {
     return this.#client
   }
 
-  async #runQuery(client: Client, sql: string, params: unknown[] = []): Promise<QueryResult<Record<string, unknown>>> {
+  async #runQuery(client: Client, sql: string, params: readonly unknown[] = []): Promise<QueryResult<Record<string, unknown>>> {
     try {
-      return await client.query<Record<string, unknown>>(sql, params)
+      return await client.query<Record<string, unknown>>(sql, params as unknown[])
     } catch (thrown) {
       throw wrapPgError(thrown, 'query_failed', '查询执行失败')
     }
@@ -1596,11 +1610,18 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
   }
 
-  #openCursor(statementSql: string): string {
+  #openCursor(statementSql: string, params: readonly unknown[] = []): string {
     const cursorId = randomUUID()
-    this.#cursors.set(cursorId, { sql: statementSql })
+    this.#cursors.set(cursorId, {
+      sql: statementSql,
+      params: params as readonly SqlParameterValue[]
+    })
     return cursorId
   }
+}
+
+function toPgValues(values: readonly SqlParameterValue[]): unknown[] {
+  return values.map((value) => (value instanceof Uint8Array ? Buffer.from(value) : value))
 }
 
 /**

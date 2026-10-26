@@ -58,6 +58,8 @@ export const STEPS = [
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
+  { id: 'test:sql-parameters-parser', title: 'SQL 参数扫描边界与值校验', group: 'node' },
+  { id: 'test:sql-params', title: '参数化 SQL 与绑定安全 e2e', group: 'node' },
   { id: 'test:release-gate', title: '发布门禁与 draft 附件校验', group: 'node' },
   { id: 'test:packaged-smoke', title: '打包冒烟脚本的离线回归', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，
@@ -91,8 +93,21 @@ export const STEPS = [
   { id: 'test:gui-sql-workbench-results', title: '工作台结果形态卡片 (Affected / DDL) GUI', group: 'gui' },
   { id: 'test:gui-sql-script-execution', title: '多语句脚本顺序执行与错误中断 GUI', group: 'gui' },
   { id: 'test:gui-sql-draft', title: 'SQL 编辑器按连接草稿恢复 GUI', group: 'gui' },
+  { id: 'test:gui-sql-cancel', title: 'SQL 工作台参数面板与取消状态 GUI', group: 'gui' },
 
   // ---- 需要外部服务 ----
+  {
+    id: 'test:sql-params-postgres',
+    title: 'PostgreSQL 参数绑定与执行身份取消',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
+  {
+    id: 'test:gui-sql-cancel-postgres',
+    title: 'PostgreSQL 工作台真实取消与连接切换 GUI（需要显示器）',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
   {
     id: 'test:postgres',
     title: 'PostgreSQL 驱动 e2e',

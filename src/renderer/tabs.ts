@@ -57,7 +57,7 @@ const EXPORT_PAGE_SIZE = 1_000
  */
 export type TabSource =
   | { kind: 'table'; ref: ObjectRef; desc: TableDescription }
-  | { kind: 'sql'; nodeId: string; sql: string }
+  | { kind: 'sql'; nodeId: string; sql: string; options?: QueryOptions }
 
 /** Snapshot for toolbar/connection-level controllers. Source is the executed query. */
 export interface ActiveTabContext {
@@ -191,9 +191,11 @@ export class ResultTabs {
   async runSql(
     nodeId: string,
     sql: string,
-    filter?: Pick<ActiveTabContext, 'baseSource' | 'filterText' | 'filterConditions'>
+    filter?: Pick<ActiveTabContext, 'baseSource' | 'filterText' | 'filterConditions'>,
+    options?: QueryOptions,
+    initialResult?: QueryResult
   ): Promise<{ grid: ResultGrid; outcome: SqlExecutionOutcome }> {
-    const tab = this.#createTab(sqlTitle(sql), { kind: 'sql', nodeId, sql })
+    const tab = this.#createTab(sqlTitle(sql), { kind: 'sql', nodeId, sql, options })
     if (filter) {
       tab.baseSource = filter.baseSource
       tab.filterText = filter.filterText
@@ -204,7 +206,7 @@ export class ResultTabs {
     this.#activate(tab.id)
     let outcome: SqlExecutionOutcome = { result: null, error: '执行未完成' }
     try {
-      outcome = await tab.grid!.runSql(nodeId, sql)
+      outcome = await tab.grid!.runSql(nodeId, sql, options, initialResult)
     } catch (e) {
       this.#cb.onStatus(`执行 SQL 失败：${errText(e)}`, true)
       outcome = { result: null, error: errText(e) }
@@ -653,7 +655,7 @@ export class ResultTabs {
       // previewTable 内部会生成 SELECT * FROM <quoted>，等价于「查这张表」。
       return this.#api.previewTable(source.ref.id, EXPORT_PAGE_SIZE)
     }
-    const options: QueryOptions = { limit: EXPORT_PAGE_SIZE }
+    const options: QueryOptions = { ...source.options, limit: EXPORT_PAGE_SIZE }
     return this.#api.runQuery(source.nodeId, source.sql, options)
   }
 }

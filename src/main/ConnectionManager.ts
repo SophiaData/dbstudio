@@ -978,9 +978,9 @@ export class ConnectionManager {
    * `#resolveConnection` 对"连接节点本身"返回 adapterId=null —— 那种情况下
    * 取消的是该连接上的查询，直接用 conn.host 即可（不需要 adapterId）。
    */
-  async cancelQuery(nodeId: string): Promise<boolean> {
+  async cancelQuery(nodeId: string, signalId?: string): Promise<boolean> {
     const { conn } = this.#resolveConnection(nodeId)
-    return conn.host.cancelQuery()
+    return conn.host.cancelQuery(signalId)
   }
 
   async renameTable(tableNodeId: string, newName: string): Promise<void> {

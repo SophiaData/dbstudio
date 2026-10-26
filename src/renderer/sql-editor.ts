@@ -38,11 +38,19 @@ import {
   splitStatements,
   type SqlScriptRules
 } from '../core/sql-script'
+import {
+  inspectSqlParameters,
+  type SqlParameterDialect,
+  type SqlPlaceholder
+} from '../core/sql-parameters'
+import type { ExecuteOptions, SqlParameter } from '../core/resultset'
 
 /** 外部注入的回调。编辑器不直接调 IPC——保持组件可单测、可替换宿主。 */
 export interface SqlEditorCallbacks {
   /** 用户要求执行（当前语句或全部）。 */
-  onExecute(sql: string): void
+  onExecute(sql: string, options?: ExecuteOptions): void
+  /** 用户要求取消当前 SQL 工作台执行。 */
+  onCancel?(): void
   /** 状态提示。isError 用于 UI 上色。 */
   onStatus(text: string, isError?: boolean): void
   /** 请求补全候选（表名/列名）；返回空数组表示没有元数据可用。 */
@@ -62,11 +70,18 @@ export interface SqlEditorCallbacks {
   onChange?(text: string): void
   /** 当前连接对应的脚本切分规则。 */
   getScriptRules?(): SqlScriptRules
+  getParameterDialect?(): SqlParameterDialect
 }
 
 interface CompletionItemView {
   readonly text: string
   readonly fromKeywords: boolean
+}
+
+type ParameterDraft = {
+  type: 'text' | 'number' | 'boolean' | 'null' | 'blob'
+  value: string
+  touched: boolean
 }
 
 /** 补全候选缓存的有效期（元数据可能变，但不能每次按键都问一遍）。 */
@@ -164,11 +179,17 @@ export class SqlEditor {
   private readonly highlight: HTMLPreElement
   private readonly textarea: HTMLTextAreaElement
   private readonly completions: HTMLDivElement
+  private readonly parameterPanel: HTMLDivElement
   private readonly explainPanel: HTMLDivElement
+  private cancelButton!: HTMLButtonElement
+  private readonly executeButtons: HTMLButtonElement[] = []
+  private readonly parameterDrafts = new Map<string, ParameterDraft>()
 
   private metadataCache: readonly string[] | null = null
   private metadataCacheAt = 0
   private rafPending = false
+  private executionBusy = false
+  private cancelSupported: boolean | null = null
 
   // 补全状态
   private completionItems: CompletionItemView[] = []
@@ -207,6 +228,11 @@ export class SqlEditor {
     this.textarea.setAttribute('wrap', 'soft')
     this.editorWrap.appendChild(this.textarea)
 
+    this.parameterPanel = document.createElement('div')
+    this.parameterPanel.className = 'sql-editor-parameters'
+    this.parameterPanel.style.display = 'none'
+    this.root.appendChild(this.parameterPanel)
+
     // ---- 补全浮层（挂 root，绝对定位）----
     this.completions = document.createElement('div')
     this.completions.className = 'sql-editor-completions'
@@ -225,6 +251,7 @@ export class SqlEditor {
     this.applyGeometry()
     this.wireEvents()
     this.refreshHighlight()
+    this.setExecutionState(false)
   }
 
   // -------------------------------------------------------------------------
@@ -236,8 +263,10 @@ export class SqlEditor {
   }
 
   setValue(v: string): void {
+    this.parameterDrafts.clear()
     this.textarea.value = v
     this.refreshHighlight()
+    this.refreshParameters()
     // 填完内容后把滚动位置归零：否则长 SQL 会停在末尾，
     // 用户看到的是最后几行，不知道自己在编辑什么（实测截图里就是这个症状）。
     this.textarea.scrollTop = 0
@@ -273,8 +302,34 @@ export class SqlEditor {
     return statements[0]?.sql ?? ''
   }
 
+  executeAll(): void {
+    this.emitExecute(this.textarea.value.trim())
+  }
+
   focus(): void {
     this.textarea.focus()
+  }
+
+  setExecutionState(running: boolean, cancelSupported: boolean | null = this.cancelSupported): void {
+    this.executionBusy = running
+    this.root.setAttribute('aria-busy', running ? 'true' : 'false')
+    for (const button of this.executeButtons) button.disabled = running
+    this.cancelButton.disabled = !running || cancelSupported === false
+    this.cancelButton.title = cancelSupported === false
+      ? '当前驱动无法中断同步查询（SQLite）'
+      : running
+        ? '取消当前 SQL 工作台执行'
+        : '没有正在执行的 SQL'
+    for (const control of this.parameterPanel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select')) {
+      control.disabled = running || (control instanceof HTMLInputElement &&
+        this.parameterDrafts.get(control.dataset['parameterName'] ?? '')?.type === 'null')
+    }
+  }
+
+  setCancelCapability(supported: boolean | null): void {
+    this.cancelSupported = supported
+    if (!this.executionBusy) this.setExecutionState(false, supported)
+    this.refreshParameters()
   }
 
   format(): void {
@@ -294,6 +349,7 @@ export class SqlEditor {
     const mapped = mapCaretByNonWhitespace(original, caret, formatted)
     this.textarea.setSelectionRange(mapped, mapped)
     this.refreshHighlight()
+    this.refreshParameters()
     this.syncScroll()
     this.hideCompletions()
   }
@@ -369,23 +425,26 @@ export class SqlEditor {
     }
 
     makeBtn('格式化', '格式化 SQL（只改空白，不改内容）', () => this.format())
-    makeBtn('执行当前', '执行光标所在的语句', () => {
+    const currentButton = makeBtn('执行当前', '执行光标所在的语句', () => {
       const stmt = this.getCurrentStatement()
       if (!stmt) {
         this.callbacks.onStatus('光标所在位置没有可执行的语句', true)
         return
       }
-      this.callbacks.onExecute(stmt)
+      this.emitExecute(stmt)
     })
-    makeBtn('执行全部', '按顺序执行所有语句', () => {
+    this.executeButtons.push(currentButton)
+    const allButton = makeBtn('执行全部', '按顺序执行所有语句', () => {
       const all = this.textarea.value.trim()
       if (!all) {
         this.callbacks.onStatus('编辑器为空', true)
         return
       }
-      this.callbacks.onExecute(all)
+      this.emitExecute(all)
     })
-    makeBtn('执行计划', '按当前数据库方言查看执行计划', () => void this.runExplain())
+    this.executeButtons.push(allButton)
+    this.cancelButton = makeBtn('取消执行', '取消当前 SQL 工作台执行', () => this.callbacks.onCancel?.())
+    this.executeButtons.push(makeBtn('执行计划', '按当前数据库方言查看执行计划', () => void this.runExplain()))
     if (this.callbacks.onOpenLibrary) {
       makeBtn('历史 / 收藏', '浏览 SQL 执行历史与收藏', () => this.callbacks.onOpenLibrary?.())
     }
@@ -402,6 +461,10 @@ export class SqlEditor {
   }
 
   private async runExplain(): Promise<void> {
+    if (this.executionBusy) {
+      this.callbacks.onStatus('当前 SQL 正在执行，请等待完成或取消后再查看执行计划', true)
+      return
+    }
     if (this.explainPanel.getAttribute('aria-busy') === 'true') return
     this.explainPanel.innerHTML = ''
     this.explainPanel.style.display = 'none'
@@ -480,6 +543,7 @@ export class SqlEditor {
     this.textarea.addEventListener('input', () => {
       this.scheduleHighlight()
       this.scheduleCompletionUpdate()
+      this.refreshParameters()
       this.callbacks.onChange?.(this.textarea.value)
     })
     this.textarea.addEventListener('scroll', () => this.syncScroll())
@@ -510,6 +574,152 @@ export class SqlEditor {
     const html = highlightSqlHtml(value)
     this.highlight.innerHTML = html + (value.endsWith('\n') ? ' ' : '')
     this.autoGrow()
+  }
+
+  private refreshParameters(): void {
+    const inspection = inspectSqlParameters(this.textarea.value, this.callbacks.getParameterDialect?.())
+    this.parameterPanel.innerHTML = ''
+    if (!inspection.safe) {
+      this.parameterPanel.style.display = 'block'
+      const warning = document.createElement('div')
+      warning.className = 'sql-editor-parameters-warning'
+      warning.textContent = inspection.reason ?? '无法安全识别 SQL 参数，请显式检查后再执行。'
+      this.parameterPanel.appendChild(warning)
+      return
+    }
+    const unique: SqlPlaceholder[] = []
+    const seen = new Set<string>()
+    for (const placeholder of inspection.placeholders) {
+      if (seen.has(placeholder.name)) continue
+      seen.add(placeholder.name)
+      unique.push(placeholder)
+    }
+    if (unique.length === 0) {
+      this.parameterPanel.style.display = 'none'
+      return
+    }
+
+    this.parameterPanel.style.display = 'grid'
+    const title = document.createElement('div')
+    title.className = 'sql-editor-parameters-title'
+    title.textContent = 'SQL 参数（请显式填写，不会把值拼进 SQL）'
+    this.parameterPanel.appendChild(title)
+    for (const placeholder of unique) {
+      const name = placeholder.kind === 'named' ? `:${placeholder.name}` : placeholder.name
+      const previous = this.parameterDrafts.get(placeholder.name) ?? {
+        type: 'text' as const,
+        value: '',
+        touched: false
+      }
+      this.parameterDrafts.set(placeholder.name, previous)
+
+      const row = document.createElement('label')
+      row.className = 'sql-editor-parameter-row'
+      const label = document.createElement('span')
+      label.textContent = name
+      row.appendChild(label)
+
+      const type = document.createElement('select')
+      type.className = 'sql-editor-parameter-type'
+      type.dataset['parameterName'] = placeholder.name
+      for (const option of [
+        ['text', '文本'],
+        ['number', '数字'],
+        ['boolean', '布尔'],
+        ['null', 'NULL'],
+        ['blob', 'BLOB(hex)']
+      ] as const) {
+        const item = document.createElement('option')
+        item.value = option[0]
+        item.textContent = option[1]
+        type.appendChild(item)
+      }
+      type.value = previous.type
+      row.appendChild(type)
+
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.className = 'sql-editor-parameter-value'
+      input.placeholder = previous.type === 'null' ? '由类型选择决定' : '请输入参数值'
+      input.value = previous.value
+      input.disabled = this.executionBusy || previous.type === 'null'
+      type.disabled = this.executionBusy
+      input.dataset['parameterName'] = placeholder.name
+      row.appendChild(input)
+
+      type.addEventListener('change', () => {
+        const draft = this.parameterDrafts.get(placeholder.name)
+        if (!draft) return
+        draft.type = type.value as ParameterDraft['type']
+        draft.touched = true
+        input.disabled = draft.type === 'null'
+        input.placeholder = draft.type === 'null' ? '由类型选择决定' : '请输入参数值'
+      })
+      input.addEventListener('input', () => {
+        const draft = this.parameterDrafts.get(placeholder.name)
+        if (!draft) return
+        draft.value = input.value
+        draft.touched = true
+      })
+      this.parameterPanel.appendChild(row)
+    }
+  }
+
+  private emitExecute(sql: string): void {
+    if (this.executionBusy) {
+      this.callbacks.onStatus('已有 SQL 正在执行，请等待完成或点击取消执行', true)
+      return
+    }
+    try {
+      const options = this.buildExecuteOptions(sql)
+      this.callbacks.onExecute(sql, options)
+    } catch (error) {
+      this.callbacks.onStatus(error instanceof Error ? error.message : String(error), true)
+    }
+  }
+
+  private buildExecuteOptions(sql: string): ExecuteOptions | undefined {
+    const inspection = inspectSqlParameters(sql, this.callbacks.getParameterDialect?.())
+    if (!inspection.safe) {
+      throw new Error(inspection.reason ?? '无法安全识别 SQL 参数，请先修正 SQL。')
+    }
+    const unique = inspection.placeholders.filter(
+      (placeholder, index, all) => all.findIndex((item) => item.name === placeholder.name) === index
+    )
+    if (unique.length === 0) return undefined
+    const parameters: SqlParameter[] = unique.map((placeholder) => {
+      const draft = this.parameterDrafts.get(placeholder.name)
+      if (!draft || (!draft.touched && draft.type !== 'null')) {
+        throw new Error(`请先为参数 ${placeholder.kind === 'named' ? `:${placeholder.name}` : placeholder.name} 输入值。`)
+      }
+      switch (draft.type) {
+        case 'text':
+          return { name: placeholder.name, value: draft.value }
+        case 'number': {
+          const value = Number(draft.value)
+          if (!draft.value.trim() || !Number.isFinite(value)) throw new Error(`参数 ${placeholder.name} 不是有效数字。`)
+          return { name: placeholder.name, value }
+        }
+        case 'boolean':
+          if (draft.value !== 'true' && draft.value !== 'false') {
+            throw new Error(`参数 ${placeholder.name} 的布尔值只能是 true 或 false。`)
+          }
+          return { name: placeholder.name, value: draft.value === 'true' }
+        case 'null':
+          return { name: placeholder.name, value: null }
+        case 'blob': {
+          if (!/^(?:[0-9a-fA-F]{2})*$/.test(draft.value)) {
+            throw new Error(`参数 ${placeholder.name} 的 BLOB 必须是偶数位十六进制。`)
+          }
+          const bytes = new Uint8Array(draft.value.length / 2)
+          for (let index = 0; index < bytes.length; index += 1) {
+            bytes[index] = Number.parseInt(draft.value.slice(index * 2, index * 2 + 2), 16)
+          }
+          return { name: placeholder.name, value: bytes }
+        }
+      }
+    })
+    return { parameters }
   }
 
   /**
@@ -591,7 +801,7 @@ export class SqlEditor {
           this.callbacks.onStatus('编辑器为空', true)
           return
         }
-        this.callbacks.onExecute(all)
+        this.emitExecute(all)
       } else {
         // Ctrl/Cmd+Enter → 执行光标所在语句
         const stmt = this.getCurrentStatement()
@@ -599,7 +809,7 @@ export class SqlEditor {
           this.callbacks.onStatus('光标所在位置没有可执行的语句', true)
           return
         }
-        this.callbacks.onExecute(stmt)
+        this.emitExecute(stmt)
       }
       return
     }

@@ -174,7 +174,7 @@ export interface DbStudioApi {
    * 返回 true 表示后端确实中断了查询；false 表示无法取消（比如 SQLite 驱动）
    * 或当时并没有在跑的查询。UI 应先看能力的 `supportsCancel`，再据返回值提示。
    */
-  cancelQuery(nodeId: string): Promise<boolean>
+  cancelQuery(nodeId: string, signalId?: string): Promise<boolean>
 
   /** 查询当前事务状态，用于 UI 决定按钮可用性与「有未提交改动」提示。 */
   transactionState(nodeId: string): Promise<TransactionState>

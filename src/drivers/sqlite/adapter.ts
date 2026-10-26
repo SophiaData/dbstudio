@@ -85,8 +85,10 @@ import {
   readGrid,
   toFullCellValue,
   cellByName,
-  type RawGrid
+  type RawGrid,
+  type BindValue
 } from './results'
+import { bindSqlParameters } from '../../core/sql-parameters'
 
 // 错误类已移到 errors.ts（为了打断 adapter ↔ results 的循环导入），
 // 这里再导出一次，避免外部已有的 `import { SqliteAdapterError } from './adapter'` 失效。
@@ -201,6 +203,8 @@ interface EditableTarget {
 interface CursorState {
   /** 用户原始 SQL 的**只读校验后的第一条语句**（未包分页子句）。 */
   readonly sql: string
+  /** 重新取页时必须复用同一组绑定值，不能把参数丢在第一页之后。 */
+  readonly params: readonly SqliteBind[]
 }
 
 /**
@@ -551,14 +555,24 @@ export class SqliteDriverAdapter implements DriverAdapter {
    */
   async query(sql: string, options?: QueryOptions): Promise<QueryResult> {
     const db = this.#requireDb()
+    const bound = bindSqlParameters(sql, options?.parameters, 'sqlite')
     // 先校验再执行：写操作/多语句在这一步就被挡掉，不会有任何 SQL 到达引擎
-    const statementSql = prepareReadOnlyStatement(sql)
+    const statementSql = prepareReadOnlyStatement(bound.sql)
+    return this.#queryBound(db, statementSql, toSqliteBinds(bound.values), options)
+  }
+
+  async #queryBound(
+    db: DatabaseSync,
+    statementSql: string,
+    params: readonly SqliteBind[],
+    options?: QueryOptions
+  ): Promise<QueryResult> {
     const limit = normalizePageSize(options?.limit)
     const offset = normalizeOffset(options?.offset)
     const executedSql = buildPagedSql(statementSql, limit, offset)
 
     const startedAt = performance.now()
-    const grid = this.#runStatement(db, executedSql)
+    const grid = this.#runStatement(db, executedSql, params)
     const elapsedMs = Math.round(performance.now() - startedAt)
 
     /**
@@ -566,7 +580,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
      * 传 false 用于"只想知道结果长什么样"的一次性查询（如 SELECT COUNT(*)），
      * 免得留下一个永远不会被关闭的游标。
      */
-    const cursorId = options?.keepCursor === false ? null : this.#openCursor(statementSql)
+    const cursorId = options?.keepCursor === false ? null : this.#openCursor(statementSql, params)
 
     return {
       columns: buildColumns(grid),
@@ -595,11 +609,12 @@ export class SqliteDriverAdapter implements DriverAdapter {
 
   async executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
     const db = this.#requireDb()
-    const analyzed = prepareGeneralStatement(sql)
+    const bound = bindSqlParameters(sql, options?.parameters, 'sqlite')
+    const analyzed = prepareGeneralStatement(bound.sql)
     const startedAt = performance.now()
 
     if (analyzed.kind === 'rows') {
-      const result = await this.query(analyzed.statementSql, options)
+      const result = await this.#queryBound(db, analyzed.statementSql, toSqliteBinds(bound.values), options)
       return { kind: 'rows', result }
     }
 
@@ -608,7 +623,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
       let changes = 0
       try {
         const stmt = db.prepare(analyzed.statementSql)
-        const info = stmt.run()
+        const info = stmt.run(...toSqliteBinds(bound.values))
         changes = Number(info.changes)
         this.#pendingAffected += changes
       } catch (thrown) {
@@ -629,6 +644,9 @@ export class SqliteDriverAdapter implements DriverAdapter {
     }
 
     // ddl
+    if (bound.values.length > 0) {
+      throw new SqliteAdapterError('bad_params', 'SQLite DDL 不支持参数绑定，请把 DDL 标识符和结构写完整后再执行。')
+    }
     try {
       db.exec(analyzed.statementSql)
     } catch (thrown) {
@@ -665,7 +683,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
 
     const pageSize = normalizePageSize(limit)
     const start = normalizeOffset(offset)
-    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, pageSize, start))
+    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, pageSize, start), cursor.params)
 
     return {
       // 每页都带列元信息：渲染进程不必另外记一份，也不必假设前后页结构一致
@@ -893,7 +911,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     const row = normalizeOffset(rowIndex)
     const column = normalizeOffset(columnIndex)
     // 一次只取一行：LIMIT 1 OFFSET row
-    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, 1, row))
+    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, 1, row), cursor.params)
     const targetRow = grid.rows[0]
     if (targetRow === undefined) {
       throw new SqliteAdapterError('object_not_found', `结果集里没有第 ${row} 行（可能已到末尾）。`)
@@ -1252,9 +1270,9 @@ export class SqliteDriverAdapter implements DriverAdapter {
    * 把执行与读取收在一个方法里，是因为"用哪种模式读行"（数组 / 对象）
    * 必须和连接打开时的选项**严格配套**——散在各个调用点迟早会漏掉一处。
    */
-  #runStatement(db: DatabaseSync, sql: string): RawGrid {
+  #runStatement(db: DatabaseSync, sql: string, params: readonly BindValue[] = []): RawGrid {
     try {
-      return readGrid(db, sql, this.#arrayMode)
+      return readGrid(db, sql, this.#arrayMode, ...params)
     } catch (thrown) {
       // SqliteAdapterError 已经是可读信息（比如重名列那条），原样往上抛
       if (thrown instanceof SqliteAdapterError) throw thrown
@@ -1739,11 +1757,15 @@ export class SqliteDriverAdapter implements DriverAdapter {
    * 自增 id 在"重连后从 0 开始"时可能与旧 id 撞车，
    * 让一个已经失效的游标请求意外命中新结果集（这种 bug 极难复现）。
    */
-  #openCursor(statementSql: string): string {
+  #openCursor(statementSql: string, params: readonly SqliteBind[] = []): string {
     const cursorId = randomUUID()
-    this.#cursors.set(cursorId, { sql: statementSql })
+    this.#cursors.set(cursorId, { sql: statementSql, params: [...params] })
     return cursorId
   }
+}
+
+function toSqliteBinds(values: readonly (string | number | boolean | null | Uint8Array)[]): SqliteBind[] {
+  return values.map((value) => (typeof value === 'boolean' ? (value ? 1 : 0) : value))
 }
 
 /** 查询 sqlite_master 判断表/视图是否存在（参数绑定，不用拼字符串）。 */

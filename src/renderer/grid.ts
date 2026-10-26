@@ -33,7 +33,7 @@ import {
   type StorageLike
 } from './layout-persist'
 import type { ColumnDescription, ObjectRef, TableDescription } from '../core/model'
-import type { CellValue, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
+import type { CellValue, QueryOptions, QueryResult, ResultColumn, ResultRow, RowUpdate } from '../core/resultset'
 import type { QuotingRules } from '../core/driver'
 import {
   getTransactionController,
@@ -50,7 +50,7 @@ const MIN_COL_WIDTH = 60
 /** 行号列宽。 */
 const ROWNUM_WIDTH = 64
 /** 每页行数。与主进程侧默认 limit 无关，是网格自己的取数粒度。 */
-const PAGE_SIZE = 100
+export const PAGE_SIZE = 100
 /** 可视区上下多渲染几行，滚动时不露白。 */
 const OVERSCAN = 8
 
@@ -92,7 +92,7 @@ interface SortState {
 /** 网格当前的数据来源，决定「能否编辑 / 能否排序 / 能否统计行数」。 */
 type Source =
   | { kind: 'table'; ref: ObjectRef; desc: TableDescription }
-  | { kind: 'sql'; sql: string; nodeId: string }
+  | { kind: 'sql'; sql: string; nodeId: string; options?: QueryOptions }
 
 /** 一次自由 SQL 的执行结果；失败时 error 给历史记录提供可读原因。 */
 export interface SqlExecutionOutcome {
@@ -599,23 +599,25 @@ export class ResultGrid implements TransactionParticipant {
   }
 
   /** 执行自由 SQL（只读）。 */
-  async runSql(nodeId: string, sql: string): Promise<SqlExecutionOutcome> {
+  async runSql(nodeId: string, sql: string, options?: QueryOptions, initialResult?: QueryResult): Promise<SqlExecutionOutcome> {
     if (this.#source && this.getLocalDirtySummary().rows > 0 && this.#txController) {
       const canLeave = await this.#txController.prepareToReload(this)
       if (!canLeave) return { result: null, error: '重新加载已取消' }
     }
-    return this.#runSqlUnchecked(nodeId, sql, false)
+    return this.#runSqlUnchecked(nodeId, sql, false, options, initialResult)
   }
 
   async #runSqlUnchecked(
     nodeId: string,
     sql: string,
-    preserveLocalDirty: boolean
+    preserveLocalDirty: boolean,
+    options?: QueryOptions,
+    initialResult?: QueryResult
   ): Promise<SqlExecutionOutcome> {
     if (this.#disposed) return { result: null, error: null, superseded: true }
     const api = this.#requireApi()
     // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
-    this.#source = { kind: 'sql', sql, nodeId }
+    this.#source = { kind: 'sql', sql, nodeId, options }
     this.#desc = null
     this.#attachTransactionController(nodeId)
     this.#sort = { col: -1, dir: null }
@@ -623,7 +625,7 @@ export class ResultGrid implements TransactionParticipant {
     // 自由 SQL 不持久化：列不固定，存下来的偏好下次几乎必然失效
     this.#layoutTableName = null
     const outcome = await this.#openCursor(
-      () => api.runQuery(nodeId, sql, { limit: PAGE_SIZE }),
+      () => initialResult ? Promise.resolve(initialResult) : api.runQuery(nodeId, sql, { ...options, limit: PAGE_SIZE }),
       preserveLocalDirty
     )
     if (outcome.superseded) return outcome
@@ -1106,7 +1108,7 @@ export class ResultGrid implements TransactionParticipant {
       } else {
         // 子查询别名固定且带下划线，避开与原 SQL 里的表别名撞名。
         const sql = `SELECT * FROM (${src.sql}) _dbstudio_sort${order}`
-        outcome = await this.#openCursor(() => api.runQuery(src.nodeId, sql, { limit: PAGE_SIZE }), true)
+        outcome = await this.#openCursor(() => api.runQuery(src.nodeId, sql, { ...src.options, limit: PAGE_SIZE }), true)
       }
       if (outcome.superseded || outcome.error !== null) return
       this.#cb.onStatus(
@@ -1569,7 +1571,7 @@ export class ResultGrid implements TransactionParticipant {
         await this.#requerySorted({ col: sort.col, dir: sort.dir, rules, colName })
         return
       }
-      await this.#runSqlUnchecked(src.nodeId, src.sql, preserveLocalDirty)
+      await this.#runSqlUnchecked(src.nodeId, src.sql, preserveLocalDirty, src.options)
     }
   }
 
