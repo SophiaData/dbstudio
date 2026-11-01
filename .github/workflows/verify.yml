@@ -35,6 +35,23 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
+          # ===== 为什么用 trust 认证 =====
+          #
+          # test:gui-explain-postgres 的流程是「连接 → 断开 → 重连」。断开时
+          # ConnectionManager 会删掉内存里的密码（#sessionSecrets.delete），
+          # 重连只能从 ConnectionStore 取；而 ConnectionStore 用 Electron
+          # safeStorage 加密，Linux 无桌面 keyring 时 safeStorage 不可用，
+          # 密码存不住（日志会打印"密码未保存（安全存储不可用）"）。
+          # 于是重连没有密码，scram 认证必然失败：
+          #   SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string
+          #
+          # 这是 CI 环境的限制，不是产品缺陷：产品的行为是"存不了密码就提示
+          # 用户重输"，本身正确。而这里只需要一个能连上的测试库，
+          # trust 认证让重连不依赖密码持久化，从而仍能真实验证重连链路。
+          #
+          # 密码认证语义另有独立覆盖（test:postgres、test:postgres-ssl 等），
+          # 不会因为这里放宽而失去验证。
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         # 等健康检查通过再跑后续步骤，避免"连接被拒"的偶发失败。

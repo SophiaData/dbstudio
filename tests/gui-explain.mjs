@@ -130,30 +130,24 @@ try {
     console.log('SKIP PostgreSQL explain GUI: 未配置 DBSTUDIO_PG_URL')
   } else {
     /*
-     * Linux（尤其 CI）需要两个开关：
+     * Linux（CI）关掉沙箱：chrome-sandbox 需要 root:4755 才能启用 SUID 沙箱，
+     * GitHub runner 上不满足，不关会让 Electron 直接 FATAL 退出。
      *
-     * 1. `--no-sandbox`
-     *    chrome-sandbox 需要 root:4755 才能启用 SUID 沙箱，GitHub runner 上不满足。
-     *    不关的话 Electron 直接 FATAL 退出。
+     * ===== 关于密码与重连 =====
+     * 本用例的「断开 → 重连」依赖密码能持久化：断开时 ConnectionManager 会删掉
+     * 内存里的密码，重连只能从 ConnectionStore 取，而后者用 Electron safeStorage
+     * 加密。Linux 无桌面 keyring 时 safeStorage 不可用，密码存不住，重连就会
+     * 因缺密码被 scram 拒绝（实测报 SASL: client password must be a string）。
      *
-     * 2. `--password-store=basic`
-     *    ===== 这条是本用例在 CI 上失败的真正原因 =====
-     *    测试流程是「连接 → 断开 → 重连」。断开时会把内存里的密码从
-     *    `#sessionSecrets` 删掉，重连只能从持久化存储里取（ConnectionStore）。
-     *    而 ConnectionStore 用 Electron safeStorage 加密，Linux 无桌面 keyring
-     *    时 safeStorage 不可用 → `getSecret()` 返回 undefined → 重连时没有密码。
+     * 试过 `--password-store=basic`，在 Electron 45 上**没有效果**：safeStorage
+     * 的初始化早于命令行 switch 解析，日志仍打印"安全存储不可用"。
      *
-     *    CI 的 postgres 服务设了 POSTGRES_PASSWORD，走 scram 认证，**必须**有密码，
-     *    于是重连必然认证失败，`connectConnection` 返回 connected:false。
-     *    表现就是本用例稳定失败 31 次尝试全 false——不是竞态，是密码没了。
-     *
-     *    `basic` 让 Chromium 用一个内置密钥的基础后端，不依赖系统 keyring，
-     *    密码因此能存住、重连能成功。和 `--no-sandbox` 一样属于测试环境的
-     *    合理妥协：加载的是自己构建的本地页面，不涉及真实敏感数据。
+     * 因此 CI 侧改为让测试库使用 trust 认证（见 verify.yml 的 postgres service），
+     * 使重连不依赖密码持久化。产品行为本身没有问题：存不了密码时它会明确提示
+     * 用户重输，而不是假装存住了。
      */
-    const extraArgs = process.platform === 'linux'
-      ? ['--password-store=basic', ...(env.ELECTRON_DISABLE_SANDBOX === '1' ? ['--no-sandbox'] : [])]
-      : []
+    const extraArgs = process.platform === 'linux' && env.ELECTRON_DISABLE_SANDBOX === '1'
+      ? ['--no-sandbox'] : []
     app = await electron.launch({
       executablePath: require('electron'),
       args: [...extraArgs, '.', `--user-data-dir=${join(work, 'userdata')}`],
@@ -165,11 +159,9 @@ try {
      *
      * ===== 为什么必须有 =====
      * Playwright 的 `electron.launch()` 默认把子进程输出**内部消化**，不转发到
-     * 父进程。于是主进程里 `[manager] 连接 ... 失败`、`[store] 无法读取凭据`
-     * 这类关键日志在 CI 日志里完全看不到——上一轮排查「重连失败」时，
-     * 明明走了静默分支却查不出原因，就是因为这个。
-     *
-     * 转发之后，任何连接/凭据问题都会直接出现在 CI 输出里，不用再靠猜。
+     * 父进程。于是主进程里 `[manager] 连接 ... 失败`、`密码未保存（安全存储不可用）`
+     * 这类关键日志在 CI 日志里完全看不到——之前排查「重连失败」时绕远路，
+     * 就是因为这个。转发后任何连接/凭据问题都会直接出现在 CI 输出里。
      */
     const electronProc = app.process()
     electronProc.stdout?.on('data', (chunk) => process.stdout.write(`[electron] ${chunk}`))
