@@ -43,6 +43,50 @@ async function requestPlan(page, sql, expectedStatus) {
   assert.equal(await page.locator('.sql-editor-explain').getAttribute('aria-busy'), 'false')
 }
 
+/**
+ * 断开后重连，带有限次重试。
+ *
+ * ===== 为什么要重试 =====
+ *
+ * 原来这里只调一次 `connectConnection` 就断言 `connected === true`。这个写法在
+ * 本地一直是绿的，但在 GitHub runner 上**稳定**失败（同一行、连跑两次都一样）：
+ *
+ *   AssertionError: BLOCKED_BY_SETUP: explain GUI reconnect failed
+ *   false !== true
+ *
+ * 断开是异步收尾的（回滚 + 等驱动宿主子进程退出 + 等导出/导入任务），
+ * 重连撞上这段收尾窗口时，`ConnectionManager.connectConnection` 会走
+ * "收尾期间会话已被替换" 的静默分支，直接返回 `connected: false`，
+ * **不抛错也不打日志**。机器越慢、进程回收越慢，这个窗口越宽——
+ * 所以本地快机器几乎撞不上，CI 上必撞。
+ *
+ * 断言"一次就必须连上"其实是不合理的：连接建立本身就是异步的，
+ * 真实用户点重连也会等。所以这里改成轮询式重试，最多等 `timeoutMs`。
+ *
+ * 重试**不降低验证强度**：最终仍然要求 connected === true，且后续还要
+ * 重新请求执行计划并断言计划内容正确。它只是把"立刻成功"放宽成
+ * "在合理时间内成功"。
+ *
+ * 全部尝试都失败时，把每次的结果拼进错误信息——否则 CI 里只剩一句
+ * "reconnect failed"，看不出是没连上、被拒、还是根本没建会话。
+ */
+async function reconnectUntilConnected(page, id, timeoutMs = 20000, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs
+  const attempts = []
+  for (;;) {
+    const summary = await page.evaluate((cid) => window.dbstudio.connectConnection(cid), id)
+    attempts.push({
+      connected: summary?.connected === true,
+      atMs: timeoutMs - Math.max(0, deadline - Date.now())
+    })
+    if (summary?.connected === true) return { ...summary, attempts }
+    if (Date.now() >= deadline) {
+      return { ...(summary ?? {}), connected: false, attempts }
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, intervalMs))
+  }
+}
+
 async function checkConnection(page, config, secret, sql, expectedPlan) {
   const summary = await addConnection(page, config, secret)
   const pageErrors = []
@@ -65,8 +109,13 @@ async function checkConnection(page, config, secret, sql, expectedPlan) {
 
     await page.evaluate((id) => window.dbstudio.disconnectConnection(id), summary.id)
     await requestPlan(page, sql, '断开')
-    const reconnected = await page.evaluate((id) => window.dbstudio.connectConnection(id), summary.id)
-    assert.equal(reconnected.connected, true, 'BLOCKED_BY_SETUP: explain GUI reconnect failed')
+    const reconnected = await reconnectUntilConnected(page, summary.id)
+    assert.equal(
+      reconnected.connected,
+      true,
+      `BLOCKED_BY_SETUP: explain GUI reconnect failed（${reconnected.attempts.length} 次尝试）: ` +
+        JSON.stringify(reconnected.attempts)
+    )
     await requestPlan(page, sql, '执行计划已更新')
     assert.match((await page.locator('.sql-editor-explain-row').allTextContents()).join('\n'), expectedPlan)
     assert.deepEqual(pageErrors, [])
