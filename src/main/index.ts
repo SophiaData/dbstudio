@@ -12,16 +12,20 @@
  */
 
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
+import type { OpenDialogOptions, WebContents } from 'electron'
 import { join } from 'node:path'
 import { IPC, type DbStudioApi } from '../core/api'
+import type { DataCompareRequest } from '../core/compare'
 import type { ConnectionConfig } from '../core/dialect'
 import type { SecretInput } from '../core/driver'
 import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
 import type { TableCreateSpec } from '../core/model'
 import type { RecordSqlHistoryInput } from '../core/sql-library'
+import type { ImportPreviewRequest, ImportRequest, TransferRequest } from '../core/transfer'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
+import { chooseImportFile } from './import-file-dialog'
 import { SqlLibraryStore } from './SqlLibraryStore'
 
 let mainWindow: BrowserWindow | null = null
@@ -398,6 +402,19 @@ function probeSafeStorage(): {
 }
 
 /**
+ * 主进程侧的 API 面。
+ *
+ * 与 `DbStudioApi` 的唯一差别：`chooseImportFile` 多一个**可选**的 `sender`，
+ * 用来把系统对话框绑定到"发起这次调用的那个窗口"。
+ *
+ * sender 缺失时返回 `null`，不会回退到主窗口；这只用于内部测试与类型适配，
+ * 实际 IPC handler 始终传入 `event.sender`。
+ */
+type MainApi = Omit<DbStudioApi, 'chooseImportFile'> & {
+  chooseImportFile(sender?: WebContents): Promise<string | null>
+}
+
+/**
  * 注册 IPC。
  *
  * 每个 handler 都只做「取参数 → 交给 ConnectionManager → 返回」，
@@ -406,7 +423,7 @@ function probeSafeStorage(): {
  * UI 侧 catch 到的就是可展示的 message。
  */
 function registerIpc(): void {
-  const api: Omit<DbStudioApi, never> = {
+  const api: MainApi = {
     listDialects: async () => getManager().listDialects(),
     listConnections: async () => getManager().list(),
     addConnection: async (config: ConnectionConfig, secret?: SecretInput) =>
@@ -420,6 +437,9 @@ function registerIpc(): void {
       getManager().testConnection(config, secret),
     listChildren: async (nodeId: string | null) => getManager().listChildren(nodeId),
     describeTable: async (tableNodeId: string) => getManager().describeTable(tableNodeId),
+    captureSchemaSnapshot: async (connectionId: string, schema?: string | null) =>
+      getManager().captureSchemaSnapshot(connectionId, schema),
+    compareTableData: async (request: DataCompareRequest) => getManager().compareTableData(request),
     // 结果集四个通道。注意它们的耗时量级与元数据方法**完全不同**：
     // 上面几个是毫秒级的元数据查询，这几个跑的是用户 SQL（可能几十秒）。
     // 超时策略因此在 DriverHostHandle 里分开（见 RESULT_SET_TIMEOUT_MS）。
@@ -479,8 +499,44 @@ function registerIpc(): void {
     saveSql: async (id: string | null, name: string, sql: string) =>
       getSqlLibrary().save(id, name, sql),
     removeSavedSql: async (id: string) => getSqlLibrary().removeSaved(id),
-    clearSqlHistory: async () => getSqlLibrary().clearHistory()
+    clearSqlHistory: async () => getSqlLibrary().clearHistory(),
+    // 流式导出（P2.1）。任务在后台跑，渲染进程只拿进度。
+    startTransfer: async (request: TransferRequest) => getManager().startTransfer(request),
+    getTransferProgress: async (taskId: string) => getManager().getTransferProgress(taskId) ?? null,
+    cancelTransfer: async (taskId: string) => getManager().cancelTransfer(taskId),
+    waitTransfer: async (taskId: string) => getManager().waitTransfer(taskId),
+    // CSV 导入（P2.3）。CSV 内容只在主进程与驱动宿主之间流转。
+    previewImport: async (request: ImportPreviewRequest) => getManager().previewImport(request),
+    startImport: async (request: ImportRequest) => getManager().startImport(request),
+    getImportProgress: async (taskId: string) => getManager().getImportProgress(taskId) ?? null,
+    cancelImport: async (taskId: string) => getManager().cancelImport(taskId),
+    waitImport: async (taskId: string) => getManager().waitImport(taskId),
+    /**
+     * 打开系统文件选择框。
+     *
+     * `sender` 是发起这次调用的渲染进程。**它不是对外契约的一部分**
+     * （`DbStudioApi.chooseImportFile()` 对渲染进程仍然是零参），
+     * 这里多带一个参数只为把对话框**绑定到发起它的那一个窗口**。
+      * sender 缺失或对应窗口已销毁时，helper 返回 `null` 且不会弹框。
+      */
+    chooseImportFile: async (sender?: WebContents) =>
+      chooseImportFile({
+        showOpenDialog: async (window, options) => {
+           if (!window) throw new Error('导入文件对话框缺少发起窗口')
+           const result = await dialog.showOpenDialog(window, options)
+          return { canceled: result.canceled, filePaths: result.filePaths }
+        },
+        resolveWindows: () => {
+          const fromSender = sender ? BrowserWindow.fromWebContents(sender) : null
+          return [fromSender]
+        }
+      })
   }
+
+  // 编译期证据：主进程实现（含内部可选参数）仍然满足对外契约 DbStudioApi。
+  // 如果哪天 chooseImportFile 的返回值形状变了，这里立刻报错。
+  const _apiContract: DbStudioApi = api
+  void _apiContract
 
   // 逐个通道注册，而不是用一个万能通道 + 方法名字符串。
   // 万能通道等于把整个能力面重新打开，preload 的白名单就失效了。
@@ -506,6 +562,10 @@ function registerIpc(): void {
   )
   ipcMain.handle(IPC.listChildren, (_e, nodeId: string | null) => api.listChildren(nodeId))
   ipcMain.handle(IPC.describeTable, (_e, tableNodeId: string) => api.describeTable(tableNodeId))
+  ipcMain.handle(IPC.captureSchemaSnapshot, (_e, connectionId: string, schema?: string | null) =>
+    api.captureSchemaSnapshot(connectionId, schema)
+  )
+  ipcMain.handle(IPC.compareTableData, (_e, request: DataCompareRequest) => api.compareTableData(request))
 
   // ---- 结果集通道（第二阶段新增） ----
   // 每个通道单独注册，理由同上：万能通道会让 preload 的白名单失效。
@@ -582,6 +642,27 @@ function registerIpc(): void {
   )
   ipcMain.handle(IPC.removeSavedSql, (_e, id: string) => api.removeSavedSql(id))
   ipcMain.handle(IPC.clearSqlHistory, () => api.clearSqlHistory())
+
+  // ---- 流式导出通道（P2.1） ----
+  // 四个通道：启动 / 查进度 / 取消 / 等结束。
+  // 进度用**轮询**而不是事件推送：导出面板本来就要定时刷新，
+  // 轮询的实现与调试成本都低得多，且不需要给 preload 再开一条事件白名单。
+  ipcMain.handle(IPC.startTransfer, (_e, request: TransferRequest) => api.startTransfer(request))
+  ipcMain.handle(IPC.getTransferProgress, (_e, taskId: string) => api.getTransferProgress(taskId))
+  ipcMain.handle(IPC.cancelTransfer, (_e, taskId: string) => api.cancelTransfer(taskId))
+  ipcMain.handle(IPC.waitTransfer, (_e, taskId: string) => api.waitTransfer(taskId))
+
+  // ---- CSV 导入预览通道 ----
+  ipcMain.handle(IPC.previewImport, (_e, request: ImportPreviewRequest) => api.previewImport(request))
+  ipcMain.handle(IPC.startImport, (_e, request: ImportRequest) => api.startImport(request))
+  ipcMain.handle(IPC.getImportProgress, (_e, taskId: string) => api.getImportProgress(taskId))
+  ipcMain.handle(IPC.cancelImport, (_e, taskId: string) => api.cancelImport(taskId))
+  ipcMain.handle(IPC.waitImport, (_e, taskId: string) => api.waitImport(taskId))
+
+  // ---- 系统文件选择器通道 ----
+  // 唯一需要 `event.sender` 的通道：对话框必须挂在**发起这次调用的那个窗口**上，
+  // 否则系统框会跑到别的窗口前面，用户不知道自己在给谁选文件。
+  ipcMain.handle(IPC.chooseImportFile, (event) => api.chooseImportFile(event.sender))
 }
 
 app.whenReady().then(() => {

@@ -27,6 +27,11 @@ import { Client, type QueryResult } from 'pg'
 
 import type { ConnectionConfig } from '../../core/dialect'
 import type {
+  ImportBatch,
+  ImportBatchResult,
+  TransferSourceResolution
+} from '../../core/transfer'
+import type {
   ConnectionTestCheck,
   ConnectionTestStage,
   DriverAdapter,
@@ -102,6 +107,7 @@ import {
   normalizeValues,
   resolveColumns,
   resolveRequiredColumns,
+  toBindValue,
   mustGetValue,
   type ColumnMatch
 } from './edits'
@@ -112,6 +118,7 @@ import {
   buildDropViewSql,
   buildRenameTableSql
 } from './ddl'
+import { readPostgresTableMetadata } from './metadata'
 import type { TableCreateSpec } from '../../core/model'
 
 /**
@@ -130,7 +137,16 @@ const POSTGRESQL_CAPABILITIES: DriverCapabilities = {
   hasSchema: true,
   supportsServerPagination: true,
   supportsCancel: true,
-  supportsInlineEdit: true
+  supportsInlineEdit: true,
+  // PG 的 pg_catalog 能读出外键、索引、唯一约束、CHECK 与触发器。
+  // 声明在这里，UI 才能在请求之前就知道"这个连接能给出外键"。
+  metadata: {
+    foreignKeys: true,
+    indexes: true,
+    uniqueConstraints: true,
+    checkConstraints: true,
+    triggers: true
+  }
 }
 
 /** 连接参数从 `ConnectionConfig.options` 解析出来的形状。 */
@@ -176,6 +192,158 @@ interface CursorState {
 function readOptionString(config: ConnectionConfig, key: string): string {
   const raw = config.options[key]
   return typeof raw === 'string' ? raw.trim() : typeof raw === 'number' ? String(raw) : ''
+}
+
+/**
+ * 定位导入失败涉及的列。
+ *
+ * 优先用 PostgreSQL 的**结构化字段** `column`（服务器直接告诉我们是哪一列），
+ * 其次才从错误原文里按已知模板提取列名。
+ *
+ * ===== 为什么"只接受确实是目标列"的候选 =====
+ *
+ * 错误原文里带引号的内容**未必是列名**：值本身就会带引号，
+ * 例如 `invalid input syntax for type integer: "abc"`，
+ * 甚至可能被人为构造成 `xxx" , column "PASSWORD"` 这种形状。
+ * 若把这样的内容当列名回显，等于把 CSV 的内容抄进错误消息——
+ * 那正是这个函数要防的事。所以候选必须与目标列名精确匹配（忽略大小写）。
+ */
+function importErrorColumn(
+  message: string,
+  columns: readonly string[],
+  serverColumn?: unknown
+): string | null {
+  if (typeof serverColumn === 'string' && serverColumn !== '') {
+    const exact = columns.find((column) => column.toLowerCase() === serverColumn.toLowerCase())
+    if (exact !== undefined) return exact
+  }
+  const patterns = [
+    /null value in column\s+"([^"]+)"/i,
+    /column\s+"([^"]+)"\s+of relation/i,
+    /column\s+"([^"]+)"/i
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(message)
+    const candidate = match?.[1]
+    if (candidate === undefined || candidate === '') continue
+    const exact = columns.find((column) => column.toLowerCase() === candidate.toLowerCase())
+    if (exact !== undefined) return exact
+  }
+  return null
+}
+
+/**
+ * 导入场景里常见 SQLSTATE 的固定中文说明。
+ *
+ * 为什么要这张表：PostgreSQL 的错误消息里经常**直接带着出错的值**
+ * （`invalid input syntax for type integer: "abc"`），
+ * 而错误消息会一路传到 renderer —— 那就等于把 CSV 内容显示在界面上，
+ * 违反"renderer 永远拿不到行数据"的契约（见 core/transfer.ts 文件头）。
+ *
+ * 所以这里改用**服务器给的结构化信息**（SQLSTATE 等）配一句固定措辞：
+ * 说明是查表得来的固定文本，不含任何用户数据。
+ *
+ * 分类严格按 PostgreSQL 官方 Appendix A 的错误码表：
+ *   - 22003 = numeric_value_out_of_range（数值超范围）
+ *   - 22007 = invalid_datetime_format（**日期时间格式无效**）
+ *   - 22008 = datetime_field_overflow（日期时间字段超范围）
+ * 三者含义不同，不能互相顶替——把 22007 说成"数值超范围"会把用户带偏。
+ */
+const PG_IMPORT_SQLSTATE_HINTS: Readonly<Record<string, string>> = {
+  '22001': '值超出了目标列的长度限制',
+  '22003': '数值超出了目标列的范围',
+  '22007': '日期时间格式无效',
+  '22008': '日期时间字段超出了范围',
+  '22012': '除数为零',
+  '22P02': '文本无法转换成目标列的类型',
+  '23502': '目标列不允许 NULL',
+  '23503': '违反外键约束',
+  '23505': '违反唯一约束',
+  '23514': '违反 CHECK 约束',
+  '23P01': '违反排他约束',
+  '40001': '序列化冲突，事务已被中止',
+  '40P01': '检测到死锁，事务已被中止',
+  '42501': '权限不足',
+  '42601': 'SQL 语法错误',
+  '42703': '列不存在',
+  '42P01': '表或视图不存在',
+  '42883': '函数不存在',
+  '57014': '语句被取消或超时',
+  '57P01': '数据库已终止连接'
+}
+
+/** 从错误对象里安全地读一个字符串字段。读不到就返回 null，绝不猜。 */
+function readPgErrorField(thrown: unknown, field: string): string | null {
+  if (typeof thrown !== 'object' || thrown === null) return null
+  const value = (thrown as Record<string, unknown>)[field]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * 生成**不含 CSV 单元格值**的导入失败摘要。
+ *
+ * 只输出服务器给的结构化信息：SQLSTATE、严重级别、以及表/列/约束这些
+ * **目录对象名**（是 schema 里的对象名，不是数据），再配一句固定措辞的说明。
+ * 原始错误消息**一律不回显**——它最可能携带的就是出错的那份数据。
+ *
+ * ===== 为什么连"没有 SQLSTATE"的情况也不回显原文 =====
+ *
+ * 没有 SQLSTATE 说明是连接层/客户端层错误（例如连接被中断）。
+ * 旧实现在这里回显原文（只把本行的值替换掉），但那条路同样不可靠：
+ *   - 客户端错误可能夹带**别的**内容（连接串、主机名、乃至上一条语句）；
+ *   - 逐值替换式抹除挡不住"先变换再回显"（substr/upper/hex）与
+ *     PostgreSQL 的类型亲和性（'42' → 42）；
+ *   - 长度为 1 的值只能按"独立词"替换，紧挨别的字符就漏。
+ * 既然没有可信的结构化字段可展示，就**只给固定措辞**。
+ */
+function describePgImportFailure(thrown: unknown): string {
+  const sqlstate = readPgErrorField(thrown, 'code')
+  if (sqlstate === null || !/^[0-9A-Z]{5}$/.test(sqlstate)) {
+    const severity = readPgErrorField(thrown, 'severity')
+    const severityPart =
+      severity !== null && /^[A-Z]{1,16}$/.test(severity) ? `，严重级别 ${severity}` : ''
+    return `数据库连接层错误（服务器未返回 SQLSTATE）${severityPart}`
+  }
+
+  const parts: string[] = [`SQLSTATE ${sqlstate}`]
+  const hint = PG_IMPORT_SQLSTATE_HINTS[sqlstate]
+  parts.push(`（${hint ?? '数据库返回的错误'}）`)
+
+  const severity = readPgErrorField(thrown, 'severity')
+  if (severity !== null && severity.toUpperCase() !== 'ERROR') {
+    parts.push(`，严重级别 ${severity}`)
+  }
+  const constraint = readPgErrorField(thrown, 'constraint')
+  if (constraint !== null) parts.push(`，约束 ${constraint}`)
+  const table = readPgErrorField(thrown, 'table')
+  if (table !== null) {
+    const schema = readPgErrorField(thrown, 'schema')
+    parts.push(`，表 ${schema === null ? table : `${schema}.${table}`}`)
+  }
+  return parts.join('')
+}
+
+/**
+ * 导入失败时挂的**安全 cause**：只带 SQLSTATE / 严重级别这类结构化字段。
+ *
+ * 原来的写法是把 `pg` 抛出的原始异常整个挂成 `cause`，那等于把
+ * "含出错数据与 DETAIL 键值"的原文留在错误对象里。即使当前 RPC 协议
+ * 只传 `{ code, message }`（见 src/driver-host/index.ts 的 toRpcError：
+ * 它只取 code 与 message，**不会序列化 cause**），留着原始 cause 也
+ * 迟早被人误用/误序列化。这里只保留固定码，排查够用，且不可能夹带数据。
+ */
+function pgImportFailureCause(thrown: unknown): {
+  readonly driver: 'postgresql'
+  readonly sqlstate: string | null
+  readonly severity: string | null
+} {
+  const sqlstate = readPgErrorField(thrown, 'code')
+  const severity = readPgErrorField(thrown, 'severity')
+  return {
+    driver: 'postgresql',
+    sqlstate: sqlstate !== null && /^[0-9A-Z]{5}$/.test(sqlstate) ? sqlstate : null,
+    severity: severity !== null && /^[A-Z]{1,16}$/.test(severity) ? severity : null
+  }
 }
 
 /**
@@ -370,6 +538,129 @@ function invalidSslMode(raw: string): never {
   )
 }
 
+/**
+ * 显式事务控制语句的归类结果。
+ *
+ * ===== 为什么必须在 executeStatement 里单独处理这几条语句 =====
+ *
+ * `prepareGeneralStatement` 只把 DML/DDL 分出来，`BEGIN`/`COMMIT`/`ROLLBACK`
+ * 这类会被归到 `kind: 'rows'`，然后走 `#runQuery` 直接发给服务端。
+ * 但 `pg.Client` 不提供 `node:sqlite` 那样的 `isTransaction`，驱动只能自己记账
+ * （`#inTransaction`）。如果只把语句发出去却不更新账本，就会出现"假空闲"：
+ * 用户已在服务端开了真实事务，驱动却认为连接空闲。随后 `importBatch` 会把它
+ * 当空闲连接，再发一次 `BEGIN`（PG 里只是嵌套告警），最后在导入收尾时 COMMIT，
+ * **把用户的事务一起提交**。连接级租约只能隔离在途请求，识别不了这种假空闲。
+ *
+ * 这里只做**可判定**的最小同步：
+ *   - BEGIN / START TRANSACTION          → 进入事务
+ *   - COMMIT / END                       → 离开事务
+ *   - ROLLBACK / ABORT                   → 离开事务
+ *   - ROLLBACK ... TO [SAVEPOINT] ...    → 仍留在事务里（绝不标成空闲）
+ *   - COMMIT/ROLLBACK PREPARED           → 作用于两阶段事务，不改本连接事务状态
+ * 拿不准语义的形式（AND CHAIN、PREPARE TRANSACTION、裸 START）显式拒绝，
+ * 让用户改用既有的事务 API，绝不猜着同步、也绝不偷偷提交用户事务。
+ */
+type TxControlAction = 'begin' | 'commit' | 'rollback' | 'rollback_to' | 'no_state_change'
+
+type TxControlDirective =
+  | { readonly kind: 'state'; readonly action: TxControlAction }
+  | { readonly kind: 'unsupported'; readonly form: string }
+
+/** 只取 SQL 开头若干个"词"，跳过空白、注释与引号内容；够判定事务控制首词即可。 */
+function leadingSqlWords(sql: string, limit: number): string[] {
+  const words: string[] = []
+  let index = 0
+  while (index < sql.length && words.length < limit) {
+    const ch = sql[index]
+    if (ch === undefined || ch === ';') break
+    if (ch === '-' && sql[index + 1] === '-') {
+      const newline = sql.indexOf('\n', index + 2)
+      index = newline === -1 ? sql.length : newline + 1
+      continue
+    }
+    if (ch === '/' && sql[index + 1] === '*') {
+      const end = sql.indexOf('*/', index + 2)
+      index = end === -1 ? sql.length : end + 2
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      const quote = ch
+      index += 1
+      while (index < sql.length) {
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 2
+            continue
+          }
+          index += 1
+          break
+        }
+        index += 1
+      }
+      continue
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let end = index + 1
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end] as string)) end += 1
+      words.push(sql.slice(index, end).toLowerCase())
+      index = end
+      continue
+    }
+    if (/[0-9]/.test(ch)) {
+      let end = index + 1
+      while (end < sql.length && /[0-9.]/.test(sql[end] as string)) end += 1
+      index = end
+      continue
+    }
+    if (ch === '(') break
+    index += 1
+  }
+  return words
+}
+
+/** 是否出现 `AND CHAIN`（`AND NO CHAIN` 是默认语义，不算）。 */
+function hasAndChain(words: readonly string[]): boolean {
+  const index = words.indexOf('chain')
+  if (index === -1) return false
+  return words[index - 1] !== 'no'
+}
+
+/** 识别显式事务控制语句；非事务控制返回 null。 */
+function classifyTransactionControl(sql: string): TxControlDirective | null {
+  const words = leadingSqlWords(sql, 8)
+  const first = words[0]
+  if (first === undefined) return null
+
+  switch (first) {
+    case 'begin':
+      return { kind: 'state', action: 'begin' }
+    case 'start':
+      return words[1] === 'transaction'
+        ? { kind: 'state', action: 'begin' }
+        : { kind: 'unsupported', form: 'START（缺少 TRANSACTION）' }
+    case 'commit':
+    case 'end':
+      // PREPARED 操作的是两阶段事务，不是本连接当前事务，状态不动。
+      if (words[1] === 'prepared') return { kind: 'state', action: 'no_state_change' }
+      if (hasAndChain(words)) return { kind: 'unsupported', form: `${first.toUpperCase()} ... AND CHAIN` }
+      return { kind: 'state', action: 'commit' }
+    case 'rollback':
+    case 'abort': {
+      if (words[1] === 'prepared') return { kind: 'state', action: 'no_state_change' }
+      // 先判 TO：ROLLBACK TO SAVEPOINT 只回退到保存点，事务仍然活动。
+      if (words.indexOf('to') > 0) return { kind: 'state', action: 'rollback_to' }
+      if (hasAndChain(words)) return { kind: 'unsupported', form: `${first.toUpperCase()} ... AND CHAIN` }
+      return { kind: 'state', action: 'rollback' }
+    }
+    case 'prepare':
+      return words[1] === 'transaction'
+        ? { kind: 'unsupported', form: 'PREPARE TRANSACTION' }
+        : null
+    default:
+      return null
+  }
+}
+
 export class PostgresDriverAdapter implements DriverAdapter {
   readonly dialect = postgresqlDialect
   readonly info = POSTGRESQL_INFO
@@ -396,6 +687,8 @@ export class PostgresDriverAdapter implements DriverAdapter {
    * 权威来源是**我们发出的 BEGIN/COMMIT/ROLLBACK 语句**，而不是猜测。
    */
   #inTransaction = false
+  /** 当前事务是否由 CSV 导入创建；用于阻止导入复用/提交用户的编辑事务。 */
+  #importActive = false
   /**
    * 本连接的后端 PID，用于取消查询（`pg_cancel_backend(pid)`）。
    * 连接建立后立刻取；取不到时为 null，此时 cancelQuery 会如实返回 false。
@@ -461,6 +754,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
     this.#client = client
     this.#connectionInfo = info
     this.#inTransaction = false
+    this.#importActive = false
     this.#pendingAffected = 0
     /**
      * 记下后端 PID，供取消使用。
@@ -494,6 +788,7 @@ export class PostgresDriverAdapter implements DriverAdapter {
     this.#cursors.clear()
     this.#pendingAffected = 0
     this.#inTransaction = false
+    this.#importActive = false
     this.#backendPid = null
     this.#connectionInfo = null
     if (client === null) {
@@ -740,10 +1035,51 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
     const columns = await this.#readColumns(client, parsed.schema, parsed.name)
     const canonicalId = parsed.kind === 'table' ? tableObjectId(parsed.schema, parsed.name) : viewObjectId(parsed.schema, parsed.name)
-    return {
+    const description: TableDescription = {
       id: canonicalId,
       columns,
       hasUniqueKey: columns.some((column) => column.primaryKeyOrdinal !== null)
+    }
+    // 视图也读元数据：PG 的视图没有外键/索引/唯一约束/CHECK，
+    // 但可以有 INSTEAD OF 触发器——那是真实存在的对象。
+    // 与 SQLite 侧同一分层（视图同样走 #withMetadata），
+    // 这样 UI 对视图看到的也是"确定没有外键"而不是"不知道"。
+    return this.#withMetadata(client, parsed.schema, parsed.name, description)
+  }
+
+  /**
+   * 追加结构元数据（外键 / 索引 / 唯一约束 / CHECK / 触发器）。
+   *
+   * ===== 为什么失败时整个字段留空，而不是让 describeTable 抛错 =====
+   *
+   * 与 SQLite 侧同一取舍（见 `sqlite/adapter.ts` 的 `#withMetadata`）：
+   * `describeTable` 的本职是"告诉 UI 这张表长什么样"——
+   * 列和唯一键是**网格能否工作**的前提，丢了整张表就打不开。
+   * 而外键、索引这些是**附加信息**：读不到只是 ER 图少画几条线，
+   * 不该让用户连表都看不到。
+   *
+   * 所以这里是"尽力而为"：读失败就**整块省略**这些字段，
+   * 让 UI 落到 `metadataAvailability()` 的 'unavailable' 状态，
+   * 而不是把它误显示成"这张表没有外键"。
+   */
+  async #withMetadata(
+    client: Client,
+    schema: string,
+    tableName: string,
+    description: TableDescription
+  ): Promise<TableDescription> {
+    try {
+      const metadata = await readPostgresTableMetadata(
+        (sql, params) => this.#runQuery(client, sql, params),
+        schema,
+        tableName
+      )
+      return { ...description, ...metadata }
+    } catch (thrown) {
+      // 只吞"读元数据失败"，不吞参数/状态错误：
+      // 那些是真正的 bug，应该让测试看见，而不是被静默降级。
+      if (!(thrown instanceof PostgresAdapterError)) throw thrown
+      return description
     }
   }
 
@@ -826,11 +1162,40 @@ export class PostgresDriverAdapter implements DriverAdapter {
     const startedAt = performance.now()
 
     if (analyzed.kind === 'rows') {
+      /**
+       * 显式事务控制必须先归类、再执行、**成功之后**才更新内部账本。
+       * 失败时绝不改状态（保守保留用户事务），见文件顶部的类型注释。
+       */
+      const txDirective = classifyTransactionControl(analyzed.statementSql)
+      if (txDirective !== null) {
+        if (txDirective.kind === 'unsupported') {
+          throw new PostgresAdapterError(
+            'bad_params',
+            `查询窗口无法可靠同步「${txDirective.form}」的事务状态，已拒绝执行。` +
+              '请改用事务工具栏（提交/回滚）等既有事务 API，避免驱动误判事务状态或误提交你的改动。'
+          )
+        }
+        /**
+         * 导入事务的所有权只属于导入流程。导入进行中若从 SQL 窗口手动控制事务，
+         * 轻则打乱原子性（把已导入的行提前提交/回滚），重则让后续批次复用错误状态。
+         * 这里直接拒绝，不扩大到让导入 API 之外的人来控制它。
+         */
+        if (this.#importActive && txDirective.action !== 'no_state_change') {
+          throw new PostgresAdapterError(
+            'bad_params',
+            '当前连接正在执行 CSV 导入，导入事务只能由导入流程自身结束。' +
+              '请等待导入完成或取消导入后，再手动控制事务。'
+          )
+        }
+      }
       if (PAGINATABLE_KEYWORDS.has(analyzed.keyword)) {
         const result = await this.#queryBound(client, analyzed.statementSql, toPgValues(bound.values), options)
         return { kind: 'rows', result }
       }
       const res = await this.#runQuery(client, analyzed.statementSql, toPgValues(bound.values))
+      if (txDirective !== null && txDirective.kind === 'state') {
+        this.#applyTransactionControl(txDirective.action)
+      }
       const elapsedMs = Math.round(performance.now() - startedAt)
       const grid = buildGrid(res as unknown as PgResultLike)
       return {
@@ -888,6 +1253,37 @@ export class PostgresDriverAdapter implements DriverAdapter {
       committed: !txState.active,
       executedSql: analyzed.statementSql,
       elapsedMs
+    }
+  }
+
+  /**
+   * 把对象节点解析成「读取语句 + INSERT 落点」。
+   *
+   * ===== 为什么必须由驱动解析 =====
+   *
+   * PostgreSQL 的对象 id 是 `table:<schema>.<name>`——**带 schema**。
+   * 主进程若自己切冒号，会把 `public.users` 整体当成表名，
+   * 生成 `SELECT * FROM "public.users"` 这种**指错对象**的语句
+   * （该名字很可能不存在，或更糟：恰好存在一张同名表）。
+   *
+   * schema 还必须原样带进 INSERT 目标：`public.users` 与 `audit.users`
+   * 是两张不同的表，只写表名会插到 `search_path` 命中的第一张同名表上。
+   *
+   * 视图不能作为 INSERT 目标（`kind: 'view'`），上层据此拒绝 sql-insert 格式。
+   */
+  async resolveTransferSource(nodeId: string): Promise<TransferSourceResolution> {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || (parsed.kind !== 'table' && parsed.kind !== 'view')) {
+      throw new PostgresAdapterError(
+        'object_not_found',
+        `无法识别的导出对象 id：${nodeId}（只支持表与视图节点）`
+      )
+    }
+    const quotedSchema = this.dialect.quoteIdentifier(parsed.schema)
+    const quotedName = this.dialect.quoteIdentifier(parsed.name)
+    return {
+      sql: `SELECT * FROM ${quotedSchema}.${quotedName}`,
+      target: { schema: parsed.schema, name: parsed.name, kind: parsed.kind }
     }
   }
 
@@ -964,6 +1360,117 @@ export class PostgresDriverAdapter implements DriverAdapter {
       }
     }
     return { affected: 1, keyValues }
+  }
+
+  /**
+   * 批量写入 CSV 行。每个值都走参数绑定，标识符由方言 quoteIdentifier 处理。
+   *
+   * 逐行执行而不是拼一条多行 VALUES：多行语句失败时数据库只给一个笼统错误，
+   * 无法指认是哪一行/哪一列；逐行执行能准确返回 CSV 行号，同时仍由同一事务
+   * 保证整次导入原子性。
+   */
+  async importBatch(tableId: string, batch: ImportBatch): Promise<ImportBatchResult> {
+    const client = this.#requireClient()
+    const target = await this.#resolveTableTarget(client, tableId, false)
+    const resolved = resolveColumns(batch.columns, target.availableColumns)
+    if (resolved.unknown.length > 0) {
+      throw new PostgresAdapterError(
+        'bad_params',
+        `导入目标列不存在：${resolved.unknown.join('、')}。「${target.tableName}」的可用列：` +
+          target.availableColumns.join('、')
+      )
+    }
+    const columns = resolved.matched.map((match) => match.canonical)
+    if (new Set(columns).size !== columns.length) {
+      throw new PostgresAdapterError('bad_params', '导入目标列重复，无法确定每个 CSV 值应写入哪一列。')
+    }
+    if (batch.rows.length === 0) {
+      throw new PostgresAdapterError('bad_params', '导入批次为空，已拒绝执行。')
+    }
+    for (let index = 0; index < batch.rows.length; index += 1) {
+      const row = batch.rows[index]
+      if (row === undefined) continue
+      if (row.values.length !== columns.length) {
+        throw new PostgresAdapterError(
+          'bad_params',
+          `导入批次第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行）有 ${row.values.length} 个值，` +
+            `但目标列有 ${columns.length} 个。`
+        )
+      }
+    }
+
+    if (this.#importActive) {
+      if (!this.#inTransaction) {
+        throw new PostgresAdapterError('query_failed', '导入事务已意外结束，无法继续写入；请重新开始导入。')
+      }
+    } else {
+      if (this.#inTransaction) {
+        throw new PostgresAdapterError(
+          'bad_params',
+          '目标连接上已有未提交事务。请先提交或回滚该事务，再开始 CSV 导入，' +
+            '以免导入把无关改动一起提交。'
+        )
+      }
+      await this.#ensureTransaction(client)
+      this.#importActive = true
+    }
+
+    const quote = this.dialect.quoteIdentifier.bind(this.dialect)
+    let imported = 0
+    for (let index = 0; index < batch.rows.length; index += 1) {
+      const row = batch.rows[index]
+      if (row === undefined) continue
+      const byColumn = new Map(
+        columns.map((column, columnIndex) => {
+          const value = row.values[columnIndex]
+          if (value === undefined) throw new Error(`缺少列「${column}」的值`)
+          return [column, value] as const
+        })
+      )
+      const built = buildInsert(quote, target.schema, target.tableName, columns, byColumn)
+      const physical = row.lineNumber === undefined ? '' : `（文件物理第 ${row.lineNumber} 行）`
+      let rowCount = 0
+      try {
+        const result = await client.query(built.sql, built.params as unknown[])
+        rowCount = result.rowCount ?? 0
+      } catch (thrown) {
+        /**
+         * **不回显引擎原文**（含 `invalid input syntax ...: "abc"`、
+         * `Key (email)=(x@y.z) already exists.` 这类带数据的原始消息）。
+         * 只输出：服务器给的结构化信息（SQLSTATE / 严重级别 / 约束 / 表）+
+         * 行列定位 + 白名单列名。
+         */
+        const raw = describeThrown(thrown)
+        const column =
+          importErrorColumn(raw, columns, readPgErrorField(thrown, 'column')) ?? columns.join('、')
+        throw new PostgresAdapterError(
+          'query_failed',
+          `导入第 ${batch.batchIndex + 1} 批第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行${physical}）` +
+            `写入列「${column}」失败：${describePgImportFailure(thrown)}`,
+          pgImportFailureCause(thrown)
+        )
+      }
+      /**
+       * ===== 必须核对实际写入行数 =====
+       *
+       * `BEFORE INSERT` 触发器返回 NULL 会让这一行**根本没写进去**，
+       * 但语句照样成功、`rowCount` 为 0。若照样算作已导入，
+       * 上层看到"已写入行数 == 批次行数"就会直接 COMMIT —— 静默丢数据。
+       * 所以对不上就失败，由上层回滚整个导入（与 SQLite 驱动同一口径）。
+       */
+      if (rowCount !== 1) {
+        throw new PostgresAdapterError(
+          'query_failed',
+          `导入第 ${batch.batchIndex + 1} 批第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行${physical}）` +
+            `写入失败：数据库没有写入这一行（实际影响行数为 ${rowCount}，常见原因是 BEFORE INSERT 触发器 ` +
+            '返回了 NULL）。已中止导入并请求回滚，以免静默丢数据。'
+        )
+      }
+      imported += rowCount
+    }
+
+    this.#pendingAffected += imported
+    return { rowsImported: imported, inTransaction: this.#inTransaction }
   }
 
   async deleteRows(
@@ -1184,8 +1691,18 @@ export class PostgresDriverAdapter implements DriverAdapter {
     if (!this.#inTransaction) {
       throw new PostgresAdapterError('bad_params', '当前没有未提交的事务，无法提交。')
     }
-    await this.#execControl(client, 'COMMIT')
+    /*
+     * 导入边界（`#importActive`）：COMMIT 可能因为 DEFERRABLE 约束触发器在提交时
+     * RAISE EXCEPTION 而失败，原始错误里带着 CSV 数据。传 true 让 #execControl
+     * 走导入安全摘要，绝不回显原文。
+     *
+     * 失败时 #execControl 直接抛出，下面三行清理不会执行 —— 因此
+     * `#inTransaction` / `#importActive` 保持 true，不会把"提交失败"伪装成
+     * "事务已结束"。调用方仍可用 rollbackTransaction 正确收尾。
+     */
+    await this.#execControl(client, 'COMMIT', this.#importActive)
     this.#inTransaction = false
+    this.#importActive = false
     this.#pendingAffected = 0
     return { active: false, pendingAffected: 0 }
   }
@@ -1195,13 +1712,17 @@ export class PostgresDriverAdapter implements DriverAdapter {
     const client = this.#client
     if (client === null) return { active: false, pendingAffected: 0 }
     if (this.#inTransaction) {
-      try {
-        await client.query('ROLLBACK')
-      } catch {
-        // 回滚失败也不能抛（清理路径）
-      }
+      /*
+       * 同样在导入边界走安全摘要：ROLLBACK 也可能失败（例如连接已断、或触发器
+       * 在回滚钩子里抛错），原文同样可能夹带数据。
+       *
+       * 失败时 #execControl 直接抛出，下面的清理不会执行 —— 事务状态保守保留为
+       * 活动，transactionState() 继续如实报告，不会误清。
+       */
+      await this.#execControl(client, 'ROLLBACK', this.#importActive)
     }
     this.#inTransaction = false
+    this.#importActive = false
     this.#pendingAffected = 0
     return { active: false, pendingAffected: 0 }
   }
@@ -1210,6 +1731,30 @@ export class PostgresDriverAdapter implements DriverAdapter {
     const client = this.#client
     if (client === null) return { active: false, pendingAffected: 0 }
     return { active: this.#inTransaction, pendingAffected: this.#pendingAffected }
+  }
+
+  /**
+   * 把**已成功执行**的显式事务控制语句同步到内部账本。
+   * 只在成功后调用；失败路径由调用方直接抛出，这里不会把用户事务误清掉。
+   */
+  #applyTransactionControl(action: TxControlAction): void {
+    switch (action) {
+      case 'begin':
+        // 嵌套 BEGIN（PG 只会告警）不应重置已累计的影响行数。
+        if (!this.#inTransaction) this.#pendingAffected = 0
+        this.#inTransaction = true
+        return
+      case 'commit':
+      case 'rollback':
+        this.#inTransaction = false
+        this.#importActive = false
+        this.#pendingAffected = 0
+        return
+      case 'rollback_to':
+      case 'no_state_change':
+        // ROLLBACK TO 只回退到保存点；PREPARED 系列不作用于本连接事务。状态都不变。
+        return
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1241,11 +1786,41 @@ export class PostgresDriverAdapter implements DriverAdapter {
     }
   }
 
-  /** 执行事务控制语句（BEGIN/COMMIT/ROLLBACK），把底层报错包装成人话。 */
-  async #execControl(client: Client, statement: 'BEGIN' | 'COMMIT' | 'ROLLBACK'): Promise<void> {
+  /**
+   * 执行事务控制语句（BEGIN/COMMIT/ROLLBACK），把底层报错包装成人话。
+   *
+   * `importSafe` 只在**导入边界**（`#importActive === true` 时的 COMMIT/ROLLBACK）
+   * 传 true。此时原始错误必须**在 `wrapPgError` 把原文拼进 message 之前**就
+   * 用结构化字段提炼成固定摘要 + 安全 cause：
+   *
+   *   - `DEFERRABLE INITIALLY DEFERRED` 的约束触发器可以在 **COMMIT** 时才
+   *     `RAISE EXCEPTION 'bad: %', NEW.note`——错误原文里直接带着 CSV 单元格值；
+   *   - `wrapPgError` 会生成「...（原始错误：<原文>）」并把它挂成 cause，
+   *     RPC 只取 `{ code, message }` 发给 renderer，于是数据就泄漏到界面上了。
+   *
+   * 这里在 catch 里拿到的是**尚未包装的原生数据库错误**，正好可以复用写行
+   * 路径同一套 `describePgImportFailure` / `pgImportFailureCause`（只输出
+   * SQLSTATE/严重级别/约束/表等结构化信息），绝不回显原文。
+   *
+   * 非导入路径（用户编辑事务、DDL 自管事务）`importSafe` 为 false，语义完全
+   * 不变，仍走 `wrapPgError`。
+   */
+  async #execControl(
+    client: Client,
+    statement: 'BEGIN' | 'COMMIT' | 'ROLLBACK',
+    importSafe = false
+  ): Promise<void> {
     try {
       await client.query(statement)
     } catch (thrown) {
+      if (importSafe) {
+        const verb = statement === 'COMMIT' ? '提交' : '回滚'
+        throw new PostgresAdapterError(
+          'query_failed',
+          `导入事务${verb}失败：${describePgImportFailure(thrown)}`,
+          pgImportFailureCause(thrown)
+        )
+      }
       throw wrapPgError(thrown, 'query_failed', `${statement} 执行失败`)
     }
   }
@@ -1384,7 +1959,8 @@ export class PostgresDriverAdapter implements DriverAdapter {
    *
    * ===== 两条查询：列 + 主键 =====
    *
-   * 1. `information_schema.columns`：列名、`data_type`（基础类型）、`is_nullable`、`column_default`。
+   * 1. `information_schema.columns`：列名、`data_type`（基础类型）、`is_nullable`、
+   *    `column_default`，以及 identity/generated 三个 catalog 标记。
    *    注意 `data_type` 不含长度（`VARCHAR` 而非 `VARCHAR(64)`），
    *    要拼成 `VARCHAR(64)` 需要 `character_maximum_length` / `numeric_precision` / `numeric_scale`。
    *    这里做了拼接，让 UI 看到的是完整的类型名。
@@ -1405,7 +1981,10 @@ export class PostgresDriverAdapter implements DriverAdapter {
         c.character_maximum_length,
         c.numeric_precision,
         c.numeric_scale,
-        c.udt_name
+        c.udt_name,
+        c.is_identity,
+        c.identity_generation,
+        c.is_generated
       FROM information_schema.columns c
       WHERE c.table_schema = $1 AND c.table_name = $2
       ORDER BY c.ordinal_position`
@@ -1431,12 +2010,36 @@ export class PostgresDriverAdapter implements DriverAdapter {
     for (const row of columnResult.rows) {
       const name = typeof row['column_name'] === 'string' ? row['column_name'] : null
       if (name === null) continue
+      // identity 列的 column_default 也是 null，不能只靠默认值判断是否必填。
+      const isIdentity = row['is_identity'] === 'YES'
+      const identityGeneration = isIdentity
+        ? row['identity_generation'] === 'ALWAYS'
+          ? 'always'
+          : row['identity_generation'] === 'BY DEFAULT'
+            ? 'by-default'
+            : null
+        : null
+      const nullable = row['is_nullable'] === 'YES'
+      const defaultValue = typeof row['column_default'] === 'string' ? row['column_default'] : null
+      const generated = row['is_generated'] === 'ALWAYS' ? 'stored' : null
+      /**
+       * 静态必填：NOT NULL 且无默认值、非 identity、非 generated。
+       *
+       * 这是**纯列定义**判断，不代表"省略后插入一定成功"：
+       * CHECK 约束、触发器、DEFAULT 表达式求值失败等运行期规则不在本字段范围。
+       * 有 `DEFAULT NULL` 时 `column_default` 非空，按"有默认值"归为 false，
+       * 但不承诺该省略一定可写（见 `ColumnDescription.requiredOnInsert` 注释）。
+       */
+      const requiredOnInsert = !nullable && defaultValue === null && !isIdentity && generated === null
       columns.push({
         name,
         typeName: formatPgType(row),
-        nullable: row['is_nullable'] === 'YES',
+        nullable,
         primaryKeyOrdinal: pkMap.get(name) ?? null,
-        defaultValue: typeof row['column_default'] === 'string' ? row['column_default'] : null
+        defaultValue,
+        identity: identityGeneration,
+        generated,
+        requiredOnInsert
       })
     }
     return columns

@@ -46,10 +46,13 @@ try {
       GITHUB_REF_TYPE: 'branch', GITHUB_REF_NAME: 'main', GITHUB_REF: 'refs/heads/main' }).publish, false)
     assert.equal(checkReleaseVersion(version, { ...env, GITHUB_EVENT_NAME: 'workflow_dispatch' }).publish, false)
   })
-  await test('same-workflow complete four-target bundle succeeds', async () => {
+  await test('same-workflow complete multi-target bundle succeeds', async () => {
     const gate = await aggregateRelease(await fixture(), identity)
-    assert.equal(gate.manifests.length, 4)
-    assert.equal(gate.assets.length, 6)
+    // 期望值直接从 TARGETS 推导，别再写死：发布矩阵一旦增删平台
+    // （比如去掉 macOS x64），这里要跟着变，写死就会误报。
+    const expectedAssets = TARGETS.reduce((sum, target) => sum + target.extensions.length, 0)
+    assert.equal(gate.manifests.length, TARGETS.length)
+    assert.equal(gate.assets.length, expectedAssets)
   })
   for (const [name, mutate] of [
     ['wrong commit', (m) => { m.sha = 'c'.repeat(40) }],
@@ -78,7 +81,9 @@ try {
     await test(`reject ${mode}`, async () => {
       const dir = await fixture()
       const folder = join(dir, 'release-win-x64')
-      const file = join(folder, artifactNames(identity, TARGETS[2])[0])
+      // 按平台名查，不要用固定下标：矩阵增删平台时下标会整体错位。
+      const winTarget = TARGETS.find((target) => target.platform === 'win')
+      const file = join(folder, artifactNames(identity, winTarget)[0])
       if (mode === 'missing platform') await rm(folder, { recursive: true })
       else if (mode === 'missing file') await rm(file)
       else await writeFile(file, mode === 'empty file' ? '' : 'changed-content')

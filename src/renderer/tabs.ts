@@ -94,6 +94,18 @@ interface Tab {
   filterVisible: boolean
   closing: boolean
   status: { text: string; isError: boolean } | null
+  /**
+   * 打开这张表时预览查询失败（标签保留在原位，但内容不可用）。
+   *
+   * 为什么需要标记：失败后标签会留在标签栏里。不加标记时它和正常标签
+   * 长得一模一样，用户点进去只看到一条错误——甚至误以为"这张表就是空的"。
+   * 标记后标题带 ⚠，标题工具提示给出失败原因。
+   *
+   * 为什么不直接关掉标签：`closeTab` 会把激活标签切到相邻一个，
+   * 导致所有「第 N 个标签」的假定整体漂移，调用方会对到别的标签上
+   * （实测让既有 GUI 用例开始断言到错误的标签）。
+   */
+  openedFailed: boolean
   /** 是否正在导出（防止重复点）。 */
   exporting: boolean
   exportProgress: string | null
@@ -182,7 +194,15 @@ export class ResultTabs {
     try {
       await tab.grid!.openTable(ref, desc)
     } catch (e) {
+      /*
+       * 首次打开失败：网格那边没有旧数据可回滚，只会显示错误。
+       * 这里把标签标记成"打开失败"，让它在标签栏里一眼可辨（标题前缀 ⚠），
+       * 而不是留下一个标题正确、内容却是空壳的标签。
+       */
       this.#cb.onStatus(`打开表失败：${errText(e)}`, true)
+      tab.openedFailed = true
+      tab.status = { text: `打开表失败：${errText(e)}`, isError: true }
+      this.#renderBar()
     }
     return tab.grid!
   }
@@ -278,6 +298,7 @@ export class ResultTabs {
       id,
       title,
       kind: 'command-summary',
+      openedFailed: false,
       grid: null,
       pane,
       source: { kind: 'sql', nodeId, sql },
@@ -326,6 +347,31 @@ export class ResultTabs {
     tab.filterVisible = visible
   }
 
+  /**
+   * 重新加载**某个表**的所有标签。
+   *
+   * 为什么要它：CSV 导入是**在渲染进程之外**发生的（主进程直接写库），
+   * 所以网格不会自己知道"数据变了"。导入成功后必须显式刷新，
+   * 否则用户看到的是导入前的旧数据——"明明提示导入成功，界面上一行都没多"。
+   *
+   * 按**节点 id** 匹配而不是按标题：标题会重复（两张表同名），
+   * 而节点 id 是唯一的。
+   *
+   * 刷新失败（连接断了、用户有未应用编辑）不向上抛：
+   * 导入**已经成功**了，刷新只是善后。善后失败不该把"导入成功"报成失败。
+   */
+  async reloadTableTabs(nodeId: string): Promise<void> {
+    for (const tab of this.#tabs) {
+      if (tab.kind !== 'grid' || tab.closing) continue
+      if (tab.source.kind !== 'table' || tab.source.ref.id !== nodeId) continue
+      try {
+        await tab.grid?.reload()
+      } catch {
+        /* 刷新失败不影响导入结果，状态栏已经由调用方给过提示 */
+      }
+    }
+  }
+
   /** 造一个标签：建 DOM pane、new 一个独立 ResultGrid、接到栈里。 */
   #createTab(title: string, source: TabSource): Tab {
     const id = this.#nextId++
@@ -372,7 +418,7 @@ export class ResultTabs {
     const tab: Tab = {
       id, title, kind: 'grid', grid, pane, source, baseSource: source,
       filterText: '', filterConditions: [], filterDraft: '', filterVisible: false,
-      closing: false, status: null, exporting: false, exportProgress: null
+      closing: false, status: null, openedFailed: false, exporting: false, exportProgress: null
     }
     this.#tabs.push(tab)
     this.#renderBar()
@@ -482,8 +528,9 @@ export class ResultTabs {
 
       const label = document.createElement('span')
       label.className = 'tab-chip-label'
-      label.textContent = t.title
-      label.title = t.title
+      label.textContent = t.openedFailed ? `⚠ ${t.title}` : t.title
+      label.title = t.status?.text ?? t.title
+      if (t.openedFailed) chip.classList.add('is-failed')
       label.addEventListener('click', () => this.#activate(t.id))
       chip.appendChild(label)
 

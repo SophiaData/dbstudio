@@ -70,7 +70,7 @@ Beta 必须完整支持以下流程：
 | P2 | 数据传输 | 流式导出、CSV 导入、任务进度、取消、回滚 | P0、P1 的结果/任务契约 | 10–15 天 |
 | P3 | 结构元数据与 ER | 外键、唯一约束、索引、触发器、ER 关系线 | P0 | 10–14 天 |
 | P4 | 结构编辑与 DDL | schema 选择、ALTER、约束/索引/触发器、DDL 预览 | P3 | 12–18 天 |
-| P5 | 比较与同步 | 表/数据/schema diff、同步 SQL、危险操作确认 | P3、P4 | 12–20 天 |
+| P5 ✅ | 比较与同步 | 表/数据/schema diff、同步 SQL、危险操作确认（2026-10-31 完成，见第 9 节） | P3、P4 | 12–20 天 |
 | P6 | 驱动扩展 | MySQL/MariaDB、驱动 SDK、契约测试和驱动发现 | P1、P3 | 10–15 天 |
 | P7 | Beta 交付 | 三平台、升级兼容、文档、性能和试用回归 | P0–P6 | 8–12 天 |
 
@@ -435,7 +435,7 @@ SQL 工作台参数面板/取消状态均通过；`DBSTUDIO_PG_URL` 未配置时
 - Modify: `src/main/ConnectionManager.ts`
 - Test: `tests/e2e-transfer-task.mjs`
 
-- [ ] **Step 1: 定义任务事件**
+- [x] **Step 1: 定义任务事件**
 
 ```ts
 export type TransferFormat = 'csv' | 'jsonl' | 'json' | 'sql-insert'
@@ -460,15 +460,15 @@ export interface TransferRequest {
 }
 ```
 
-- [ ] **Step 2: 实现主进程写文件**
+- [x] **Step 2: 实现主进程写文件**
 
 数据库驱动只返回结构化行块；文件句柄和临时文件由 `TransferManager` 在主进程持有。renderer 只订阅进度，不收集完整数据。
 
-- [ ] **Step 3: 增加取消、失败清理和原子提交**
+- [x] **Step 3: 增加取消、失败清理和原子提交**
 
 写入临时文件；成功后 rename 到目标文件；取消或失败时删除临时文件。任何截断值必须通过驱动完整值路径或直接拒绝，不允许静默写入预览。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证（本批改动保留工作区，未提交）**
 
 ```bash
 node tests/e2e-transfer-task.mjs
@@ -476,6 +476,20 @@ pnpm run typecheck
 git add src/core/transfer.ts src/main/TransferManager.ts src/core/api.ts src/driver-host src/main tests/e2e-transfer-task.mjs
 git commit -m "feat(transfer): add cancellable streaming export tasks"
 ```
+
+2026-10-28 实施记录：MiniMax M3.1 完成 P2.1 后端与 IPC，监督代理完成代码审查及独立验证。
+`verify:node` 29 项全部通过；导出专项 68 项通过、PostgreSQL 1 项跳过；
+独立边界测试 118 项通过。真实 Electron preload 四种格式调用及 SQLite 源库防覆盖验证通过。
+详见 `2026-10-28-p2-1-implementation-report.md`。
+
+本批是**有界分页导出任务基线**。以下缺口仍需补全，不应因上述步骤勾选而被视为完成：
+
+- 当前使用 LIMIT/OFFSET 逐页重跑，进度标注 `live-paged`，不保证快照一致性；
+  真实数据库流式游标、深分页性能和十万行内存基准尚未完成。
+- 长文本或大 BLOB 若被现有结果集接口标记截断，任务明确失败，不自动回查完整字段。
+- SQLite TEXT 含 U+0000 时，Node SQLite 桥接可能在该位置截短字符串且不设置截断标记；
+  当前已增加数据库侧检测并明确拒绝这类结果，避免静默导出损坏文本。自动修复和原始字节无损读取仍未实现。
+- PostgreSQL 实际服务验证未运行；导出向导的 BOM/编码选项仍属于后续补全项。
 
 ### Task P2.2：实现导出向导
 
@@ -488,24 +502,29 @@ git commit -m "feat(transfer): add cancellable streaming export tasks"
 - Modify: `src/renderer/style.css`
 - Test: `tests/gui-export-streaming.mjs`
 
-- [ ] **Step 1: 增加导出入口**
+- [x] **Step 1: 增加导出入口**
 
 表、当前结果集和自由 SQL 结果都必须进入同一个向导；向导明确显示“当前过滤结果”或“原始结果集”。
 
-- [ ] **Step 2: 添加格式和字段选项**
+- [ ] **Step 2: 添加完整格式和字段选项**
 
-支持 CSV、JSON Lines、JSON、INSERT SQL；显示编码、BOM、NULL 文本、是否包含表头和批大小。
+已支持 CSV、JSON Lines、JSON、INSERT SQL、NULL 文本、CSV 表头、行分隔符、JSON 缩进和批大小；
+编码与 BOM 选项仍待补全。
 
-- [ ] **Step 3: 增加进度和取消**
+- [x] **Step 3: 增加进度和取消**
 
 进度面板显示已读行数、写入字节、速度、当前状态和取消按钮。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
-node tests/gui-export-streaming.mjs
+node tests/e2e-transfer-wizard.mjs
+node tests/gui-export-wizard.mjs
 node tests/gui-export-integrity.mjs
 ```
+
+2026-10-29 实施记录：MiniMax 完成导出向导入口、范围选择、格式校验、进度轮询、任务取消和真实落盘验证。
+`e2e-transfer-wizard` 114 项通过，`gui-export-wizard` 43 项通过；P2.2 尚因缺少系统文件选择器、编码/BOM 选项而未完全关闭。
 
 ### Task P2.3：实现 CSV 导入和事务回滚
 
@@ -522,7 +541,7 @@ node tests/gui-export-integrity.mjs
 - Test: `tests/e2e-import-validation.mjs`
 - Test: `tests/gui-import.mjs`
 
-- [ ] **Step 1: 写 CSV 解析和校验测试**
+- [x] **Step 1: 写 CSV 解析和校验测试**
 
 覆盖 UTF-8 BOM、引号内换行、重复列名、缺列、多列、空字符串、NULL 文本、数字、布尔、长字段和坏编码。
 
@@ -541,16 +560,24 @@ interface ImportPreview {
 }
 ```
 
-- [ ] **Step 3: 实现批量写入**
+- [x] **Step 3: 实现批量写入**
 
 使用临时表或单事务批量插入。遇到任一校验/数据库错误时回滚整个导入，并返回行号、列名和数据库错误。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 node tests/e2e-import-validation.mjs
+node tests/e2e-import-task.mjs
 node tests/gui-import.mjs
 ```
+
+2026-10-29 实施记录：CSV 解析、主进程导入任务、SQLite/PostgreSQL 参数化批量写入、
+事务提交/回滚、取消回滚和表节点导入向导已完成。解析测试 25 项、后端导入 32 项、
+GUI 导入 53 项通过；PostgreSQL 服务未配置时明确跳过。
+
+仍待补全：导入文件系统选择器、主进程 previewImport 通道和真正的有限样例预览；
+当前主进程先完整读取并校验 CSV，再按批次写入，超大文件会占用与文件大小相关的主进程内存。
 
 ## 7. P3：结构元数据和 ER 图
 
@@ -647,28 +674,41 @@ DBSTUDIO_PG_URL=... node tests/e2e-postgresql-metadata.mjs
 **Files:**
 
 - Modify: `src/renderer/er-diagram.ts`
+- Create: `src/renderer/er-relations.ts`
 - Modify: `src/renderer/tree.ts`
 - Modify: `src/renderer/main.ts`
 - Modify: `src/renderer/style.css`
+- Test: `tests/e2e-er-relations.mjs`
 - Test: `tests/gui-er-relations.mjs`
 
-- [ ] **Step 1: 增加选表入口**
+- [x] **Step 1: 增加选表入口**
 
 默认选择当前 schema；用户可以勾选表、按名称过滤、全选当前结果、清空选择。超过 100 张表时先要求筛选，不静默截断。
 
-- [ ] **Step 2: 绘制关系线**
+- [x] **Step 2: 绘制关系线**
 
 先计算所有表框位置，再按 `ForeignKeyDescription` 绘制边；边上显示列名，鼠标悬停显示约束名、删除规则和更新规则。
 
-- [ ] **Step 3: 保存布局和导出**
+- [x] **Step 3: 保存布局和导出**
 
 按连接/schema保存表框坐标；支持 SVG 导出。布局数据只保存节点 id 和坐标，不保存数据库内容。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 node tests/gui-er-relations.mjs
 ```
+
+2026-10-29 实施记录：已完成真实外键关系接入。关系计算抽为无 DOM 的
+`er-relations.ts`，区分 `undefined` / 空数组 / 有关系，支持复合列映射、跨
+schema 匹配、悬空关系和歧义目标的明确状态；SVG 关系线来自该计算结果，并随
+表框拖动更新。已增加纯逻辑契约 9 项和 GUI 验收 11 项，均通过。
+
+2026-10-29 后续实施记录：MiniMax 完成选表/过滤、按连接和 schema 集合隔离布局、
+SVG 文件导出和异步绘制竞态防护。新增布局纯逻辑契约 44 项、选择与导出 GUI
+验收 24 项；`typecheck`、`build`、ER 关系 GUI 回归和验证清单均通过。
+布局存储只保留节点 id 与坐标，导出不修改布局存储；超过 100 张表时要求先搜索
+并选择子集。PostgreSQL 现场验证仍依赖 `DBSTUDIO_PG_URL`。
 
 ## 8. P4：结构编辑和 DDL
 
@@ -685,7 +725,7 @@ node tests/gui-er-relations.mjs
 - Modify: `src/renderer/ddl.ts`
 - Test: `tests/e2e-ddl-preview.mjs`
 
-- [ ] **Step 1: 定义 DDL 操作**
+- [x] **Step 1: 定义 DDL 操作**
 
 ```ts
 type TableChange =
@@ -739,6 +779,12 @@ interface DdlPreview {
 node tests/e2e-ddl-preview.mjs
 ```
 
+2026-10-29 实施记录：已先完成 `src/core/ddl.ts` 的纯逻辑预览契约，支持建表、
+改表、索引、外键和删除对象，输出确定性 SQL、破坏性警告和事务需求；恶意标识符、
+SQL 片段、空变更和复合外键列数错误均有拒绝测试。`e2e-ddl-preview` 17 项通过。
+当前仍未完成：将预览接入现有 renderer DDL 对话框、主进程/驱动执行契约，以及
+SQLite/ PostgreSQL 的真实 DDL 预览到执行一致性验收。
+
 ### Task P4.2：完善 PostgreSQL/SQLite 对象编辑器
 
 **Files:**
@@ -767,17 +813,94 @@ node tests/e2e-ddl.mjs
 
 ## 9. P5：结构和数据比较
 
+> **落地状态（已完成）**
+>
+> 实际实现没有单独建 `CompareManager.ts`：快照与比较都是**只读**操作，
+> 数据来源仍是 `ConnectionManager` 已建立的会话与驱动宿主，拆一个中间层
+> 只会多一层转发。因此两个能力落在 `ConnectionManager` 上：
+>
+> - `captureSchemaSnapshot(connectionId, schema?)` → `core/compare.ts` 的 `diffSchema`
+> - `compareTableData({ sourceTableNodeId, targetTableNodeId, keyColumns?, maxRows? })`
+>   → `core/compare.ts` 的 `compareDataRows`
+>
+> 表身份用 **schema + 表名**（`SnapshotTable`），不用 adapter 的节点 id——
+> id 编码是驱动私有格式，跨连接比较时两侧 id 前缀不同，按 id 对齐会把同一张表判成两张。
+>
+> 验证结果（2026-10-31）：
+>
+> ```bash
+> pnpm run test:structure-compare   # 13 通过 / 0 失败
+> pnpm run test:data-compare        # 7 通过 / 0 失败
+> pnpm run test:compare-live        # 14 通过 / 0 失败（真实 SQLite 连接）
+> pnpm run test:gui-compare         # 4 项 PASS（面板无执行入口）
+> ```
+>
+> 行为边界（都有测试钉住）：删除类语句只生成并标 `destructive`，面板**没有**“执行”按钮；
+> 超过 `maxRows` 直接拒绝而不是截断；长值（>120 字符）按全文比较，展示时折叠成
+> `<长度, fnv1a:hash>`；视图/例程任一侧定义为 `null` 时不生成删除重建。
+>
+> **只读审查后补的拒绝规则**（每条都有用例）：
+>
+> 1. **跨方言数据比较直接拒绝**。PostgreSQL 把 `int8`/`numeric` 当文本返回，
+>    SQLite 当 number，比较键 `[1]` 与 `["1"]` 会被当成两个键 → 每行同时生成
+>    INSERT + DELETE，整表被"同步"成删除重建。用例：`test:compare-cross-dialect`。
+> 2. **只浏览数据源不能拍结构快照**（`captureSchemaSnapshot` 拒绝 Redis/Kafka）。
+>    否则空快照会让目标端所有表被判成"目标端独有" → 全库 `DROP TABLE`。
+> 3. **结构比较要求同方言**，面板与主进程都拦。
+> 4. **SQLite 不再生成 `ALTER COLUMN ... TYPE`**（该方言没有这条语法），
+>    改为 `StructureDiff.warnings` 里明确写"需要手工重建表"。
+> 5. **新建表连索引/外键/唯一/CHECK 一起生成**，否则新表会静默丢约束。
+> 6. **没比到的地方必须说出来**：视图定义缺失、例程未提供、目标端缺列、
+>    差异列表超过 500 条，都会在面板上给出告警或覆盖范围说明，
+>    避免"0 处差异"被读成"结构一致"。
+>
+> **已知未覆盖**：视图定义与例程定义仍未读取（快照里 `definition: null`、
+> `routines: []`），因此这两类变更**比不出来**，界面用告警明示而不是假装一致。
+>
+> **已知不稳定（未修，属既有问题）**：`test:gui-mutation-transaction`（75 项）
+> 在整组运行与单跑时都会概率性失败，卡点在第 9/11/17 段的
+> `waitForSelector('.grid-cell-editor')`。已核实 **HEAD 原版同样会失败**
+> （实测 HEAD 版本 3 次里 1 次通过），因此这不是 P5 / Redis/Kafka 改动引入的。
+> 期间的排查发现了几处测试自身的脆弱假设（值得后续单独修）：
+>
+> - `waitForFunction(fn, { timeout })` 少传了 arg 位，options 被当成 arg，
+>   超时设置不生效（正确写法是 `(fn, arg, options)`）；
+> - 切标签后立即双击，网格可能还在异步重绘；
+> - 用「第 N 列的值」定位单元格会命中行号列，且删行后列位置会变；
+> - 树是按连接展开的，`'表'` 文件夹有多个，按名字找会命中别的连接。
+>
+> 这一轮做了系统性排查（固定负载、5 次一组的 A/B 对比），结论如下：
+>
+> **已确认为测试自身缺陷（4 类）**
+> 1. `waitForFunction(fn, { timeout })` 少传了 arg 位，options 被当成 arg，
+>    超时设置不生效——文件里共有 4 处这种写法；
+> 2. 切标签后固定 sleep，而 pane 是异步重绘的；
+> 3. 按「第 N 列」定位单元格会命中行号列 `.grid-rownum`，且表头文本可能带
+>    排序箭头（`name▲`），按 `name` 精确匹配会失败；
+> 4. 树里每个连接都有自己的「表」文件夹，按 `'表'` 找会命中别的连接。
+>
+> **排查中发现的真实产品缺陷（已记录，未在本轮修改）**
+> - `ResultTabs.openTable()` 在预览失败时**保留一个标题正确、内容为空的标签**；
+> - `ResultGrid.#openTableUnchecked()` 在 `#openCursor` 失败后仍继续执行
+>   `#renderHeader`/`#render`，用空的 `#columns` 覆盖掉错误提示，画出
+>   「只有 24 行行号、没有列头」的骨架表。
+>
+> 两处都试过修（关标签 / 失败即 return），但实测会让既有用例
+> `★ Tab B 收到广播后仍然保持未应用脏编辑` 稳定失败——因为失败返回会让广播刷新
+> 后的网格停在空中状态。**修复需要重新设计"失败后恢复旧数据"的路径**，
+> 不是加个 return 能解决的。为避免留下回归，渲染层改动已全部 `git checkout` 回退，
+> 当前 GUI 组与改动前完全一致（19/20，唯一失败项即本条）。
+
 ### Task P5.1：实现结构快照和差异模型
 
 **Files:**
 
 - Create: `src/core/compare.ts`
-- Create: `src/main/CompareManager.ts`
 - Modify: `src/core/api.ts`
 - Modify: `src/main/ConnectionManager.ts`
 - Test: `tests/e2e-structure-compare.mjs`
 
-- [ ] **Step 1: 定义快照**
+- [x] **Step 1: 定义快照**
 
 ```ts
 interface SchemaSnapshot {
@@ -802,15 +925,15 @@ type SchemaChange =
   | { readonly kind: 'alter'; readonly objectType: string; readonly target: string; readonly statements: readonly string[] }
 ```
 
-- [ ] **Step 2: 实现确定性 diff**
+- [x] **Step 2: 实现确定性 diff**
 
 对象按 schema、类型、名称排序；列按 ordinal；约束和索引按规范化结构比较。差异输出必须不依赖数据库返回顺序。
 
-- [ ] **Step 3: 生成同步 SQL**
+- [x] **Step 3: 生成同步 SQL**
 
 默认只生成 SQL，不自动执行；危险删除、类型缩窄和可能丢数据的操作标记为 destructive。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 node tests/e2e-structure-compare.mjs
@@ -821,25 +944,24 @@ node tests/e2e-structure-compare.mjs
 **Files:**
 
 - Modify: `src/core/compare.ts`
-- Modify: `src/main/CompareManager.ts`
 - Create: `src/renderer/compare-panel.ts`
 - Modify: `src/renderer/style.css`
 - Test: `tests/e2e-data-compare.mjs`
 - Test: `tests/gui-compare.mjs`
 
-- [ ] **Step 1: 定义键和批量比较**
+- [x] **Step 1: 定义键和批量比较**
 
 优先使用主键；没有主键时要求用户选择唯一列组合，禁止默认按行号比较。大表采用分页 hash 或按键范围分批。
 
-- [ ] **Step 2: 显示差异**
+- [x] **Step 2: 显示差异**
 
 支持仅源端、仅目标端、值不同和相同四种状态；长值显示 hash、长度和按需取全文。
 
-- [ ] **Step 3: 生成同步计划**
+- [x] **Step 3: 生成同步计划**
 
 同步计划必须先展示 INSERT、UPDATE、DELETE 数量和删除风险；用户确认后生成 SQL 或进入导入任务。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 node tests/e2e-data-compare.mjs
@@ -847,6 +969,25 @@ node tests/gui-compare.mjs
 ```
 
 ## 10. P6：驱动扩展和第三个数据库
+
+> **已交付的额外范围（2026-10-31）**：Redis 与 Kafka 的**只浏览**接入。
+> 这不是 P6 计划内的 MySQL，而是"非 SQL 数据源"的第一批验证：
+>
+> - `src/drivers/nosql-base.ts`：`NoSqlAdapterBase` 把 18 个 SQL/编辑/DDL 方法
+>   统一抛 `unsupported_method`，避免"半实现"给出错误语义；
+> - `src/drivers/redis/adapter.ts`：库 → key 两级浏览（SCAN + 类型/TTL），
+>   只发 PING/INFO/SELECT/SCAN/TYPE/PTTL，不读值内容；
+> - `src/drivers/kafka/adapter.ts`：topic → 分区浏览（Admin 只读 API），
+>   不建 consumer group、不消费、不写入；
+> - 渲染进程：非表节点若带 `meta`，详情面板渲染成属性表（`showDetail` 分支）。
+>
+> 一条**实测踩到的约束**：`pickQuotingRules` 要求所有方言的引号规则完全一致，
+> 否则整个应用拿不到引号规则（表格排序会被禁用）。只浏览方言也必须是
+> `"` / `"` / double，契约测试 `test:nosql-drivers` 已把它钉住。
+>
+> 验证结果：`test:nosql-drivers` 38 通过；`test:nosql-external`（真实
+> Redis 7 / Kafka 3.9 容器）19 通过；打包后的 arm64 应用实测能连上两者并列出
+> 库/键与 topic/分区，SQL 请求被拒绝。
 
 ### Task P6.1：收敛驱动 SDK 契约
 

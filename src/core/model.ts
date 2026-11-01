@@ -11,6 +11,15 @@
  * 让「一套 UI 适配多方言」靠数据而不是靠类型层级实现。
  */
 
+import type {
+  CheckConstraintDescription,
+  ForeignKeyDescription,
+  IndexDescription,
+  MetadataCapabilities,
+  TriggerDescription,
+  UniqueConstraintDescription
+} from './metadata'
+
 /** 节点种类。UI 只认这些值，永远不认识具体方言。 */
 export type NodeKind =
   | 'connection'
@@ -51,7 +60,9 @@ export interface ObjectRef {
   readonly meta?: Readonly<Record<string, string | number | boolean | null>>
 }
 
-/** 列的完整描述，`describeTable` 的产物，用于结果集网格决定能否编辑。 */
+/**
+ * 列的完整描述，`describeTable` 的产物，用于结果集网格决定能否编辑。
+ */
 export interface ColumnDescription {
   readonly name: string
   /** 方言原始类型名，如 `VARCHAR(255)` / `INTEGER`。 */
@@ -60,6 +71,39 @@ export interface ColumnDescription {
   /** 主键序号（1 起）；非主键为 null。 */
   readonly primaryKeyOrdinal: number | null
   readonly defaultValue: string | null
+  /**
+   * 身份列的生成方式。
+   *
+   * `undefined` 表示驱动没有提供这类信息；`null` 表示确认不是身份列。
+   * NOT NULL 身份列可能没有 `defaultValue`，导入向导必须结合本字段判断
+   * “省略该列时数据库是否会自动生成值”。
+   */
+  readonly identity?: 'always' | 'by-default' | null
+  /**
+   * 生成列类型。
+   *
+   * `undefined` 表示驱动没有提供这类信息；`null` 表示确认不是生成列。
+   */
+  readonly generated?: 'virtual' | 'stored' | null
+  /**
+   * 插入时该列是否**必须**提供值（只基于已知列定义的静态判断）。
+   *
+   * 三态语义（与 `identity` / `generated` 一致，`undefined ≠ false`）：
+   *   - `undefined` → 驱动无法可靠判断（例如 SQLite 无法确定该列是否为
+   *     rowid 别名）。UI 必须按"未知"处理，**不能**据此禁用/强制输入。
+   *   - `true` → 仅凭列定义即可确定：省略该列会导致插入失败
+   *     （NOT NULL、无默认值、非 identity/generated，且不是 SQLite 的
+   *     rowid 别名这种"省略即自动生成"的情况）。
+   *   - `false` → 按列定义省略该列是安全的（有默认值、可空、identity/generated，
+   *     或 SQLite rowid 别名会自动生成）。
+   *
+   * 边界：这是**静态必填**，不是"绝对可写"的承诺。CHECK 约束、触发器、
+   * DEFAULT 表达式本身求值失败等运行时规则不在此字段的判定范围内——
+   * 本字段只回答"列的 DDL 里是否写着必须给值"。
+   */
+  readonly requiredOnInsert?: boolean
+  /** SQLite hidden/generated 列标记；驱动不支持时省略。 */
+  readonly hidden?: boolean
 }
 
 /**
@@ -112,7 +156,25 @@ export interface TableCreateSpec {
   readonly columns: readonly ColumnCreateSpec[]
 }
 
-/** 表结构描述。 */
+/**
+ * 表结构描述。
+ *
+ * ===== 结构元数据为什么挂在 describeTable 上，而不是单独的 RPC =====
+ *
+ * 见 `metadata.ts` 文件头：一处返回才能保证「列」和「外键/索引」来自同一份快照，
+ * 否则两次调用之间表结构变了，UI 会画出对不上的 ER 图。
+ *
+ * ===== 下面几个可选字段的三态语义（务必读）=====
+ *
+ *   - `undefined` → 驱动**没有提供**这类信息（老驱动，或该方言不支持）。
+ *     UI 必须显示"不支持/未知"，**不能**显示成"无"——
+ *     否则用户会以为表真的没有外键，然后写出孤儿数据。
+ *   - `[]`        → 驱动支持这类信息，且**确认没有**。
+ *   - `[...]`     → 有对象。
+ *
+ * 判定请统一走 `metadataAvailability()`（`metadata.ts`），不要在各处散着写
+ * `value === undefined`——那是最容易漏掉一个分支的地方。
+ */
 export interface TableDescription {
   readonly id: string
   readonly columns: readonly ColumnDescription[]
@@ -125,6 +187,16 @@ export interface TableDescription {
    * 而不是等到用户改了单元格才报错。
    */
   readonly hasUniqueKey: boolean
+  /** 唯一约束（表结构的一部分），与索引分开表达。 */
+  readonly uniqueConstraints?: readonly UniqueConstraintDescription[]
+  /** 外键约束。ER 图的关系线就来自这里。 */
+  readonly foreignKeys?: readonly ForeignKeyDescription[]
+  /** 索引（含唯一索引与部分索引）。 */
+  readonly indexes?: readonly IndexDescription[]
+  /** CHECK 约束。 */
+  readonly checks?: readonly CheckConstraintDescription[]
+  /** 触发器。 */
+  readonly triggers?: readonly TriggerDescription[]
 }
 
 /**
@@ -144,4 +216,16 @@ export interface DriverCapabilities {
   readonly hasSchema: boolean
   /** 查询能否取消。 */
   readonly supportsCancel: boolean
+  /**
+   * 该驱动支持哪些结构元数据。
+   *
+   * undefined 表示**旧驱动没有声明这件事**——UI 要回退到
+   * 「看这张表的 describeTable 里有没有对应字段」来判断，
+   * 而不是直接当成"不支持"。
+   *
+   * 它是**驱动级静态声明**（连上时给一次），
+   * 与 `TableDescription` 上的**表级实际数据**是两个层次：
+   * 声明支持外键但某张表没有外键，是完全正常的状态。
+   */
+  readonly metadata?: MetadataCapabilities
 }

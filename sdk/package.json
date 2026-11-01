@@ -32,6 +32,8 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "dependencies": {
+    "ioredis": "^5.11.1",
+    "kafkajs": "^2.2.4",
     "pg": "^8.23.1",
     "ssh2": "^1.17.0"
   },

@@ -15,6 +15,7 @@
  * 三边共用一个类型，改不动就会编译报错。
  */
 
+import type { DataCompareRequest, DataCompareResult, SchemaSnapshot } from './compare'
 import type { ConnectionConfig } from './dialect'
 import type { TestConnectionResult, DialectInfo, SecretInput } from './driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
@@ -27,6 +28,16 @@ import type {
   SqlHistoryEntry,
   SqlLibrarySnapshot
 } from './sql-library'
+import type {
+  ImportPreview,
+  ImportPreviewRequest,
+  ImportProgress,
+  ImportRequest,
+  ImportResult,
+  TransferProgress,
+  TransferRequest,
+  TransferResult
+} from './transfer'
 
 /** 连接在 UI 里的展示态。会话态（是否已连上）单独放，避免和配置混在一起。 */
 export interface ConnectionSummary {
@@ -118,6 +129,20 @@ export interface DbStudioApi {
 
   /** 读取表结构。按需调用——不要在列目录时预取。 */
   describeTable(tableNodeId: string): Promise<TableDescription>
+
+  /**
+   * 读取一个已连接数据源的结构快照，供比较使用。
+   *
+   * 只读：不生成、不执行同步 SQL。schema 为空时读取该连接直接可见的表和视图。
+   */
+  captureSchemaSnapshot(connectionId: string, schema?: string | null): Promise<SchemaSnapshot>
+
+  /**
+   * 按主键（或指定唯一列）比较两张表的数据。
+   *
+   * 只读：返回差异和同步 SQL，不执行任何写操作；同步计划里的 DELETE 需要用户另行确认执行。
+   */
+  compareTableData(request: DataCompareRequest): Promise<DataCompareResult>
 
   /**
    * 执行 SQL，返回第一页结果。
@@ -267,6 +292,74 @@ export interface DbStudioApi {
 
   /** 清空执行历史，不动收藏。 */
   clearSqlHistory(): Promise<void>
+
+  // ---- 流式导出（P2.1） ----
+
+  /**
+   * 启动一个流式导出任务。**立即返回**任务 id 与初始进度，
+   * 导出在后台跑——渲染进程永远不接触行数据，内存不随总行数增长。
+   *
+   * 参数错误（格式不支持、路径为空、来源不完整）会**同步抛错**，
+   * 便于 UI 立刻给出反馈；真正的导出失败则体现在任务状态里。
+   *
+   * 注意：导出结果是**分页读取**得到的，不是时间点快照
+   * （`consistency: 'live-paged'`），UI 应如实告知用户。
+   */
+  startTransfer(request: TransferRequest): Promise<TransferProgress>
+
+  /** 查询导出任务进度。未知任务 id 返回 null。 */
+  getTransferProgress(taskId: string): Promise<TransferProgress | null>
+
+  /**
+   * 取消导出任务。
+   *
+   * 返回 true 表示已接受取消；false 表示任务不存在、已结束，
+   * 或已进入不可取消的原子提交阶段。
+   *
+   * 这是**任务级**取消：不会影响同一连接上正在跑的其它查询。
+   */
+  cancelTransfer(taskId: string): Promise<boolean>
+
+  /** 等待导出任务结束，返回终态结果。 */
+  waitTransfer(taskId: string): Promise<TransferResult>
+
+  // ---- CSV 导入（P2.3） ----
+
+  /** 在主进程读取并有界解析 CSV；完整文件内容不会跨 IPC。 */
+  previewImport(request: ImportPreviewRequest): Promise<ImportPreview>
+
+  /** 启动 CSV 导入任务。主进程读取文件并分批写库，renderer 不接触行内容。 */
+  startImport(request: ImportRequest): Promise<ImportProgress>
+
+  /** 查询导入进度。未知任务 id 返回 null。 */
+  getImportProgress(taskId: string): Promise<ImportProgress | null>
+
+  /** 请求取消导入；当前批次结束后回滚。提交阶段返回 false。 */
+  cancelImport(taskId: string): Promise<boolean>
+
+  /** 等待导入结束，返回终态与失败位置。 */
+  waitImport(taskId: string): Promise<ImportResult>
+
+  /**
+   * 打开系统文件选择框，让用户挑一个 CSV 文件。
+   *
+   * 返回值只有三种：
+   *   - `string`：用户选中的**绝对路径**（单选，一次只给一个文件）
+   *   - `null`：用户取消、什么都没选、或没有可用的发起窗口
+   *
+   * ===== 刻意不做的三件事 =====
+   *
+   * 1. **不读文件、不回传文件内容。** 这里只解决"文件在哪"，
+   *    内容解析仍然是主进程的事（`previewImport` / `startImport`）。
+   *    渲染进程拿到 CSV 全文没有任何好处，只有内存与越权的风险。
+   * 2. **不返回未经用户授权的路径。** 取消就是 `null`，
+   *    绝不会"随便给一个默认路径"——那等于替用户决定了数据来源。
+   * 3. **不接受调用方传入路径。** 参数为空即"请弹框"，
+   *    不提供"指定要打开哪个文件"的通道。
+   *
+   * 对话框异常会向调用方传播，UI 应显示错误；只有取消、空结果或没有发起窗口才返回 `null`。
+   */
+  chooseImportFile(): Promise<string | null>
 }
 
 /** preload 注入到 window 上的全局名。 */
@@ -283,6 +376,8 @@ export const IPC = {
   testConnection: 'dbstudio:testConnection',
   listChildren: 'dbstudio:listChildren',
   describeTable: 'dbstudio:describeTable',
+  captureSchemaSnapshot: 'dbstudio:captureSchemaSnapshot',
+  compareTableData: 'dbstudio:compareTableData',
   runQuery: 'dbstudio:runQuery',
   executeStatement: 'dbstudio:executeStatement',
   explain: 'dbstudio:explain',
@@ -308,7 +403,17 @@ export const IPC = {
   recordSqlHistory: 'dbstudio:recordSqlHistory',
   saveSql: 'dbstudio:saveSql',
   removeSavedSql: 'dbstudio:removeSavedSql',
-  clearSqlHistory: 'dbstudio:clearSqlHistory'
+  clearSqlHistory: 'dbstudio:clearSqlHistory',
+  startTransfer: 'dbstudio:startTransfer',
+  getTransferProgress: 'dbstudio:getTransferProgress',
+  cancelTransfer: 'dbstudio:cancelTransfer',
+  waitTransfer: 'dbstudio:waitTransfer',
+  previewImport: 'dbstudio:previewImport',
+  startImport: 'dbstudio:startImport',
+  getImportProgress: 'dbstudio:getImportProgress',
+  cancelImport: 'dbstudio:cancelImport',
+  waitImport: 'dbstudio:waitImport',
+  chooseImportFile: 'dbstudio:chooseImportFile'
 } as const
 
 /**

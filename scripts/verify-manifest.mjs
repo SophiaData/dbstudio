@@ -48,6 +48,7 @@ export const STEPS = [
   { id: 'test:persist', title: '持久化与凭据 e2e', group: 'node' },
   { id: 'test:mutations', title: '增删改与完整取值 e2e', group: 'node' },
   { id: 'test:ddl', title: 'DDL 与编辑连接 e2e', group: 'node' },
+  { id: 'test:ddl-preview', title: '结构化 DDL 预览与风险契约', group: 'node' },
   { id: 'test:connection-lifecycle', title: '连接故障恢复与并发建连', group: 'node' },
   { id: 'test:driver-host-stress', title: '驱动宿主连续启动与退出压力', group: 'node' },
   { id: 'test:sql-script-parser', title: '方言级 SQL 脚本切分与源码位置', group: 'node' },
@@ -60,6 +61,36 @@ export const STEPS = [
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
   { id: 'test:sql-parameters-parser', title: 'SQL 参数扫描边界与值校验', group: 'node' },
   { id: 'test:sql-params', title: '参数化 SQL 与绑定安全 e2e', group: 'node' },
+  { id: 'test:transfer-task', title: '流式导出任务与文件清理 e2e', group: 'node' },
+  { id: 'test:transfer-boundaries', title: '导出取消与文件保全边界', group: 'node' },
+  { id: 'test:transfer-wizard', title: '导出向导的校验与范围契约', group: 'node' },
+  { id: 'test:import-validation', title: 'CSV 导入解析与预览契约', group: 'node' },
+  { id: 'test:import-preview', title: 'CSV 有界预览与解析诊断', group: 'node' },
+  { id: 'test:column-identity-contract', title: '列 identity 与 generated 元数据契约', group: 'node' },
+  { id: 'test:import-required-columns', title: '导入必填列与 requiredOnInsert 契约', group: 'node' },
+  { id: 'test:import-file-dialog', title: '原生 CSV 文件选择器与 IPC 白名单契约', group: 'node' },
+  // --pure 在 GUI 初始化前退出，不启 Electron、不创建夹具。
+  { id: 'test:import-form', title: 'CSV 导入表单与映射纯函数校验', group: 'node' },
+  // SQLite 是 node 组的固定覆盖；PG 分支由测试内的 DBSTUDIO_PG_URL 可选启用，
+  // 因而 --require-external 不会强制这层内嵌分支。
+  { id: 'test:import-task', title: 'CSV 导入任务、SQLite 事务与回滚 e2e（PG 可选）', group: 'node' },
+  // 以下三条是导入链路的**安全回归**：SQLite 走真实 node:sqlite，
+  // PostgreSQL 走内存打包 + **假 pg Client**，因此属于 node 组、**不构成真 PG 证据**；
+  // 真 PG 的导入成功/回滚仍需 `test:import-task` 配合 `DBSTUDIO_PG_URL`。
+  { id: 'test:import-driver-safety', title: '导入驱动安全：影响行数、CRLF 与错误脱敏（模拟 PG）', group: 'node' },
+  { id: 'test:import-rpc-safety', title: '导入 RPC 超时竞态：宿主隔离、在途拒绝与 commit 结果未知', group: 'node' },
+  { id: 'test:import-pg-transaction-state', title: 'PG 事务控制语句与内部状态同步（模拟 pg Client）', group: 'node' },
+  // 纯函数回归：不启 Electron、不连数据库，只锁「导入终态文案」的措辞安全——
+  // 提交结果未知 / 宿主被终止 / 回滚失败 三类都不得谎称"已回滚"。
+  { id: 'test:import-result-messages', title: '导入终态结果文案分类：提交结果未知/宿主终止/回滚失败', group: 'node' },
+  { id: 'test:metadata-contract', title: '结构元数据跨进程契约', group: 'node' },
+  { id: 'test:sqlite-metadata', title: 'SQLite 外键、索引、CHECK 与触发器读取', group: 'node' },
+  { id: 'test:er-relations', title: 'ER 外键关系纯逻辑契约', group: 'node' },
+  { id: 'test:er-layout', title: 'ER 布局 key 与布局 JSON 纯逻辑契约', group: 'node' },
+  { id: 'test:structure-compare', title: '结构快照确定性比较与同步 SQL', group: 'node' },
+  { id: 'test:data-compare', title: '按唯一键的数据比较与同步计划', group: 'node' },
+  { id: 'test:compare-live', title: '真实 SQLite 连接上的结构快照与数据比较（只读）', group: 'node' },
+  { id: 'test:nosql-drivers', title: 'Redis / Kafka 只浏览驱动契约', group: 'node' },
   { id: 'test:release-gate', title: '发布门禁与 draft 附件校验', group: 'node' },
   { id: 'test:packaged-smoke', title: '打包冒烟脚本的离线回归', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，
@@ -73,6 +104,7 @@ export const STEPS = [
   { id: 'test:gui', title: 'GUI 冒烟（DOM / API 注入 / safeStorage）', group: 'gui' },
   { id: 'test:gui-layout', title: '布局持久化 GUI', group: 'gui' },
   { id: 'test:gui-hidden', title: '后台 GUI 模式', group: 'gui' },
+  { id: 'test:gui-compare', title: '结构 / 数据比较面板 GUI（只生成 SQL）', group: 'gui' },
   { id: 'test:gui-flow', title: 'GUI 真实交互（全流程）', group: 'gui' },
   { id: 'test:gui-features', title: '新功能 GUI（搜索/排序/统计/增删行）', group: 'gui' },
   { id: 'test:gui-round3', title: '第三轮 GUI（多标签/DDL/编辑连接）', group: 'gui' },
@@ -83,6 +115,10 @@ export const STEPS = [
   { id: 'test:gui-sql-library', title: 'SQL 历史与收藏 GUI', group: 'gui' },
   { id: 'test:gui-tab-context', title: '多标签上下文 GUI（导出/筛选跟随）', group: 'gui' },
   { id: 'test:gui-export-integrity', title: '导出完整性 GUI（截断拒绝导出）', group: 'gui' },
+  { id: 'test:gui-export-wizard', title: '导出向导 GUI（真实落盘与来源规则）', group: 'gui' },
+  { id: 'test:gui-import', title: 'CSV 导入向导 GUI（真实入库与失败回滚）', group: 'gui' },
+  { id: 'test:gui-er-relations', title: 'ER 图真实外键关系 GUI', group: 'gui' },
+  { id: 'test:gui-er-selection-export', title: 'ER 图选择、布局隔离与 SVG 导出 GUI', group: 'gui' },
   { id: 'test:gui-transaction-lifecycle', title: '事务生命周期 GUI（离开保护/提交/回滚）', group: 'gui' },
   { id: 'test:gui-mutation-transaction', title: '增删改的事务归属 GUI（跨标签同步）', group: 'gui' },
   { id: 'test:gui-grid-lifecycle', title: '网格真实查询、分页与销毁竞争', group: 'gui' },
@@ -96,6 +132,18 @@ export const STEPS = [
   { id: 'test:gui-sql-cancel', title: 'SQL 工作台参数面板与取消状态 GUI', group: 'gui' },
 
   // ---- 需要外部服务 ----
+  {
+    id: 'test:compare-cross-dialect',
+    title: '比较的拒绝规则（跨方言 / 只浏览数据源）',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
+  {
+    id: 'test:nosql-external',
+    title: 'Redis / Kafka 真实服务器浏览（只读）',
+    group: 'external',
+    env: ['DBSTUDIO_REDIS_URL', 'DBSTUDIO_KAFKA_BROKERS']
+  },
   {
     id: 'test:sql-params-postgres',
     title: 'PostgreSQL 参数绑定与执行身份取消',
@@ -111,6 +159,12 @@ export const STEPS = [
   {
     id: 'test:postgres',
     title: 'PostgreSQL 驱动 e2e',
+    group: 'external',
+    env: ['DBSTUDIO_PG_URL']
+  },
+  {
+    id: 'test:postgresql-metadata',
+    title: 'PostgreSQL 外键、索引、CHECK 与触发器读取',
     group: 'external',
     env: ['DBSTUDIO_PG_URL']
   },
@@ -187,5 +241,4 @@ export function checkVersionMatch(tag, version) {
   const normalized = tag.startsWith('v') ? tag.slice(1) : tag
   return { ok: normalized === version, tag: normalized, version }
 }
-
 

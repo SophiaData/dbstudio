@@ -16,13 +16,20 @@
 import type { DriverRegistry } from '../core/registry'
 import { createPostgresAdapter, POSTGRESQL_INFO } from './postgresql'
 import { createSqliteAdapter, SQLITE_INFO } from './sqlite'
+import { createRedisAdapter } from './redis/adapter'
+import { REDIS_INFO } from './redis/info'
+import { createKafkaAdapter } from './kafka/adapter'
+import { KAFKA_INFO } from './kafka/info'
 
 /** 把本仓库自带的所有驱动注册进注册表。 */
 export function registerBuiltinDrivers(registry: DriverRegistry): void {
   registry.register(createSqliteAdapter, SQLITE_INFO)
   // 第二个方言：PostgreSQL。注册即全链路生效（UI 下拉框 / 宿主加载 / 测试遍历）。
   registry.register(createPostgresAdapter, POSTGRESQL_INFO)
+  // 只浏览的非 SQL 数据源：测试连接 + 树浏览，SQL 方法一律 unsupported_method。
+  registry.register(createRedisAdapter, REDIS_INFO)
+  registry.register(createKafkaAdapter, KAFKA_INFO)
 }
 
 /** 内置驱动的方言 id 清单，测试用它遍历所有方言做冒烟。 */
-export const BUILTIN_DIALECT_IDS = ['sqlite', 'postgresql'] as const
+export const BUILTIN_DIALECT_IDS = ['sqlite', 'postgresql', 'redis', 'kafka'] as const

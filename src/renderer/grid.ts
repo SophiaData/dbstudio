@@ -114,7 +114,10 @@ export class ResultGrid implements TransactionParticipant {
   #knownRows = 0
   #exhausted = false
 
+
   readonly #pages = new Map<number, PageState>()
+  /** 最近一次成功结果的快照；查询失败时用它回滚（见 GridSnapshot 说明）。 */
+  #lastGood: GridSnapshot | null = null
   /** 在途请求去重：同一页只发一次。 */
   readonly #inflight = new Map<number, Promise<void>>()
 
@@ -641,6 +644,48 @@ export class ResultGrid implements TransactionParticipant {
     return this.#api
   }
 
+  /** 把当前「成功结果」存成快照，供失败回滚。只存有数据的状态。 */
+  #captureGood(): void {
+    if (this.#columns.length === 0) return
+    this.#lastGood = {
+      cursorId: this.#cursorId,
+      columns: [...this.#columns],
+      knownRows: this.#knownRows,
+      exhausted: this.#exhausted,
+      // 页缓存浅拷贝即可：PageState 内的 rows 是不可变的 ResultRow 数组。
+      pages: new Map(this.#pages),
+      selectedRow: this.#selectedRow,
+      selectedCol: this.#selectedCol
+    }
+  }
+
+  /**
+   * 回滚到上一次成功的结果，并在横幅里说明本次查询为什么没成功。
+   *
+   * 注意游标：旧游标在 `#reset` 里已经 close 掉了，这里恢复的 cursorId 只是
+   * 用于「是否还能翻页」的判断——指向已关闭的游标会导致后续翻页报错。
+   * 因此恢复成 `null` 并标记 exhausted，让网格停在"已加载的这些行"，
+   * 用户点「重新加载」即可拿到新的、带游标的会话。
+   */
+  #restoreGood(message: string): boolean {
+    const snap = this.#lastGood
+    if (snap === null) return false
+    this.#columns = [...snap.columns]
+    this.#pages.clear()
+    for (const [index, page] of snap.pages) this.#pages.set(index, page)
+    this.#knownRows = snap.knownRows
+    this.#exhausted = true
+    // 旧游标已释放，不能让翻页逻辑继续用它。
+    this.#cursorId = null
+    this.#selectedRow = snap.selectedRow
+    this.#selectedCol = snap.selectedCol
+    this.#renderHeader()
+    this.#render()
+    this.#bannerEl.hidden = false
+    this.#bannerEl.textContent = `本次查询未成功，下面是上一次成功的结果：${message}`
+    return true
+  }
+
   /** 重置游标状态。它从不回滚连接事务；事务由 controller 统一管理。 */
   async #reset(preserveLocalDirty = false): Promise<void> {
     const api = this.#api
@@ -682,6 +727,8 @@ export class ResultGrid implements TransactionParticipant {
   ): Promise<SqlExecutionOutcome> {
     if (this.#disposed) return { result: null, error: null, superseded: true }
     const epoch = ++this.#queryEpoch
+    // 快照必须在 #reset 之前抓：reset 会把 columns/pages 全清掉。
+    this.#captureGood()
     await this.#reset(preserveLocalDirty)
     if (epoch !== this.#queryEpoch || this.#disposed) {
       return { result: null, error: null, superseded: true }
@@ -694,7 +741,18 @@ export class ResultGrid implements TransactionParticipant {
       if (epoch !== this.#queryEpoch) return { result: null, error: null, superseded: true }
       const message = errText(e)
       this.#cb.onStatus(`查询失败：${message}`, true)
-      this.#showError(message)
+      /*
+       * 失败后按两种情况处理，判据是「这次之前有没有成功结果」：
+       *
+       *   1. 有 → 回滚到上一次成功的结果，横幅说明本次没成功。
+       *      典型场景是广播刷新撞上「同一连接已有 SQL 正在执行」：
+       *      数据本身没变，把网格清空只会让用户以为表空了，
+       *      还会毁掉别的标签依赖的脏编辑视图。
+       *   2. 没有（首次打开这张表）→ 只显示错误，不留骨架表。
+       *      这种情况由 ResultTabs.openTable 负责把标签标记成「打开失败」，
+       *      避免留下一个"标题是 A 表、内容是空壳"的标签。
+       */
+      if (!this.#restoreGood(message)) this.#showError(message)
       return { result: null, error: message }
     }
 
@@ -718,6 +776,9 @@ export class ResultGrid implements TransactionParticipant {
 
     this.#renderHeader()
     this.#render()
+    // 成功才刷新快照：失败回滚依赖它保持"最后一次成功"的语义。
+    this.#bannerEl.hidden = true
+    this.#captureGood()
     this.#cb.onStatus(
       `已返回 ${result.returned} 行 · ${result.elapsedMs}ms` +
         (result.hasMore ? ' · 可继续滚动加载' : ' · 已全部返回')
@@ -2373,6 +2434,27 @@ export class ResultGrid implements TransactionParticipant {
       // 旧游标可能已随连接异常退出，清理路径不应覆盖当前查询结果。
     }
   }
+}
+
+/**
+ * 一次「查询成功结果」的完整快照，用于查询失败时回滚。
+ *
+ * 存在的理由：`#openCursor` 会先把网格清空再发请求。若请求失败（典型场景是
+ * 同一连接上还有一条 SQL 在跑，主进程返回 `bad_params`），清空后的网格就停在
+ * 空状态：用户看到标签标题是 A 表、内容却是「24 行只有行号、没有列头」的骨架表，
+ * 或者干脆一片空白——而上一份数据其实完全可用。
+ *
+ * 所以失败时把这份快照放回去：界面继续显示**上一次成功的结果**，
+ * 错误通过状态栏与横幅提示。这样既不会误导，也不会毁掉未应用的编辑。
+ */
+interface GridSnapshot {
+  readonly cursorId: string | null
+  readonly columns: ResultColumn[]
+  readonly knownRows: number
+  readonly exhausted: boolean
+  readonly pages: Map<number, PageState>
+  readonly selectedRow: number
+  readonly selectedCol: number
 }
 
 function errText(e: unknown): string {

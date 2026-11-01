@@ -100,10 +100,18 @@ export default {
     artifactName: 'dbstudio-${version}-mac-${arch}.${ext}',
     category: 'public.app-category.developer-tools',
     target: [
-      // dmg：拖进 Applications 安装
-      { target: 'dmg', arch: ['arm64', 'x64'] },
-      // zip：给自动更新用，也方便直接下载
-      { target: 'zip', arch: ['arm64', 'x64'] }
+      /*
+       * 只构建 Apple Silicon（arm64）。
+       *
+       * 产品决定：本项目只支持 Apple 芯片 Mac，不再产出 Intel（x64）包。
+       * 好处不只是省 250MB 体积——单架构意味着构建、冒烟、签名/公证
+       * 都只跑一遍，产物与验证一一对应，不会出现"arm64 验过了但 x64 是另一份"。
+       *
+       * 若将来要恢复 Intel 支持：把 'x64' 加回下面两个 arch 数组即可，
+       * 但必须同时补 x64 的冒烟验证（scripts/smoke-packaged-app.mjs 支持 mac/x64）。
+       */
+      { target: 'dmg', arch: ['arm64'] },
+      { target: 'zip', arch: ['arm64'] }
     ],
     icon: 'build/icon.png',
     // 有证书才签名；没有则 identity: null（与应用内 Gatekeeper 提示一致）。

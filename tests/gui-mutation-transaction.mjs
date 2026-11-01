@@ -107,6 +107,24 @@ const win = await app.firstWindow()
 await win.waitForLoadState('domcontentloaded')
 await win.waitForSelector('#tree-rows', { state: 'attached', timeout: 15000 })
 
+/*
+ * 常驻的 dialog 处理器：所有 `window.confirm` 一律接受。
+ *
+ * ===== 为什么不用 `win.once('dialog', ...)` =====
+ *
+ * 原先是「先挂一次性的 once，再点按钮」。这个写法有个隐蔽的错位：
+ * 如果按钮当时**没被点中**（未启用、选择丢失、DOM 正在重绘），
+ * 那次 once 不会被消费，而是**留到下一次删除**才触发；
+ * 下一次真正的 confirm 就没人接了，页面永久停在确认框上——
+ * 表现就是"三天两头卡在一个删除确认弹窗"。
+ *
+ * 改成 `on` 常驻：不管来几个 confirm 都自动接受，不会再错位。
+ * 这也更贴近真实用户（人会点 OK），而不是让测试去赌事件顺序。
+ */
+win.on('dialog', (dialog) => {
+  void dialog.accept().catch(() => undefined)
+})
+
 const tabCount = () =>
   win.evaluate(() => document.querySelectorAll('#result-tabs-scroll .tab-chip').length)
 
@@ -365,7 +383,6 @@ try {
   await win.waitForTimeout(400)
 
   // 原生 confirm 要自动接受。
-  win.once('dialog', (d) => void d.accept())
   await win.evaluate(() => {
     const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .grid-toolbar button')].find(
       (x) => x.textContent?.includes('删除选中行')
@@ -541,7 +558,6 @@ try {
     idCell?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
   })
   await win.waitForTimeout(400)
-  win.once('dialog', (d) => void d.accept())
   await win.evaluate(() => {
     const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .grid-toolbar button')].find(
       (x) => x.textContent?.includes('删除选中行')
@@ -610,7 +626,6 @@ try {
     idCell?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
   })
   await win.waitForTimeout(400)
-  win.once('dialog', (d) => void d.accept())
   await win.evaluate(() => {
     const b = [...document.querySelectorAll('.tab-pane:not([hidden]) .grid-toolbar button')].find(
       (x) => x.textContent?.includes('删除选中行')

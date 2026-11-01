@@ -725,6 +725,76 @@ export function readGrid(db: QueryableDatabase, sql: string, arrayMode: boolean,
 }
 
 /**
+ * 读取结果网格，并在 SQLite 内部拒绝含 NUL 的 TEXT。
+ *
+ * ===== 为什么必须在数据库侧检查 =====
+ *
+ * `node:sqlite` 把 TEXT 转成 JS 字符串时会在第一个 U+0000 处截断：
+ * `hex(v)` 仍是完整字节，但 `SELECT v` 只返回前半截，且没有任何截断标记。
+ * 值到达这里后已经无法判断原始长度，所以 JS 侧的 `truncated` 检查看不到它。
+ *
+ * 这里把原查询包进一个**已知列数**的 CTE，给每列生成唯一别名，再额外选中
+ * `instr(value, char(0))` 的数据库侧检查结果。CTE 的列别名列表按位置对应，
+ * 因此重名列也能逐列检查，不依赖列名唯一。
+ *
+ * 检查只针对 `typeof(value) = 'text'`；BLOB 里的 0x00 是合法二进制数据，
+ * 不在这里拒绝。只要发现一个 NUL，整页直接失败，不返回可能已截断的行。
+ *
+ * EXPLAIN 不能作为 CTE 主体，因此不经过这层包装；它返回的是查询计划，
+ * 不是表数据。普通 SELECT / VALUES / WITH 查询都覆盖。
+ */
+export function readGridWithTextNulGuard(
+  db: QueryableDatabase,
+  sql: string,
+  arrayMode: boolean,
+  params: readonly BindValue[] = [],
+  rowOffset = 0
+): RawGrid {
+  if (isExplainSql(sql)) {
+    return readGrid(db, sql, arrayMode, ...params)
+  }
+
+  const originalNames = db.prepare(sql).columns().map((column) => column.name)
+  if (originalNames.length === 0) {
+    return readGrid(db, sql, arrayMode, ...params)
+  }
+
+  const aliases = originalNames.map((_, index) => `"__dbstudio_value_${index}"`)
+  const checks = aliases.map(
+    (alias, index) =>
+      `WHEN typeof(${alias}) = 'text' AND instr(${alias}, char(0)) > 0 THEN ${index}`
+  )
+  const nulColumnCheck =
+    `CASE ${checks.join(' ')} ELSE -1 END AS "__dbstudio_nul_column"`
+  const guardedSql =
+    `WITH "__dbstudio_result"(${aliases.join(', ')}) AS (\n${sql}\n)\n` +
+    `SELECT ${aliases.join(', ')}, ${nulColumnCheck} FROM "__dbstudio_result"`
+
+  const guarded = readGrid(db, guardedSql, arrayMode, ...params)
+  for (let rowIndex = 0; rowIndex < guarded.rows.length; rowIndex += 1) {
+    const row = guarded.rows[rowIndex]
+    if (row === undefined) continue
+    const marker = row[originalNames.length]
+    if ((typeof marker === 'number' || typeof marker === 'bigint') && marker >= 0) {
+      const column = Number(marker)
+      const name = originalNames[column] ?? `#${column + 1}`
+      throw new SqliteAdapterError(
+        'query_failed',
+        `数据库侧完整性校验失败：结果第 ${rowOffset + rowIndex + 1} 行、第 ${column + 1} 列「${name}」` +
+          '的 TEXT 值包含 NUL（U+0000）。Node SQLite 绑定读取这类文本时会在 NUL 处截断，' +
+          '继续返回或导出会造成静默数据损坏，因此本页已中止且未返回任何行。' +
+          '请用 `hex(列名)` 核对原始字节并修复或排除该行后重试。'
+      )
+    }
+  }
+
+  return {
+    names: originalNames,
+    rows: guarded.rows.map((row) => row.slice(0, originalNames.length))
+  }
+}
+
+/**
  * 按列名取某一行里的值。
  *
  * 用列名而不是写死下标：SQLite 目前 `PRAGMA table_info` 的列顺序是稳定的

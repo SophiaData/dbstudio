@@ -19,6 +19,7 @@
         <span id="app-title">dbstudio</span>
         <span id="app-subtitle">元数据浏览（虚拟化 + 懒加载）</span>
         <span class="spacer"></span>
+        <button id="btn-compare" type="button" title="比较两个已连接数据源的结构或两张表的数据（只生成同步 SQL）">比较…</button>
         <button id="btn-new-connection" type="button">＋ 新建连接</button>
       </header>
 
@@ -55,8 +56,16 @@
           <div id="result-area" hidden>
             <div id="result-tabbar">
               <div id="result-tabs-scroll" role="tablist" aria-label="结果集标签"></div>
+              <!--
+                导出向导（P2.2）：走主进程的流式导出任务，
+                数据不经过渲染进程，可写到用户指定的路径。
+                与左侧「导出全部」（内存里拼 CSV 后下载）是**两条不同的路**，
+                所以两个按钮并存，各自语义写在 title 里。
+              -->
+              <button id="btn-export-wizard" type="button" disabled
+                      title="打开导出向导：主进程逐批读取并直接写入你指定的文件">导出向导…</button>
               <button id="btn-export-all" type="button" disabled
-                      title="导出当前标签的全部行（会重新执行一次该查询）">导出全部</button>
+                      title="导出当前标签的全部行（会重新执行一次该查询，最多 5 万行；结果下载到浏览器下载目录）">导出全部</button>
             </div>
             <div id="result-stack"></div>
             <div id="result-tabs-empty">在左侧点击一张表，或执行 SQL，结果会以新标签打开。</div>

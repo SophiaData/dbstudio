@@ -779,6 +779,40 @@ dialog::backdrop {
   font-size: 12px;
 }
 
+/* ---------- CSV 导入向导（P2.3） ---------- */
+
+/*
+ * 目标表列名的可点标签。
+ *
+ * 为什么要它：导入向导要用户填「目标列」（CSV 第 N 列 → 目标表哪一列），
+ * 但 CSV 的列数在开始导入前是未知的（界面读不到文件），所以不能像
+ * 导出向导那样给一个固定的下拉列表——列数对不上时它没法表达。
+ *
+ * 于是改成「文本区按顺序填列名 + 一排可点的表列名」：
+ * 点一下就把该列名追加进文本区，省掉手抄（手抄最容易打错，
+ * 而一个拼错的列名会让导入在提交之后才失败）。
+ */
+.import-column-chip {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.import-column-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.import-column-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ============================================================
    结果集网格
    ============================================================ */
@@ -1395,6 +1429,66 @@ dialog::backdrop {
 .er-back {
   margin-left: auto;
 }
+.er-export {
+  margin-left: 2px;
+}
+.er-picker-host {
+  flex: 0 0 auto;
+  padding: 8px 2px 0;
+}
+.er-picker {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-alt);
+  padding: 8px;
+}
+.er-picker-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.er-picker-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.er-picker-search input {
+  min-width: 180px;
+}
+.er-picker-count {
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-right: auto;
+}
+.er-picker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  max-height: 96px;
+  overflow: auto;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.er-picker-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.er-picker-option[hidden] {
+  display: none;
+}
+.er-picker-message {
+  margin-top: 6px;
+  color: var(--warn-border);
+  font-size: 12px;
+}
 .er-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -1404,12 +1498,36 @@ dialog::backdrop {
 }
 .er-svg {
   display: block;
+  overflow: visible;
 }
-/* SVG 文本：用 CSS 变量着色，跟随明暗主题。 */
+/* SVG 文本与关系线：用 CSS 变量着色，跟随明暗主题。 */
 .er-note {
   fill: var(--warn-border);
   font-size: 11px;
   font-weight: 600;
+}
+.er-relations {
+  pointer-events: none;
+}
+.er-relation {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.78;
+  pointer-events: stroke;
+}
+.er-relation:hover {
+  stroke-width: 2.5;
+  opacity: 1;
+}
+.er-relation-arrow {
+  fill: var(--accent);
+}
+.er-relation-label {
+  fill: var(--fg-dim);
+  font-size: 10px;
+  font-family: var(--mono);
+  pointer-events: none;
 }
 .er-entity-rect {
   fill: var(--bg);
@@ -1417,7 +1535,11 @@ dialog::backdrop {
   stroke-width: 1;
 }
 .er-entity {
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
+}
+.er-entity:active {
+  cursor: grabbing;
 }
 .er-entity:hover .er-entity-rect {
   stroke: var(--accent);
@@ -1902,3 +2024,30 @@ dialog::backdrop {
     color: #c9d1d9;
   }
 }
+
+/* ---- P5 结构 / 数据比较面板 ---- */
+.compare-overlay { position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .45); }
+.compare-panel { width: 860px; max-width: calc(100vw - 32px); height: calc(100vh - 80px); display: flex; flex-direction: column; gap: 8px; padding: 0 0 10px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .35); font-size: 13px; }
+.compare-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; }
+.compare-form, .compare-summary, .compare-details, .compare-sql, .compare-foot { margin: 0 14px; }
+.compare-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.compare-row[hidden] { display: none; }
+.compare-row select { min-width: 140px; }
+.compare-row input { flex: 1; min-width: 180px; }
+.compare-summary { font-weight: 600; }
+.compare-summary.danger, .compare-item.danger { color: #c62828; }
+.compare-details { flex: 1; min-height: 80px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.compare-item { padding: 2px 0; white-space: pre-wrap; word-break: break-all; }
+.compare-item.warning { color: #b26a00; }
+.compare-sql { height: 160px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.compare-foot { display: flex; justify-content: space-between; align-items: center; }
+.compare-hint { opacity: .75; }
+
+/* 只读数据源（Redis key / Kafka 分区）的属性表 */
+.detail-meta { border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.detail-meta th, .detail-meta td { padding: 3px 10px 3px 0; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+.detail-meta th { font-weight: 600; opacity: .8; white-space: nowrap; }
+
+/* 打开失败的标签：标题带 ⚠，整体压暗，避免和正常标签混淆 */
+.tab-chip.is-failed .tab-chip-label { color: #c62828; }
+.tab-chip.is-failed { opacity: .85; }

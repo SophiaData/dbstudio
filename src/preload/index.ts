@@ -6,9 +6,27 @@
  * 直接暴露 `ipcRenderer` 等于把整个 IPC 面全开：页面里任何一段代码
  * （包括被注入的、或某个第三方脚本）都能调用任意通道。
  *
- * 这里显式枚举 **33 个**方法（第一~五阶段 21 + 第六阶段 6 + 第七阶段 1 + 第八阶段 5），
- * 多一个都没有。这份清单与 `DbStudioApi` 是同一份类型：主进程实现它、
+ * 这里显式枚举 **42 个**方法（第一~五阶段 21 + 第六阶段 6 + 第七阶段 1 + 第八阶段 5
+ * + P2.1 流式导出 4 + P2.3 CSV 导入 5），多一个都没有。
+ *
+ * P2.3 的第五个是**系统文件选择器**（chooseImportFile）：
+ * 它只回一个绝对路径，**不读文件、不回传内容**。
+ * 之所以值得单独开一条通道：渲染进程没有读任意路径的能力，
+ * 而"用户自己挑一个文件"是渲染进程自己做不到、又正当需要的能力。
+ * 但它也**不能**变成通用读文件通道——所以入参为空、返回值只有路径。
+ *
+ * P2.1 新增的四个是流式导出的生命周期接口：
+ *   startTransfer       启动导出任务（同步返回 taskId 与初始进度）
+ *   getTransferProgress 轮询进度（不用事件推送，导出面板本来就要定时刷新）
+ *   cancelTransfer      任务级取消（不影响同连接的其它查询）
+ *   waitTransfer        等任务结束、拿终态结果
+ *
+ * 刻意**不**暴露"读导出数据"的通道：渲染进程永远拿不到行，
+ * 内存占用与总行数无关——这正是整个 P2.1 设计的核心目的。这份清单与 `DbStudioApi` 是同一份类型：主进程实现它、
  * preload 转发它、渲染进程消费它、测试也验它，任何一边改了签名，`tsc` 会立刻报错。
+ *
+ * P2.3 同样只暴露导入任务的生命周期接口，不暴露 CSV 内容：
+ *   startImport / getImportProgress / cancelImport / waitImport
  *
  * ===== 第二阶段为什么从 7 个扩到 11 个（一次刻意的能力面扩张） =====
  *
@@ -103,6 +121,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
+import type { DataCompareRequest, DataCompareResult, SchemaSnapshot } from '../core/compare'
 import type { ConnectionConfig } from '../core/dialect'
 import type { SecretInput } from '../core/driver'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
@@ -114,6 +133,16 @@ import type {
   SqlHistoryEntry,
   SqlLibrarySnapshot
 } from '../core/sql-library'
+import type {
+  ImportPreview,
+  ImportPreviewRequest,
+  ImportProgress,
+  ImportRequest,
+  ImportResult,
+  TransferProgress,
+  TransferRequest,
+  TransferResult
+} from '../core/transfer'
 import type {
   EditApplyResult,
   RowUpdate,
@@ -147,6 +176,10 @@ const api: DbStudioApi = {
     ipcRenderer.invoke(IPC.listChildren, nodeId) as Promise<ObjectRef[]>,
   describeTable: (tableNodeId: string) =>
     ipcRenderer.invoke(IPC.describeTable, tableNodeId) as Promise<TableDescription>,
+  captureSchemaSnapshot: (connectionId: string, schema?: string | null) =>
+    ipcRenderer.invoke(IPC.captureSchemaSnapshot, connectionId, schema) as Promise<SchemaSnapshot>,
+  compareTableData: (request: DataCompareRequest) =>
+    ipcRenderer.invoke(IPC.compareTableData, request) as Promise<DataCompareResult>,
 
   // ---- 结果集（第二阶段） ----
 
@@ -275,7 +308,59 @@ const api: DbStudioApi = {
     ipcRenderer.invoke(IPC.saveSql, id, name, sql) as Promise<SavedSql>,
   removeSavedSql: (id: string) =>
     ipcRenderer.invoke(IPC.removeSavedSql, id) as Promise<void>,
-  clearSqlHistory: () => ipcRenderer.invoke(IPC.clearSqlHistory) as Promise<void>
+  clearSqlHistory: () => ipcRenderer.invoke(IPC.clearSqlHistory) as Promise<void>,
+
+  // ---- 流式导出（P2.1） ----
+
+  /**
+   * 启动导出任务。
+   *
+   * 参数形状是纯结构化数据（字符串 / 布尔 / 数字 / 嵌套对象），
+   * 可安全过 contextBridge；不接受函数、不接受回调。
+   */
+  startTransfer: (request: TransferRequest) =>
+    ipcRenderer.invoke(IPC.startTransfer, request) as Promise<TransferProgress>,
+
+  /** 轮询任务进度。未知任务 id 返回 null。 */
+  getTransferProgress: (taskId: string) =>
+    ipcRenderer.invoke(IPC.getTransferProgress, taskId) as Promise<TransferProgress | null>,
+
+  /** 取消任务（任务级，不影响同连接的其它查询）。 */
+  cancelTransfer: (taskId: string) =>
+    ipcRenderer.invoke(IPC.cancelTransfer, taskId) as Promise<boolean>,
+
+  /** 等任务结束，返回终态结果。 */
+  waitTransfer: (taskId: string) =>
+    ipcRenderer.invoke(IPC.waitTransfer, taskId) as Promise<TransferResult>,
+
+  // ---- CSV 导入（P2.3） ----
+
+  previewImport: (request: ImportPreviewRequest) =>
+    ipcRenderer.invoke(IPC.previewImport, request) as Promise<ImportPreview>,
+
+  startImport: (request: ImportRequest) =>
+    ipcRenderer.invoke(IPC.startImport, request) as Promise<ImportProgress>,
+
+  getImportProgress: (taskId: string) =>
+    ipcRenderer.invoke(IPC.getImportProgress, taskId) as Promise<ImportProgress | null>,
+
+  cancelImport: (taskId: string) =>
+    ipcRenderer.invoke(IPC.cancelImport, taskId) as Promise<boolean>,
+
+  waitImport: (taskId: string) =>
+    ipcRenderer.invoke(IPC.waitImport, taskId) as Promise<ImportResult>,
+
+  /**
+   * 打开系统文件选择框，让用户挑一个 CSV 文件。
+   *
+   * 返回选中的绝对路径；用户取消 / 没选 / 对话框打不开时返回 `null`。
+   *
+   * 刻意**不**暴露"读文件"或"按路径读内容"的通道：
+   * 这条只解决"文件在哪"，内容解析留在主进程。
+   * 也没有"任意路径"参数——要选文件就得让用户自己在系统框里选。
+   */
+  chooseImportFile: () =>
+    ipcRenderer.invoke(IPC.chooseImportFile) as Promise<string | null>
 }
 
 contextBridge.exposeInMainWorld(API_GLOBAL, api)

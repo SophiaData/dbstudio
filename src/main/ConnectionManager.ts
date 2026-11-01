@@ -15,6 +15,20 @@
  * 规则只在 `core/api.ts` 的 `NodeId` 里定义一次，UI 与测试共用同一套。
  */
 
+import { readFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+
+import {
+  compareDataRows,
+  type CompareDialect,
+  type DataCompareRequest,
+  type DataCompareResult,
+  type DataCompareRow,
+  type SchemaSnapshot,
+  type SnapshotTable
+} from '../core/compare'
+import { previewCsv } from '../core/csv'
 import type { ConnectionConfig } from '../core/dialect'
 import type { DialectInfo, SecretInput, SecretMap, TestConnectionResult } from '../core/driver'
 import { isEmptySecret, mergeSecrets, normalizeSecret, quoteIdentifierWith } from '../core/driver'
@@ -33,6 +47,22 @@ import type {
 } from '../core/resultset'
 import { DriverHostHandle } from './DriverHostHandle'
 import { ConnectionStore, SecretStorageUnavailableError } from './ConnectionStore'
+import { ImportManager } from './ImportManager'
+import { TransferManager } from './TransferManager'
+import type {
+  ImportBatch,
+  ImportBatchResult,
+  ImportPreview,
+  ImportPreviewRequest,
+  ImportProgress,
+  ImportRequest,
+  ImportResult,
+  TransferProgress,
+  TransferRequest,
+  TransferResult,
+  TransferSource,
+  TransferSourceHandle
+} from '../core/transfer'
 
 /**
  * ===== 为什么主进程这里**不** import 任何驱动目录 =====
@@ -98,6 +128,39 @@ function makeConnectionId(seq: number): string {
  * 「由连接关闭兜底的回滚」。
  */
 const ROLLBACK_CLEANUP_TIMEOUT_MS = 3_000
+
+/**
+ * 路径归一化：把"同一个文件的多种写法"折叠成同一个字符串。
+ *
+ * ===== 两条规则，缺一不可 =====
+ *
+ * 1. **文件本身存在时**：用 `realpathSync(absolute)`。
+ *    这能解开**文件级符号链接**——例如配置的库路径是 `alias.db`
+ *    （指向 `real.db` 的符号链接），而导出目标是 `real.db`。
+ *    只归一化父目录会漏掉这一例：父目录相同、文件名不同，
+ *    但它们**其实是同一个文件**。
+ *
+ * 2. **文件不存在时**（导出目标本来就还不存在）：
+ *    退回到 `realpath(父目录) + 文件名`。父目录的符号链接仍要解开
+ *    （macOS 上 `/var` 是 `/private/var` 的符号链接）。
+ *    文件名部分保持原样——它还不存在，没有 realpath 可取。
+ *
+ * 库文件路径与导出目标路径**用同一条规则**，
+ * 否则两侧的归一化结果不可比，比较就失去意义。
+ */
+function normalizeFsPath(target: string): string {
+  const absolute = resolve(target)
+  try {
+    return realpathSync(absolute)
+  } catch {
+    const parent = dirname(absolute)
+    try {
+      return join(realpathSync(parent), basename(absolute))
+    } catch {
+      return absolute
+    }
+  }
+}
 
 /** 从任意异常里取一句可读信息。 */
 function describeThrown(err: unknown): string {
@@ -199,11 +262,65 @@ export class ConnectionManager {
    * 这个区分很重要：(b) 方案把路由和账本混成一份状态，而这里两者分开，
    * 前缀坏了不会影响清理，清理漏了也不会导致转发到错误的宿主。
    */
-  readonly #openCursors = new Map<string, Set<string>>()
+  readonly #openCursors = new Map<string, Set<string>>
+
+  /**
+   * 本管理器拥有的传输任务管理器。
+   *
+   * 归属在这里而不是独立存在，是因为**任务的生命周期必须跟着连接走**：
+   * 连接断开时它上面的导出任务必须停下来（否则任务会一直等一个已死的宿主），
+   * 应用退出时所有任务都要收尾（否则临时文件来不及删）。
+   */
+  readonly #transfers: TransferManager
+
+  /** CSV 导入任务。与导出一样，生命周期跟随连接和应用退出。 */
+  readonly #imports: ImportManager
+
+  /**
+   * 连接级「在途外部写」租约计数：连接 id → 已登记、尚未完成的写操作数量。
+   *
+   * ===== 为什么需要它（导入事务归属的最后一个竞态） =====
+   *
+   * 任务级守卫（`#assertNoActiveImport`）与导入前的 transactionState 预检都只
+   * 在**各自被调到的那一刻**检查状态，它们挡不住这个交错：
+   *
+   *   1. 用户先发起一个写请求（applyEdits/insertRow/executeStatement/DDL/commit/
+   *      rollback）。它通过了守卫，但写库的 RPC 还在途，用户事务尚未建立；
+   *   2. 此时 startImport 被调用。任务级守卫看到「没有导入」放行；ImportManager
+   *      的预检又在用户事务建立**之前**跑完，看到「无事务」也放行；
+   *   3. 之后用户写建立事务，导入第一批 importBatch 撞上用户事务被驱动拒绝；
+   *   4. ImportManager 按「写过就回滚」无条件 rollback，于是把**用户事务**回滚了。
+   *
+   * 单靠扩大守卫或预检都无法关闭第 1 步与第 2 步之间的窗口，因为窗口跨越了
+   * 写请求的 await。这里用一个连接级计数把「写请求在途」这件事同步地暴露出来：
+   * 每个外部写入口在**首个 await 之前**登记、在 finally 释放；startImport 在
+   * 同一同步段内检查计数，>0 就同步拒绝。因为 JS 单线程，登记与检查之间没有
+   * 让出点，所以二者要么写先登记（导入被拒），要么导入先建任务（写被任务守卫拒），
+   * 不可能同时通过。导入自身的内部 commit/rollback 走 `#commitImport` /
+   * `#rollbackImport`，不经过这些公共入口，因此不受本计数与守卫影响。
+   */
+  readonly #pendingWrites = new Map<string, number>()
 
   constructor(dialects: readonly DialectInfo[], store: ConnectionStore) {
     this.#dialects = dialects
     this.#store = store
+    this.#transfers = new TransferManager({
+      // 打开来源：走宿主 RPC，主进程不碰数据库。
+      openSource: (source, batchSize) => this.#openTransferSource(source, batchSize),
+      // 归属连接：节点 id 里已经带了连接归属，这里只做解析。
+      resolveConnectionId: (source) => this.#connectionIdOfTransferSource(source),
+      // 目标路径安全检查（挡住"导出覆盖正在使用的数据库文件"）。
+      assertDestinationAllowed: (destinationPath) => this.#assertNotDatabaseFile(destinationPath),
+      onLog: (level, msg) => this.#log(level, msg)
+    })
+    this.#imports = new ImportManager({
+      writeBatch: (targetNodeId, batch) => this.#writeImportBatch(targetNodeId, batch),
+      commit: (targetNodeId) => this.#commitImport(targetNodeId),
+      rollback: (targetNodeId) => this.#rollbackImport(targetNodeId),
+      transactionState: (targetNodeId) => this.#importTransactionState(targetNodeId),
+      resolveConnectionId: (targetNodeId) => NodeId.parse(targetNodeId)?.connectionId,
+      onLog: (level, msg) => this.#log(level, msg)
+    })
     this.#loadPersisted()
   }
 
@@ -475,23 +592,48 @@ export class ConnectionManager {
   }
 
   #stopSession(connectionId: string): Promise<void> {
+    const existing = this.#closing.get(connectionId)
+    if (existing) return existing
+
     this.#sessionTokens.set(connectionId, {})
     this.#sessionSecrets.delete(connectionId)
     this.#openCursors.delete(connectionId)
+    /**
+     * 导出与导入都先标记取消，但收尾顺序不同：
+     *   - 导出先关宿主，让在途读取立刻失败，再等临时文件清理；
+     *   - 导入必须等 ImportManager 自己回滚完，再走连接级清理，以免普通
+     *     rollback 抢先结束导入事务。
+     */
+    this.#transfers.cancelByConnection(connectionId)
+    this.#imports.cancelByConnection(connectionId)
     const pending = this.#connecting.get(connectionId)
     this.#connecting.delete(connectionId)
     const live = this.#connections.get(connectionId)
-    this.#connections.delete(connectionId)
     pending?.host.kill()
-    const existing = this.#closing.get(connectionId)
-    if (existing) return existing
 
     const closing = (async () => {
       if (pending) await pending.host.close()
       if (live) {
+        /**
+         * 导入事务归 ImportManager 所有。必须先让它看到取消并完成自己的
+         * rollback，再做连接级清理；否则通用 rollback 可能先结束导入事务，
+         * ImportManager 的回滚则会变成一次无主清理。
+         *
+         * 这里暂时保留 #connections 中的路由，正是为了让 ImportManager
+         * 在收尾期间仍能解析到同一个宿主。
+         */
+        await this.#imports.waitByConnection(connectionId)
+        if (this.#connections.get(connectionId) === live) {
+          this.#connections.delete(connectionId)
+        }
         await this.#rollbackQuietly(live)
         await live.host.close()
+      } else {
+        await this.#imports.waitByConnection(connectionId)
       }
+      // 宿主已关（在途的读会被唤醒失败），这时才等导出任务真正收尾——
+      // 顺序反过来会被一条慢查询卡住整个断连流程。
+      await this.#transfers.waitByConnection(connectionId)
     })().finally(() => {
       if (this.#closing.get(connectionId) === closing) this.#closing.delete(connectionId)
     })
@@ -533,6 +675,16 @@ export class ConnectionManager {
   async #rollbackQuietly(conn: LiveConnection): Promise<void> {
     const rollback = conn.host.rollbackTransaction().catch((err: unknown) => {
       // 没有事务时某些驱动会报错，这属于正常情况，不该污染日志以外的地方。
+      // 只读数据源（Redis / Kafka）根本没有事务语义，回滚必然是 unsupported_method：
+      // 那不是异常，别用 warn 吓人，否则每次断开都刷一条“失败”。
+      // 宿主回包只把 code 拼进 message（DriverHostHandle 不透出结构化的 code），
+      // 所以这里两种形态都要认，否则 Redis/Kafka 每次断开仍会刷一条 warn。
+      const code = (err as { code?: unknown } | null)?.code
+      const text = describeThrown(err)
+      if (code === 'unsupported_method' || code === 'not_connected' || /unsupported_method|not_connected/.test(text)) {
+        this.#log('info', `[${conn.id}] 该数据源无事务语义，跳过回滚: ${describeThrown(err)}`)
+        return
+      }
       this.#log('warn', `[${conn.id}] 移除连接前回滚事务失败（忽略）: ${describeThrown(err)}`)
     })
     let timer: NodeJS.Timeout | undefined
@@ -638,13 +790,453 @@ export class ConnectionManager {
     return conn.host.describeTable(parsed.adapterId)
   }
 
+  /**
+   * 只读结构快照。展开表和视图后逐个 describe，不执行任何同步 SQL。
+   */
+  async captureSchemaSnapshot(connectionId: string, schema?: string | null): Promise<SchemaSnapshot> {
+    const tables: SnapshotTable[] = []
+    const views: { schema: string | null; name: string; definition: string | null }[] = []
+    // 只下钻 folder / schema，表和视图是叶子（它们的子节点是列，不需要）。
+    // 深度上限防止异常驱动返回环。
+    const walk = async (nodeId: string, currentSchema: string | null, depth: number): Promise<void> => {
+      if (depth > 4) return
+      for (const node of await this.listChildren(nodeId)) {
+        if (node.kind === 'schema') {
+          if (schema && node.name !== schema) continue
+          await walk(node.id, node.name, depth + 1)
+        } else if (node.kind === 'folder' || node.kind === 'catalog') {
+          await walk(node.id, currentSchema, depth + 1)
+        } else if (node.kind === 'table') {
+          tables.push({ ...(await this.describeTable(node.id)), schema: currentSchema, name: node.name })
+        } else if (node.kind === 'view') {
+          views.push({ schema: currentSchema, name: node.name, definition: null })
+        }
+      }
+    }
+    const conn = this.#connections.get(connectionId)
+    if (!conn) throw new Error(`连接不存在或已断开: ${connectionId}`)
+    // 只浏览数据源（Redis / Kafka）没有表结构。放它进来会得到一张空快照，
+    // 再被拿去和目标库比较，就会生成"删除目标端全部表"的 DROP 计划。
+    if (conn.config.dialectId !== 'sqlite' && conn.config.dialectId !== 'postgresql') {
+      throw new Error(`${conn.info.name} 没有表结构，不能参与结构比较（只支持 SQL 数据源）`)
+    }
+    await walk(NodeId.connection(connectionId), null, 0)
+    const byName = (a: { schema: string | null; name: string }, b: { schema: string | null; name: string }) =>
+      `${a.schema ?? ''}.${a.name}`.localeCompare(`${b.schema ?? ''}.${b.name}`)
+    tables.sort(byName)
+    views.sort(byName)
+    return {
+      source: { connectionId, schema: schema ?? null },
+      tables,
+      views,
+      routines: []
+    }
+  }
+
+  /**
+   * 按唯一键比较两张表的数据，返回差异与同步计划。
+   *
+   * 只读：两侧都只跑 SELECT（runQuery），同步 SQL 只生成不执行。
+   * 超过 maxRows 直接拒绝，而不是截断后给出“看起来没差异”的错误结论。
+   */
+  async compareTableData(request: DataCompareRequest): Promise<DataCompareResult> {
+    // 方言守卫必须**最先**跑：跨方言比较无论如何都不支持，先报这件事，
+    // 用户才不会先看到"缺少比较键列"这类由误配表引起的次生错误。
+    const source = this.#resolveConnection(request.sourceTableNodeId)
+    const target = this.#resolveConnection(request.targetTableNodeId)
+    const dialect = target.conn.config.dialectId
+    const sourceDialect = source.conn.config.dialectId
+    for (const [label, id] of [['源', sourceDialect], ['目标', dialect]] as const) {
+      if (id !== 'sqlite' && id !== 'postgresql') throw new Error(`数据比较暂不支持方言：${label} ${id}`)
+    }
+    // 跨方言比较必须拒绝：两边对同一列的值映射不同（PostgreSQL 把 int8/numeric
+    // 当文本返回，SQLite 当 number），按键对齐后每行都会被判成"源端独有+目标端独有"，
+    // 于是生成一张全表 DELETE + 全表 INSERT 的"同步计划"——看起来合理，实则灾难。
+    if (sourceDialect !== dialect) {
+      throw new Error(
+        `跨方言数据比较暂不支持（源 ${sourceDialect} → 目标 ${dialect}）：` +
+          '两边的值类型映射不同，按行比较会产生假差异。请改用结构比较，或先迁移到同一方言。'
+      )
+    }
+    const maxRows = Math.min(Math.max(request.maxRows ?? 50_000, 1), 500_000)
+    const sourceDesc = await this.describeTable(request.sourceTableNodeId)
+    const targetDesc = await this.describeTable(request.targetTableNodeId)
+    const primary = sourceDesc.columns
+      .filter((c) => c.primaryKeyOrdinal !== null)
+      .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
+      .map((c) => c.name)
+    const keyColumns = request.keyColumns && request.keyColumns.length > 0 ? [...request.keyColumns] : primary
+    if (keyColumns.length === 0) {
+      throw new Error('源表没有主键，请指定一组唯一列作为比较键（不支持按行号比较）')
+    }
+    for (const [label, desc] of [['源表', sourceDesc], ['目标表', targetDesc]] as const) {
+      const names = new Set(desc.columns.map((c) => c.name))
+      const missing = keyColumns.filter((c) => !names.has(c))
+      if (missing.length > 0) throw new Error(`${label}缺少比较键列：${missing.join(', ')}`)
+    }
+    const sharedColumns = sourceDesc.columns
+      .map((c) => c.name)
+      .filter((name) => targetDesc.columns.some((t) => t.name === name))
+    if (sharedColumns.length === 0) throw new Error('两张表没有同名列，无法比较数据')
+    const sourceRows = await this.#readRowsForCompare(request.sourceTableNodeId, sharedColumns, keyColumns, maxRows)
+    const targetRows = await this.#readRowsForCompare(request.targetTableNodeId, sharedColumns, keyColumns, maxRows)
+    const name = tableNameFromAdapterId(target.adapterId, dialect)
+    const result = compareDataRows(sourceRows, targetRows, { columns: keyColumns }, dialect as CompareDialect, name)
+    // 只比列交集：目标端缺的列不会被比较，必须说出来，否则用户会以为那一列也一致。
+    const sourceOnly = sourceDesc.columns.map((c) => c.name).filter((n) => !targetDesc.columns.some((t) => t.name === n))
+    const targetOnly = targetDesc.columns.map((c) => c.name).filter((n) => !sourceDesc.columns.some((t) => t.name === n))
+    const warnings = [...result.plan.warnings]
+    if (sourceOnly.length > 0) warnings.push(`源表独有列未参与比较：${sourceOnly.join(', ')}（需要先同步结构）。`)
+    if (targetOnly.length > 0) warnings.push(`目标表独有列未参与比较：${targetOnly.join(', ')}（需要先同步结构）。`)
+    return { keyColumns, ...result, plan: { ...result.plan, warnings } }
+  }
+
+  async #readRowsForCompare(
+    tableNodeId: string,
+    columns: readonly string[],
+    keyColumns: readonly string[],
+    maxRows: number
+  ): Promise<DataCompareRow[]> {
+    const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    const { schema, name } = tableNameFromAdapterId(adapterId, conn.config.dialectId)
+    const q = (value: string) => quoteIdentifierWith(value, conn.info.quoting)
+    const from = schema ? `${q(schema)}.${q(name)}` : q(name)
+    const sql = `SELECT ${columns.map(q).join(', ')} FROM ${from} ORDER BY ${keyColumns.map(q).join(', ')}`
+    const pageSize = 1000
+    const first = await this.runQuery(tableNodeId, sql, { limit: pageSize, keepCursor: true })
+    const rows: DataCompareRow[] = []
+    try {
+      let page: ResultPage = first
+      let offset = 0
+      for (;;) {
+        for (const row of page.rows) {
+          if (rows.length >= maxRows) {
+            throw new Error(`表 ${name} 超过 ${maxRows} 行，已停止比较；请缩小范围或调大上限`)
+          }
+          const values: Record<string, string | number | boolean | null> = {}
+          for (let i = 0; i < columns.length; i += 1) {
+            let cell = row.cells[i] ?? { kind: 'null' as const }
+            if (cell.kind === 'text' && cell.truncated && first.cursorId !== null) {
+              cell = await this.fetchCellValue(first.cursorId, row.index, i)
+            }
+            values[columns[i] as string] = compareValueOf(cell, name, columns[i] as string)
+          }
+          const key: Record<string, string | number | boolean | null> = {}
+          for (const column of keyColumns) key[column] = values[column] ?? null
+          rows.push({ key, values })
+        }
+        offset += page.returned
+        if (!page.hasMore || first.cursorId === null) break
+        page = await this.fetchResultPage(first.cursorId, offset, pageSize)
+      }
+    } finally {
+      if (first.cursorId !== null) await this.closeCursor(first.cursorId).catch(() => undefined)
+    }
+    return rows
+  }
+
   /** 应用退出时统一回收所有宿主进程。 */
   async disposeAll(): Promise<void> {
     this.#disposed = true
     await Promise.all([...this.#saved.keys()].map((id) => this.#stopSession(id)))
     await Promise.all(this.#closing.values())
+    // 传输任务最后收尾：它们要等宿主退出才可能被唤醒。
+    await Promise.all([this.#transfers.dispose(), this.#imports.dispose()])
     this.#sessionTokens.clear()
     this.#sessionSecrets.clear()
+  }
+
+  // ---- 流式导出（P2.1） ----
+
+  /**
+   * 启动一个导出任务。
+   *
+   * 参数错误同步抛出（格式不对、路径为空、来源不完整）；
+   * 任务本身异步跑，调用方拿 taskId 去轮询进度。
+   */
+  startTransfer(request: TransferRequest): TransferProgress {
+    this.#assertNotDatabaseFile(request.destinationPath)
+    return this.#transfers.start(request)
+  }
+
+  /**
+   * 拒绝把导出结果写到**数据库文件**上。
+   *
+   * 导出流程是「同目录临时文件 → 原子 rename 到目标」。
+   * 若目标恰好是某个 SQLite 库文件，rename 会把库文件替换成导出内容——
+   * 数据库直接没了。更糟的是该库文件仍被连接持有，连接继续写下去
+   * 会写到一个已被替换掉的文件，"看起来还在用的库"与磁盘上的文件分家。
+   *
+   * 检查**所有已保存连接**的库路径（不只是当前连接）：
+   * 导出连接 B 时把目标写成连接 A 的库文件，同样会毁掉 A。
+   * 同时挡 `-wal` / `-shm` / `-journal` 旁文件——覆盖它们会破坏
+   * 正在运行的连接的 WAL 状态。
+   *
+   * 路径比较前先归一化（见 `normalizeFsPath`），否则符号链接会让
+   * "目标其实就是那个库文件"绕过检查。
+   */
+  #assertNotDatabaseFile(destinationPath: string): void {
+    const target = normalizeFsPath(destinationPath)
+    for (const saved of this.#saved.values()) {
+      if (saved.config.dialectId !== 'sqlite') continue
+      const raw = saved.config.options['file']
+      if (typeof raw !== 'string' || raw.trim() === '') continue
+      const dbPath = normalizeFsPath(raw.trim())
+      if (dbPath === target) {
+        throw new Error(
+          `导出目标「${destinationPath}」就是连接「${saved.config.name}」正在使用的 SQLite 数据库文件。` +
+            '导出会用结果替换目标文件，那会直接毁掉这个数据库。已拒绝。'
+        )
+      }
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        if (normalizeFsPath(`${raw.trim()}${suffix}`) === target) {
+          throw new Error(
+            `导出目标「${destinationPath}」是连接「${saved.config.name}」的 SQLite 附属文件` +
+              `（${suffix}）。覆盖它会破坏正在使用的数据库，已拒绝。`
+          )
+        }
+      }
+    }
+  }
+
+  /** 取导出任务进度。未知 id 返回 undefined。 */
+  getTransferProgress(taskId: string): TransferProgress | undefined {
+    return this.#transfers.get(taskId)
+  }
+
+  /** 取消导出任务。返回 false 表示任务不存在、已结束或已进入不可取消的提交阶段。 */
+  cancelTransfer(taskId: string): boolean {
+    return this.#transfers.cancel(taskId)
+  }
+
+  /** 等待导出任务结束，返回终态结果。 */
+  async waitTransfer(taskId: string): Promise<TransferResult> {
+    return this.#transfers.wait(taskId)
+  }
+
+  /** 在主进程读取 CSV 并返回有界预览；完整文件内容不会经过 IPC。 */
+  async previewImport(request: ImportPreviewRequest): Promise<ImportPreview> {
+    if (typeof request !== 'object' || request === null) {
+      throw new Error('预览请求必须是对象')
+    }
+    if (typeof request.sourcePath !== 'string' || request.sourcePath.trim() === '') {
+      throw new Error('预览请求缺少 sourcePath')
+    }
+    if (!isAbsolute(request.sourcePath)) {
+      throw new Error(`CSV 文件路径必须是绝对路径：${request.sourcePath}`)
+    }
+    if (typeof request.delimiter !== 'string' || request.delimiter.length !== 1) {
+      throw new Error('CSV 分隔符必须是单个字符')
+    }
+    if (typeof request.nullText !== 'string') {
+      throw new Error('CSV NULL 标记必须是字符串')
+    }
+    if (typeof request.hasHeader !== 'boolean') {
+      throw new Error('CSV hasHeader 必须是布尔值')
+    }
+    const bytes = await readFile(request.sourcePath)
+    const parsed = previewCsv(bytes, {
+      delimiter: request.delimiter,
+      nullText: request.nullText,
+      hasHeader: request.hasHeader,
+      sampleRowLimit: request.sampleRowLimit
+    })
+    return { sourcePath: request.sourcePath, ...parsed }
+  }
+
+  startImport(request: ImportRequest): ImportProgress {
+    // 同步校验节点与连接，避免先拿到 taskId 再发现连接根本不存在。
+    const { conn } = this.#resolveConnection(request.targetNodeId)
+    if (this.#closing.has(conn.id)) {
+      throw new Error(`连接 ${conn.id} 正在断开，不能再启动导入任务。`)
+    }
+    // 连接上还有在途的外部写：此时开始导入会在「用户事务尚未建立」的空窗里
+    // 通过预检，随后 importBatch 撞上用户事务并触发 ImportManager 的通用
+    // rollback，把用户事务误回滚。必须同步拒绝；等写操作结束（finally 释放
+    // 租约）后用户可重试。放在 #imports.start 之前，保证任务不会先被建出来。
+    const pendingWrites = this.#pendingWriteCount(conn.id)
+    if (pendingWrites > 0) {
+      throw new Error(
+        `连接 ${conn.id} 上还有 ${pendingWrites} 个写操作正在进行，已拒绝启动导入。` +
+          '请等待这些写操作完成（或先提交/回滚）后重试，以免导入事务与用户事务交叉。'
+      )
+    }
+    return this.#imports.start(request)
+  }
+
+  getImportProgress(taskId: string): ImportProgress | undefined {
+    return this.#imports.get(taskId)
+  }
+
+  cancelImport(taskId: string): boolean {
+    return this.#imports.cancel(taskId)
+  }
+
+  async waitImport(taskId: string): Promise<ImportResult> {
+    return this.#imports.wait(taskId)
+  }
+
+  #writeImportBatch(targetNodeId: string, batch: ImportBatch): Promise<ImportBatchResult> {
+    const { conn, adapterId } = this.#resolveConnection(targetNodeId)
+    if (adapterId === null) {
+      return Promise.reject(new Error('连接节点不能作为导入目标，请选择具体的表'))
+    }
+    return conn.host.importBatch(adapterId, batch)
+  }
+
+  #commitImport(targetNodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(targetNodeId)
+    return conn.host.commitTransaction()
+  }
+
+  #rollbackImport(targetNodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(targetNodeId)
+    return conn.host.rollbackTransaction()
+  }
+
+  #importTransactionState(targetNodeId: string): Promise<TransactionState> {
+    const { conn } = this.#resolveConnection(targetNodeId)
+    return conn.host.transactionState()
+  }
+
+  /**
+   * 归属连接 id 的解析。
+   *
+   * 节点 id 形如 `connection:c1|table:users`，连接归属就在前缀里。
+   * `connectionId` 字段则允许直接给裸 id。
+   *
+   * 两者同时给出时**必须一致**，否则拒绝——不一致意味着调用方搞混了
+   * "在哪个连接上跑"，继续下去会把数据从错误的库导出来。
+   */
+  #connectionIdOfTransferSource(source: TransferSource): string | undefined {
+    const fromNode = source.nodeId === undefined ? undefined : NodeId.parse(source.nodeId)?.connectionId
+    const fromExplicit = source.connectionId
+    if (fromNode !== undefined && fromExplicit !== undefined && fromNode !== fromExplicit) {
+      throw new Error(
+        `导出来源的 nodeId 指向连接 ${fromNode}，但 connectionId 是 ${fromExplicit}，两者不一致，已拒绝。`
+      )
+    }
+    return fromNode ?? fromExplicit
+  }
+
+  /**
+   * 打开一个导出来源。
+   *
+   * ===== 数据从哪来 =====
+   *
+   *   - 表来源（只给 nodeId）：向宿主要「读取语句 + INSERT 落点」，
+   *     然后用**既有的** query / fetchResultPage 分页取数。
+   *   - 查询来源（给 sql）：直接用这条 SQL 走同样的分页取数。
+   *
+   * 走既有 RPC 的原因：分页读取的语义（重新执行 + LIMIT/OFFSET）
+   * 在 adapter 里已经实现并被网格验证过，导出**复用**它而不是另写一套。
+   *
+   * ===== 一致性（必须诚实）=====
+   *
+   * 每一页都是**重新执行**的 SQL，所以导出期间底层数据若被并发修改，
+   * 不同批次看到的不是同一个时刻的数据。这不是快照。
+   * 上层用 `consistency: 'live-paged'` 如实标注。
+   */
+  async #openTransferSource(source: TransferSource, batchSize: number): Promise<TransferSourceHandle> {
+    const connectionId = this.#connectionIdOfTransferSource(source)
+    if (connectionId === undefined) {
+      throw new Error('无法确定导出来源所属的连接')
+    }
+    const { conn } = this.#resolveConnectionLike(connectionId)
+
+    let sql: string
+    let target: TransferSourceHandle['target']
+    if (source.sql !== undefined && source.sql.trim() !== '') {
+      if (source.nodeId !== undefined && source.nodeId.trim() !== '') {
+        /**
+         * 同时给了 nodeId 与 sql：nodeId 只用来定位连接，
+         * **不**用来推断表——否则"给一张表的 nodeId 却导出另一条 SQL"会
+         * 让人误以为导出的是那张表。
+         */
+        const parsed = NodeId.parse(source.nodeId)
+        if (parsed === null) {
+          throw new Error(`无法解析导出来源的 nodeId：${source.nodeId}`)
+        }
+        if (parsed.connectionId !== connectionId) {
+          throw new Error(
+            `导出来源的 nodeId 属于连接 ${parsed.connectionId}，与指定连接 ${connectionId} 不一致，已拒绝。`
+          )
+        }
+      }
+      sql = source.sql
+    } else {
+      if (source.nodeId === undefined || source.nodeId.trim() === '') {
+        throw new Error('必须提供导出来源：nodeId（表来源）或 sql（查询来源）')
+      }
+      const { adapterId } = this.#resolveConnection(source.nodeId)
+      if (adapterId === null) {
+        throw new Error('连接节点不能作为导出对象，请选择具体的表或视图')
+      }
+      // 让驱动解析自己的 id（PG 的 id 带 schema，主进程切不开）。
+      const resolution = await conn.host.resolveTransferSource(adapterId)
+      sql = resolution.sql
+      target = resolution.target
+    }
+
+    // 先跑一次查询拿到列名与第一页，游标就此打开。
+    const first = await conn.host.query(sql, { limit: batchSize })
+    let cursorId = first.cursorId
+    let columns = first.columns.map((column) => column.name)
+    let pending: readonly (readonly CellValue[])[] = first.rows.map((row) => row.cells)
+    let done = !first.hasMore
+    let offset = first.rows.length
+
+    /**
+     * 释放游标。
+     *
+     * 幂等：异常路径上可能已经关过一次。
+     * 关游标失败**不抛**：那会让"导出失败"的原因被"关游标失败"覆盖，
+     * 而真正的原因（SQL 错误、取消）才是用户需要的。
+     */
+    let closed = false
+    const close = async (): Promise<void> => {
+      if (closed) return
+      closed = true
+      if (cursorId === null) return
+      const id = cursorId
+      cursorId = null
+      try {
+        await conn.host.closeCursor(id)
+      } catch {
+        // 忽略
+      }
+    }
+
+    return {
+      columns,
+      dialectId: conn.info.id,
+      ...(target === undefined ? {} : { target }),
+      async read(): Promise<{ rows: readonly (readonly CellValue[])[]; done: boolean }> {
+        /**
+         * 先把手上这批交出去，**再**判断是否已到末尾。
+         *
+         * 顺序反了会漏数据：第一批返回的行数少于批大小时 `hasMore` 为 false，
+         * 若先判 done 就直接返回空数组，那批行会被整批丢掉——
+         * "表里有 3 行、批大小 200"就会导出 0 行。
+         */
+        if (pending.length > 0) {
+          const rows = pending
+          pending = []
+          return { rows, done }
+        }
+        if (done) return { rows: [], done: true }
+        if (cursorId === null) {
+          // 没有游标却还有数据要读：不该发生，明确失败而不是静默截断。
+          throw new Error('导出来源的游标已失效，无法继续读取')
+        }
+        const page = await conn.host.fetchResultPage(cursorId, offset, batchSize)
+        offset += page.rows.length
+        done = !page.hasMore
+        columns = page.columns.map((column) => column.name)
+        return { rows: page.rows.map((row) => row.cells), done }
+      },
+      close
+    }
   }
 
   // ---- 结果集（第二阶段） ----
@@ -679,23 +1271,30 @@ export class ConnectionManager {
    */
   async executeStatement(nodeId: string, sql: string, options?: QueryOptions): Promise<StatementResult> {
     const { conn } = this.#resolveConnection(nodeId)
-    const result = await conn.host.executeStatement(sql, options)
-    if (this.#connections.get(conn.id) !== conn) {
-      throw new Error(`语句执行所属的会话已断开: ${conn.id}`)
-    }
+    // 该入口可能执行 DML/DDL 并复用导入事务，导入期间一律拒绝（只读查询走 runQuery）。
+    this.#assertNoActiveImport(conn.id, '执行 SQL 语句')
+    this.#beginWrite(conn.id)
+    try {
+      const result = await conn.host.executeStatement(sql, options)
+      if (this.#connections.get(conn.id) !== conn) {
+        throw new Error(`语句执行所属的会话已断开: ${conn.id}`)
+      }
 
-    if (result.kind === 'rows') {
-      const qResult = result.result
-      if (qResult.cursorId !== null && qResult.cursorId !== undefined) {
-        const scoped = CursorId.scope(conn.id, qResult.cursorId)
-        this.#trackCursor(conn.id, qResult.cursorId)
-        return {
-          ...result,
-          result: { ...qResult, cursorId: scoped }
+      if (result.kind === 'rows') {
+        const qResult = result.result
+        if (qResult.cursorId !== null && qResult.cursorId !== undefined) {
+          const scoped = CursorId.scope(conn.id, qResult.cursorId)
+          this.#trackCursor(conn.id, qResult.cursorId)
+          return {
+            ...result,
+            result: { ...qResult, cursorId: scoped }
+          }
         }
       }
+      return result
+    } finally {
+      this.#endWrite(conn.id)
     }
-    return result
   }
 
   /** 按连接所属驱动生成执行计划，不在主进程拼接方言关键字。 */
@@ -819,13 +1418,19 @@ export class ConnectionManager {
     updates: readonly RowUpdate[]
   ): Promise<EditApplyResult> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    this.#assertNoActiveImport(conn.id, '应用行编辑')
     if (adapterId === null) {
       throw new Error('连接节点不能提交编辑，请选择具体的表')
     }
     if (!Array.isArray(updates) || updates.length === 0) {
       throw new Error('没有要提交的修改（updates 为空）')
     }
-    return conn.host.applyEdits(adapterId, updates)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.applyEdits(adapterId, updates)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -836,13 +1441,72 @@ export class ConnectionManager {
    */
   async commitTransaction(nodeId: string): Promise<TransactionState> {
     const { conn } = this.#resolveConnection(nodeId)
-    return conn.host.commitTransaction()
+    this.#assertNoActiveImport(conn.id, '普通事务提交')
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.commitTransaction()
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /** 回滚事务。幂等——重复回滚、回滚一个没有事务的连接都不该报错。 */
   async rollbackTransaction(nodeId: string): Promise<TransactionState> {
     const { conn } = this.#resolveConnection(nodeId)
-    return conn.host.rollbackTransaction()
+    this.#assertNoActiveImport(conn.id, '普通事务回滚')
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.rollbackTransaction()
+    } finally {
+      this.#endWrite(conn.id)
+    }
+  }
+
+  /**
+   * 当前架构没有把事务 owner 写进 TransactionState，因此普通事务入口只能
+   * 以“导入任务是否仍活动”作为最小所有权判据。误放行 commit 会把半次导入
+   * 提交掉，误放行 rollback 会让 ImportManager 失去事务控制权，两者都必须拒绝。
+   *
+   * ===== 为什么写入入口也要走同一道闸 =====
+   *
+   * 导入的批次写入由 ImportManager 直接调 `host.importBatch`，第一批开启事务、
+   * 后续批次复用同一个连接事务。但 `executeStatement`（DML）、`insertRow`、
+   * `applyEdits`、`deleteRows` 以及 DDL 在驱动侧都是“已在事务中就复用、否则
+   * BEGIN IMMEDIATE”——也就是说导入期间它们会悄悄加入导入事务。若放行，
+   * 这些无关写入会被 ImportManager 的 commit 一起提交（或随 rollback 一起丢弃），
+   * 破坏导入的原子性边界。主进程无法在不重复方言解析的前提下判定
+   * `executeStatement` 是否会写库，所以这里对上述入口一律保守拒绝；
+   * 只读查询仍走 `runQuery` / `previewTable`，不受影响。
+   */
+  #assertNoActiveImport(connectionId: string, operation: string): void {
+    const taskId = this.#imports.activeTaskByConnection(connectionId)
+    if (taskId === undefined) return
+    throw new Error(
+      `连接 ${connectionId} 正在执行导入任务 ${taskId}，已拒绝${operation}，` +
+        '以免无关写入混入导入事务。导入事务只能由 ImportManager 提交或回滚；' +
+        '请等待导入结束或先取消导入。'
+    )
+  }
+
+  /**
+   * 登记一次外部写操作的在途租约。**必须在方法的首个 await 之前调用**，
+   * 这样 startImport 在同一同步段内的计数检查与本次登记之间没有让出点，
+   * 二者的先后顺序才能确定（见 `#pendingWrites` 注释）。
+   */
+  #beginWrite(connectionId: string): void {
+    this.#pendingWrites.set(connectionId, (this.#pendingWrites.get(connectionId) ?? 0) + 1)
+  }
+
+  /** 释放一次在途写租约。**必须放在 finally**，且与 `#beginWrite` 成对调用。 */
+  #endWrite(connectionId: string): void {
+    const current = this.#pendingWrites.get(connectionId)
+    if (current === undefined) return
+    if (current <= 1) this.#pendingWrites.delete(connectionId)
+    else this.#pendingWrites.set(connectionId, current - 1)
+  }
+
+  #pendingWriteCount(connectionId: string): number {
+    return this.#pendingWrites.get(connectionId) ?? 0
   }
 
   /**
@@ -870,10 +1534,16 @@ export class ConnectionManager {
     values: Readonly<Record<string, CellValue>>
   ): Promise<{ affected: number; keyValues: Record<string, CellValue> }> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    this.#assertNoActiveImport(conn.id, '插入行')
     if (adapterId === null) {
       throw new Error('连接节点不能插入行，请选择具体的表')
     }
-    return conn.host.insertRow(adapterId, values)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.insertRow(adapterId, values)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -887,13 +1557,19 @@ export class ConnectionManager {
     keys: readonly Readonly<Record<string, CellValue>>[]
   ): Promise<EditApplyResult> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    this.#assertNoActiveImport(conn.id, '删除行')
     if (adapterId === null) {
       throw new Error('连接节点不能删除行，请选择具体的表')
     }
     if (!Array.isArray(keys) || keys.length === 0) {
       throw new Error('没有要删除的行（keys 为空）——为避免误删整表，已拒绝')
     }
-    return conn.host.deleteRows(adapterId, keys)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.deleteRows(adapterId, keys)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -935,8 +1611,14 @@ export class ConnectionManager {
    */
   async createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
     const { conn } = this.#resolveConnectionLike(connectionId)
-    // adapter 层用不到 connectionId，但仍按契约传（见 DriverAdapter 注释）。
-    return conn.host.createTable(conn.id, spec)
+    this.#assertNoActiveImport(conn.id, '建表')
+    this.#beginWrite(conn.id)
+    try {
+      // adapter 层用不到 connectionId，但仍按契约传（见 DriverAdapter 注释）。
+      return await conn.host.createTable(conn.id, spec)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -954,19 +1636,37 @@ export class ConnectionManager {
    */
   async dropTable(tableNodeId: string): Promise<void> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    this.#assertNoActiveImport(conn.id, '删表')
     if (adapterId === null) throw new Error('连接节点不能删除，请选择具体的表')
-    return conn.host.dropTable(adapterId)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.dropTable(adapterId)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   async createView(connectionId: string, viewName: string, selectSql: string): Promise<void> {
     const { conn } = this.#resolveConnectionLike(connectionId)
-    return conn.host.createView(conn.id, viewName, selectSql)
+    this.#assertNoActiveImport(conn.id, '建视图')
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.createView(conn.id, viewName, selectSql)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   async dropView(viewNodeId: string): Promise<void> {
     const { conn, adapterId } = this.#resolveConnection(viewNodeId)
+    this.#assertNoActiveImport(conn.id, '删视图')
     if (adapterId === null) throw new Error('连接节点不能删除，请选择具体的视图')
-    return conn.host.dropView(adapterId)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.dropView(adapterId)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -985,8 +1685,14 @@ export class ConnectionManager {
 
   async renameTable(tableNodeId: string, newName: string): Promise<void> {
     const { conn, adapterId } = this.#resolveConnection(tableNodeId)
+    this.#assertNoActiveImport(conn.id, '重命名表')
     if (adapterId === null) throw new Error('连接节点不能重命名，请选择具体的表')
-    return conn.host.renameTable(adapterId, newName)
+    this.#beginWrite(conn.id)
+    try {
+      return await conn.host.renameTable(adapterId, newName)
+    } finally {
+      this.#endWrite(conn.id)
+    }
   }
 
   /**
@@ -1118,5 +1824,63 @@ export class ConnectionManager {
     let cursors = 0
     for (const set of this.#openCursors.values()) cursors += set.size
     return { connections: this.#connections.size, openCursors: cursors }
+  }
+}
+
+/**
+ * 从 adapter 表 id 还原 schema 与表名（数据比较拼 SELECT 用）。
+ *
+ * 两种内置编码：SQLite `table:<name>`（名字原样）；PostgreSQL
+ * `table:<schema>.<name>`，两段内 `\` 转义、以第一个未转义点号分隔。
+ * 无法识别时拒绝，而不是猜一个名字去拼 SQL。
+ */
+function tableNameFromAdapterId(
+  adapterId: string | null,
+  dialectId: string
+): { schema: string | null; name: string } {
+  if (adapterId === null || !adapterId.startsWith('table:')) {
+    throw new Error(`数据比较只接受表节点，收到: ${adapterId ?? '连接节点'}`)
+  }
+  const payload = adapterId.slice('table:'.length)
+  if (payload === '') throw new Error(`无法识别的表 id: ${adapterId}`)
+  if (dialectId === 'sqlite') return { schema: null, name: payload }
+  if (dialectId !== 'postgresql') throw new Error(`数据比较暂不支持方言：${dialectId}`)
+  let head = ''
+  for (let i = 0; i < payload.length; i += 1) {
+    const ch = payload.charAt(i)
+    if (ch === '\\') {
+      head += payload.charAt(i + 1)
+      i += 1
+      continue
+    }
+    if (ch === '.') {
+      let tail = ''
+      for (let j = i + 1; j < payload.length; j += 1) {
+        const c = payload.charAt(j)
+        if (c === '\\') {
+          tail += payload.charAt(j + 1)
+          j += 1
+        } else tail += c
+      }
+      if (head === '' || tail === '') break
+      return { schema: head, name: tail }
+    }
+    head += ch
+  }
+  throw new Error(`无法识别的 PostgreSQL 表 id: ${adapterId}`)
+}
+
+function compareValueOf(cell: CellValue, table: string, column: string): string | number | boolean | null {
+  switch (cell.kind) {
+    case 'null':
+      return null
+    case 'number':
+    case 'boolean':
+      return cell.value
+    case 'text':
+      if (cell.truncated) throw new Error(`${table}.${column} 的长文本无法取全文，已停止比较`)
+      return cell.text
+    case 'blob':
+      throw new Error(`${table}.${column} 是二进制列，暂不支持数据比较`)
   }
 }

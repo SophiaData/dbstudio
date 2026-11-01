@@ -18,7 +18,13 @@
  */
 
 import type { ConnectionConfig, SqlDialect } from './dialect'
+import type {
+  ImportBatch,
+  ImportBatchResult,
+  TransferSourceResolution
+} from './transfer'
 import type { SqlScriptRules } from './sql-script'
+import type { MetadataCapabilities } from './metadata'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
 import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type {
@@ -244,7 +250,23 @@ export interface DriverAdapter {
    */
   listChildren(parentId: string | null): Promise<ObjectRef[]>
 
-  /** 读取表结构（列 + 唯一键判定）。按需调用，不在 listChildren 里预取。 */
+  /**
+   * 读取表结构（列 + 唯一键判定）。按需调用，不在 listChildren 里预取。
+   *
+   * ===== 返回值现在可能携带结构元数据 =====
+   *
+   * 除了列与 `hasUniqueKey`，驱动还可以返回外键、索引、唯一约束、
+   * CHECK 约束与触发器（见 `TableDescription` 的可选字段）。
+   *
+   * 两条实现纪律：
+   *   1. **不要在 listChildren 里预取这些**——那会让「展开一个表目录」
+   *      变成「对每张表各读一遍外键与索引」，在宽表多的库上是灾难。
+   *      元数据仍然按需调用 describeTable 获取。
+   *   2. **读元数据失败不要让整次 describeTable 失败**。
+   *      拿不到就把该字段留成 `undefined`（而不是空数组），
+   *      这样 UI 能区分「这个驱动不支持」和「这张表确实没有」——
+   *      这两者的差别见 `metadata.ts` 文件头的「undefined ≠ 空数组」。
+   */
   describeTable(id: string): Promise<TableDescription>
 
   /**
@@ -337,6 +359,21 @@ export interface DriverAdapter {
   ): Promise<{ affected: number; keyValues: Record<string, CellValue> }>
 
   /**
+   * 批量写入 CSV 数据。
+   *
+   * 实现要求：
+   *   - `tableId` 由驱动解析，调用方不得提交拼接后的表名；
+   *   - 列名必须对照目标表做白名单校验，并用方言规则引用；
+   *   - 所有值必须参数化；
+   *   - 第一批开启事务，后续批次复用；提交/回滚仍走既有事务方法；
+   *   - 失败错误必须包含批次行号、CSV 行号和列名上下文。
+   *
+   * 连接上若已有用户未提交事务，导入必须拒绝开始，避免把用户改动
+   * 一起提交或回滚。
+   */
+  importBatch(tableId: string, batch: ImportBatch): Promise<ImportBatchResult>
+
+  /**
    * 按主键批量删除行。**不自动提交**。
    *
    * `keys` 是「一组 WHERE 条件的集合」，每个元素定位一行（与 RowUpdate.keyValues
@@ -405,6 +442,30 @@ export interface DriverAdapter {
 
   /** 重命名表。`nodeId` 是完整 adapterId（如 `table:users`）。 */
   renameTable(nodeId: string, newName: string): Promise<void>
+
+  /**
+   * 把一个对象节点解析成「导出用的读取语句 + INSERT 落点」。
+   *
+   * ===== 为什么要由驱动来解析 =====
+   *
+   * 驱动私有的 id 编码只有驱动自己懂：
+   *   - SQLite：`table:<name>`（名字里可以含冒号）
+   *   - PostgreSQL：`table:<schema>.<name>`（**带 schema**）
+   *
+   * 主进程若自己去切冒号，PG 的 `public.users` 会被整体当成表名，
+   * 生成出 `SELECT * FROM "public.users"` 这种**指错对象**的 SQL——
+   * 它可能根本不存在，或者更糟：恰好存在一张叫 `public.users` 的表。
+   *
+   * 而把驱动实现 import 进主进程会破坏进程隔离（见本文件头的架构决策）。
+   * 所以这条解析必须留在驱动侧，通过一次 RPC 送回结果。
+   *
+   * 这是一个**可选**方法：不实现它的驱动会得到明确的
+   * "该驱动不支持按对象导出" 错误，而不是一个错误的 SQL。
+   *
+   * `nodeId` 是**完整 adapterId**（如 `table:public.users`），
+   * 不含主进程加的连接前缀。
+   */
+  resolveTransferSource?(nodeId: string): Promise<TransferSourceResolution>
 }
 
 /** 方言的展示信息，UI 用它渲染「新建连接」的下拉框。 */
@@ -547,6 +608,7 @@ export const RPC_METHODS = [
   'rollbackTransaction',
   'transactionState',
   'insertRow',
+  'importBatch',
   'deleteRows',
   'countRows',
   'fetchCellValue',
@@ -555,7 +617,8 @@ export const RPC_METHODS = [
   'createView',
   'dropView',
   'renameTable',
-  'cancelQuery'
+  'cancelQuery',
+  'resolveTransferSource'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

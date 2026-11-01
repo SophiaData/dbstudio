@@ -22,14 +22,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 只出 Apple Silicon（arm64）：项目只支持 Apple 芯片 Mac。
+          # 本地 electron-builder.config.mjs 的 mac.target 也只列了 arm64，
+          # 这里保持一致，避免 CI 里多跑一个打不出产物的 x64 job。
+          # 日后若要恢复 Intel：把下面这段复制一份改 os/arch/executable 即可，
+          # 但记得同时把 x64 加回 config 的 mac.target。
           - os: macos-15
             platform: mac
             arch: arm64
             executable: release/mac-arm64/dbstudio.app/Contents/MacOS/dbstudio
-          - os: macos-15-intel
-            platform: mac
-            arch: x64
-            executable: release/mac/dbstudio.app/Contents/MacOS/dbstudio
           - os: windows-latest
             platform: win
             arch: x64

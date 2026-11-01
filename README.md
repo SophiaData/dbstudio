@@ -188,9 +188,24 @@ pnpm verify:ci         # 强制要求外部服务就绪（缺环境即判失败�
 
 | 分组 | 包含 |
 |---|---|
-| `node` | 类型检查、构建、夹具；元数据、结果集、编辑、持久化、增删改、DDL、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |
-| `gui` | 布局、后台模式、查询和元数据交互、SQL 编辑器、SQL 参数面板与 SQLite 取消状态、SQLite 执行计划与断线恢复、SSL/SSH 表单、SQL 库、多标签上下文、导出完整性、事务与网格生命周期、真实窗口关闭/退出、连接断开/删除/更新保护、SQL 事务联动、工作台结果形态卡片、多语句脚本顺序执行与错误中断、SQL 草稿按连接恢复 |
+| `node` | 类型检查、构建、夹具；元数据、结果集、编辑、持久化、增删改、DDL 与结构化 DDL 预览、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC、CSV 导入解析/预览契约与导入任务事务（SQLite；PG 分支可选）、导入驱动安全/RPC 超时竞态/PG 事务状态同步（模拟 pg Client，非真 PG）、导入终态结果文案分类（纯函数）、ER 关系与布局契约；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |
+| `gui` | 布局、后台模式、查询和元数据交互、SQL 编辑器、SQL 参数面板与 SQLite 取消状态、SQLite 执行计划与断线恢复、SSL/SSH 表单、SQL 库、多标签上下文、导出完整性、CSV 导入、事务与网格生命周期、真实窗口关闭/退出、连接断开/删除/更新保护、SQL 事务联动、工作台结果形态卡片、多语句脚本顺序执行与错误中断、SQL 草稿按连接恢复、ER 图关系/选表/布局隔离/SVG 导出 |
 | `external` | 真实 PostgreSQL、PostgreSQL JSON 执行计划 RPC/GUI、查询取消、SSL/TLS 和 SSH 隧道；其中执行计划 GUI 需要显示器（Linux 使用 xvfb）；实际数量与运行环境记录在验收报告中 |
+
+`node` 组的 `test:import-validation` 覆盖 CSV 解析与纯逻辑预览契约；`test:import-task` 始终覆盖 ImportManager 契约和真实 SQLite，设置 `DBSTUDIO_PG_URL` 后才追加 PostgreSQL 成功/回滚分支，未设置时会明确打印 `SKIP`。`test:import-result-messages` 是**纯函数**回归（不启 Electron、不连数据库），锁的是导入终态文案的措辞安全：提交结果未知、宿主被终止、回滚失败三类都不得谎称"已回滚"。`test:gui-import` 属于 `gui` 组，不会被 `verify:node` 执行。
+
+注意：`test:import-task` 本身属于 `node` 组，验证器只对外部组的子测试 `SKIP` 做严格判定，
+因此 `--require-external` **不会**自动把该步骤内嵌的 PostgreSQL `SKIP` 变成失败。
+需要 PostgreSQL 导入证据时，必须显式设置 `DBSTUDIO_PG_URL` 并确认测试输出实际执行了
+PostgreSQL 断言；只看 node 步骤为绿色不足以证明 PG 分支已运行。
+
+**模拟 PG 的安全测试与真 PG 的区别**：`test:import-driver-safety`、`test:import-rpc-safety`、
+`test:import-pg-transaction-state` 三条都在 `node` 组，用的是真实实现（vite 内存打包后求值）
+配上**替身**——前两条与第三条分别用假 `pg` Client / 可控的假驱动宿主子进程 / 逐条记录 SQL 的假 `pg` Client，
+覆盖的是影响行数与静默丢行、CRLF、错误脱敏、RPC 超时后的宿主隔离与在途拒绝、commit 结果未知、
+事务控制语句与内部状态同步这些**契约**。它们不连服务器、不读凭据，
+因此**通过不等于真 PG 已验证**；真 PG 的导入成功与失败回滚证据只有一条来源：
+设置 `DBSTUDIO_PG_URL` 后运行 `test:import-task`，并确认输出里 PostgreSQL 分支没有打印 `SKIP`。
 
 `external` 组在本地缺环境时**跳过**并明确打印缺哪个变量（退出码仍是 0）；
 测试若打印 `BLOCKED_BY_SETUP`，表示连接或其它必要前置条件没有建立，验证器会将该步骤判为失败，避免把本地负例断言误认为功能通过。
@@ -204,6 +219,10 @@ node scripts/verify.mjs external --only test:postgres --require-external
 
 `--only` 不会自动运行 build/fixture；调用方须先准备产物和服务。
 错误分组（如 `node --only test:postgres`）、未知参数或空选择会非零退出。
+
+本轮 Task D 定向验收已覆盖预览 API、固定样例与错误、latest-wins、`requiredOnInsert`/identity/generated 实时校验、原生 CSV 选择器、开始按钮禁用、task 跟踪和向导恢复：GUI 导入测试 165 通过 / 0 失败（fresh run `run-2026-10-30T17-36-31`），纯逻辑导入表单回归 28 通过 / 0 失败；5 个 node 测试登记合计 95 通过 / 0 失败，语法及 package/manifest diff-check 通过。独立后端回归报告为 203 PASS / 0 FAIL / 1 真 PG SKIP，日志见 `verify-task-d-backend-20261030T0127-EW31uq/REPORT.md`。这些是定向证据，不代表完整 `verify:node` / `verify:gui` 或整个项目已完成。
+
+实现仍使用主进程 `readFile` 读取完整 CSV，再生成有界预览；这保证 renderer 只收到有限样例，但不等于流式读取，也不证明内存与文件大小无关。流式文件读取、超大 CSV 内存基准、真实 PostgreSQL 导入成功/回滚和完整项目验证仍列为后续工作。
 
 关闭窗口、退出应用，以及断开、删除、更新连接前，会处理相关标签的未应用编辑和连接事务。
 取消或事务处理失败会保留连接；等待确认不会因超时而自动放行。连接成功关闭或更新后，
@@ -397,7 +416,8 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 
 | 能力 | 说明 |
 |---|---|
-| **多方言** | SQLite（`node:sqlite`，零依赖）+ **PostgreSQL**（`pg`，实测 PG 17.11 52/52 通过） |
+| **多方言** | SQL 数据源：SQLite（`node:sqlite`，零依赖）+ **PostgreSQL**（`pg`，实测 PG 17.11 52/52 通过）；**只浏览数据源**：Redis（`ioredis`）、Kafka（`kafkajs`）——支持测试连接与树浏览，SQL 方法一律返回 `unsupported_method` |
+| **结构与数据比较** | 两个已连接数据源之间比表结构（表/视图/例程，按 schema+表名对齐，输出确定性 diff 与同步 SQL）；两张表按主键或指定唯一列比数据（分批读取、长值取全文、给出 INSERT/UPDATE/DELETE 计数）；**删除类语句只生成不执行**，面板没有“执行”按钮 |
 | 连接管理 | 配置落盘、密码经 OS 钥匙串加密；**连接颜色标记**（7 色，红=生产/绿=本地）；**连接分组**（真父节点，可重命名/删除，删组不删连接） |
 | 元数据浏览 | 虚拟化懒加载树；搜索过滤（明确标注「仅搜索已展开节点」）；右键刷新/复制/连接断开/查看 ER 图 |
 | **SQL 编辑器** | 语法高亮（textarea+pre 叠加，零依赖）、**自动补全**（关键字+表名列名）、**格式化**（Shift+Alt+F）、**多语句顺序执行与行号错误定位**（Ctrl+Enter 当前 / Ctrl+Shift+Enter 全部）、**参数面板与参数绑定**（SQLite `?`/`:name`、PostgreSQL `$1`/`$2`；参数值不拼接进 SQL）、**执行中状态与取消按钮**（PostgreSQL 真实取消；SQLite 明确提示同步查询不可中断并锁住重复提交）、**方言级执行计划**（SQLite `EXPLAIN QUERY PLAN` / PostgreSQL `EXPLAIN (FORMAT JSON)`；失败清除旧计划，断线后可重连再执行）、**按连接草稿自动持久化** |
@@ -411,7 +431,7 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | **数据筛选** | 列名+操作符+值，拼 WHERE 重新查询（不在页缓存上过滤） |
 | **导出** | CSV / JSON / INSERT 语句 / Markdown（导出已加载行，明确标注范围）+ 导出全部（带进度与 5 万行上限） |
 | **DDL** | 建表（列编辑器/类型白名单/主键/自增/默认值）、删表、建视图、删视图、重命名表 |
-| **ER 图** | SVG 手绘，30 张表上限，**明确标注不含外键关系**（元数据契约暂无外键字段） |
+| **ER 图** | SVG 手绘；真实外键关系线（含复合外键与跨 schema）；按表名/schema 筛选、选择子集、布局按连接与 schema 集合持久化、SVG 导出；单次最多绘制 100 张表 |
 | **查询取消** | PostgreSQL 真取消（`pg_cancel_backend`，实测 516ms 中断 10 秒慢查询）；**SQLite 如实不支持**（同步 API 无法中断） |
 | **SSL/TLS** | PostgreSQL 六种 libpq 语义的 sslmode（disable/allow/prefer/require/verify-ca/verify-full）+ CA 证书校验；**语义差异已实测核对**（见下方说明） |
 | **SSH 隧道** | PostgreSQL 经跳板机连接：私钥/口令认证、SHA256 主机指纹确认（不做 TOFU）、目标地址覆盖；SSL 回退与取消查询复用隧道连接 |
@@ -420,11 +440,11 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 
 | 缺口 | 影响 |
 |---|---|
-| 只有 2 个方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录） |
-| **导出不含完整长字段** | 长文本与 BLOB 只加载预览（>1000 字符）。导出时**明确拒绝**而不是产出残缺文件；要导出全文需 M2 的流式导出 |
-| 无传输/导入导出向导 | DBeaver 的 data transfer 是独立子系统，支持跨库搬数据 |
-| 无数据库比较/同步 | 表结构与数据的 diff |
-| ER 图无外键关系线 | 元数据契约缺外键字段，需先扩展 `TableDescription` |
+| 只有 2 个 SQL 方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录）。Redis / Kafka 目前只做浏览，不是 SQL 工作台 |
+| **导出完整性与一致性仍有边界** | 流式导出已支持任务进度、取消、原子落盘和长字段截断拒绝；当前仍是 `LIMIT/OFFSET` 的 live-paged 语义，不保证时间点快照，BOM/编码选项与深分页性能仍待补全 |
+| **CSV 导入** | 已支持表节点右键导入、原生 CSV 文件选择器、分隔符/NULL 配置、主进程 `previewImport` 有界样例与错误定位、目标列映射、`requiredOnInsert`（含 identity/generated）实时校验、开始按钮禁用、参数化批量导入、取消与失败回滚、终态 task 跟踪及向导恢复；当前 `readFile` 仍将完整文件读入主进程内存，流式读取与超大 CSV 内存基准待补全；真 PostgreSQL 导入证据和完整项目验证清单仍待执行 |
+| **结构编辑不完整** | 已支持建表、删表、建/删视图和重命名表；结构化 DDL 预览、ALTER 列/索引/约束/触发器编辑仍待补全 |
+| 只有 2 个 SQL 方言 | DBeaver 支持 100+；驱动宿主隔离和 SDK 已具备扩展边界，但仍需逐方言实现与验证。Redis / Kafka 是只浏览接入，未提供值查看、写入与消费 |
 | SQLite 查询不可取消 | 同步 API 的硬限制 |
 
 ---

@@ -5,9 +5,16 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { checkReleaseVersion } from './check-release-version.mjs'
 
+// 发布期望的平台/架构集合。这份清单必须与 .github/workflows/release.yml 的
+// build 矩阵**逐项对应**：`aggregate` 会严格比对产物目录名与这里的组合，
+// 多一个或少一个都会以 "Missing or unexpected platform/architecture bundle" 失败。
+//
+// 因此调整发布目标要**同时**改两处：
+//   1. release.yml 的 matrix.include
+//   2. 这里的 TARGETS
+// 当前策略：macOS 只发 Apple Silicon（arm64），不再产出 Intel（x64）。
 export const TARGETS = [
   { platform: 'mac', arch: 'arm64', extensions: ['dmg', 'zip'] },
-  { platform: 'mac', arch: 'x64', extensions: ['dmg', 'zip'] },
   { platform: 'win', arch: 'x64', extensions: ['exe'] },
   { platform: 'linux', arch: 'x64', extensions: ['AppImage'] }
 ]

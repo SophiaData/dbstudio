@@ -33,6 +33,11 @@ import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription }
 import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
+import type {
+  ImportBatch,
+  ImportBatchResult,
+  TransferSourceResolution
+} from '../core/transfer'
 
 /** 单条 RPC 的默认超时。宿主无响应时宁可报错，也不要让 UI 无限等待。 */
 const RPC_TIMEOUT_MS = 15_000
@@ -60,6 +65,11 @@ const RESULT_SET_TIMEOUT_MS = 60_000
 /** 宿主优雅退出的等待上限，超时就强杀。 */
 const SHUTDOWN_GRACE_MS = 3_000
 const STDERR_TAIL_MAX_BYTES = 4_096
+
+/** 超时覆盖值必须是正数，否则回落到默认常量（避免测试钩子把超时设成 0 造成立即失败）。 */
+function positiveOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+}
 
 /**
  * 定位驱动宿主脚本。
@@ -98,6 +108,14 @@ export interface DriverHostOptions {
   readonly dialectId: string
   readonly onLog?: (level: 'info' | 'warn' | 'error', message: string) => void
   readonly onExit?: (error: Error) => void
+  /**
+   * 仅用于测试的超时覆盖。生产调用方不传时完全沿用模块常量，行为不变。
+   * 这样超时路径可以在可控 fake 宿主上真实验证，而不必等 60s。
+   */
+  readonly timeouts?: {
+    readonly requestMs?: number
+    readonly resultSetMs?: number
+  }
 }
 
 export type HostLifecycle =
@@ -118,6 +136,86 @@ export interface DriverHostDiagnostics {
   readonly exitCode: number | null
   readonly exitSignal: NodeJS.Signals | null
 }
+
+/**
+ * 事务边界类 RPC 超时时抛出的错误（宿主已被强制终止）。
+ *
+ * 为什么需要独立类型：调用方必须能区分「普通 RPC 超时（宿主还活着，可重试）」
+ * 与「事务边界超时（宿主已被终止，事务结果不可再假定）」。普通 Error 只能靠
+ * 文案猜，ImportManager 无法安全决策。
+ */
+export class DriverHostTimeoutError extends Error {
+  readonly code = 'driver_host_timeout'
+  constructor(
+    readonly method: string,
+    readonly timeoutMs: number,
+    readonly hostTerminated: boolean,
+    message: string
+  ) {
+    super(message)
+    this.name = 'DriverHostTimeoutError'
+  }
+}
+
+/**
+ * 提交事务结果未知。
+ *
+ * 只要无法确认 COMMIT 是否已经在数据库侧生效，就必须用它，而**不能**
+ * 退回「提交失败 = 肯定没提交」的假设——那会让上层放心地回滚/重试，
+ * 而数据其实可能已经提交。文案固定以 `COMMIT_OUTCOME_UNKNOWN:` 开头，
+ * 便于上层在不依赖 `instanceof`（跨 bundle 边界时会失效）的情况下识别。
+ */
+export class CommitOutcomeUnknownError extends Error {
+  readonly code = 'commit_outcome_unknown'
+  readonly commitOutcome = 'unknown' as const
+  constructor(
+    readonly reason: 'timeout' | 'host_exit',
+    message: string
+  ) {
+    super(message)
+    this.name = 'CommitOutcomeUnknownError'
+  }
+}
+
+/** 识别「提交结果未知」错误的稳定入口（同时接受 code 标记，跨 bundle 也能用）。 */
+export function isCommitOutcomeUnknown(error: unknown): error is CommitOutcomeUnknownError {
+  if (error instanceof CommitOutcomeUnknownError) return true
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'commit_outcome_unknown'
+  )
+}
+
+/**
+ * 识别「事务边界超时且宿主已被终止」的稳定入口。
+ *
+ * 上层拿到它时**不要**再尝试回滚：宿主已不可用，回滚请求根本到不了驱动；
+ * 未提交事务由数据库在连接断开时自行回滚。`method` 可区分
+ * importBatch / rollbackTransaction 等具体动作。
+ */
+export function isHostTerminatedTimeout(error: unknown): error is DriverHostTimeoutError {
+  if (error instanceof DriverHostTimeoutError) return error.hostTerminated
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'driver_host_timeout' &&
+    (error as { hostTerminated?: unknown }).hostTerminated === true
+  )
+}
+
+/**
+ * 这些方法的超时不能被当作「请求失败了，但宿主还能继续用」：
+ *   - importBatch：多批次共享同一个事务，客户端放弃时宿主可能仍在逐行 INSERT；
+ *   - commitTransaction：COMMIT 一旦发出，结果可能已生效，不能假装没提交；
+ *   - rollbackTransaction：回滚可能仍在进行，继续接受写入会与回滚交错。
+ * 所以它们的超时必须走「终止宿主 + 标记不可用」，而不是仅从 pending 表移除。
+ */
+const HOST_TERMINATING_TIMEOUT_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  'importBatch',
+  'commitTransaction',
+  'rollbackTransaction'
+])
 
 /**
  * 一个驱动宿主进程的句柄。
@@ -142,12 +240,16 @@ export class DriverHostHandle {
   #lifecycle: HostLifecycle = 'spawning'
   #closed = false
   #closing: Promise<void> | null = null
+  readonly #rpcTimeoutMs: number
+  readonly #resultSetTimeoutMs: number
   readonly handshake: Promise<RpcHandshake>
 
   constructor(options: DriverHostOptions) {
     this.#dialectId = options.dialectId
     this.#onLog = options.onLog ?? (() => {})
     this.#onExit = options.onExit ?? (() => {})
+    this.#rpcTimeoutMs = positiveOr(options.timeouts?.requestMs, RPC_TIMEOUT_MS)
+    this.#resultSetTimeoutMs = positiveOr(options.timeouts?.resultSetMs, RESULT_SET_TIMEOUT_MS)
 
     const script = resolveDriverHostScript()
     this.#script = script
@@ -317,14 +419,26 @@ export class DriverHostHandle {
     this.#handshakeSettler = null
     for (const [, p] of this.#pending) {
       clearTimeout(p.timer)
-      p.reject(err)
+      if (p.method === 'commitTransaction') {
+        // 宿主在 commit 在途时退出：COMMIT 可能已经在数据库侧生效，
+        // 绝不能把「连接没了」当成「肯定没提交」。
+        p.reject(
+          new CommitOutcomeUnknownError(
+            'host_exit',
+            `COMMIT_OUTCOME_UNKNOWN: 提交事务期间驱动宿主已退出（${err.message}），` +
+              '无法确认数据库是否已提交；请重新连接并核对数据后再决定是否重试。'
+          )
+        )
+      } else {
+        p.reject(err)
+      }
     }
     this.#pending.clear()
   }
 
   /** 发一条 RPC 并等待响应。超时会主动失败，避免悬挂。 */
   request<T>(method: RpcMethod, params?: unknown): Promise<T> {
-    return this.#requestWithTimeout<T>(method, params, RPC_TIMEOUT_MS)
+    return this.#requestWithTimeout<T>(method, params, this.#rpcTimeoutMs)
   }
 
   /**
@@ -338,13 +452,33 @@ export class DriverHostHandle {
     if (this.#closed || (this.#closing && method !== 'disconnect')) {
       return Promise.reject(new Error(`驱动宿主已关闭，无法调用 ${method}`))
     }
+    // 调用点仍然显式传模块常量，便于 review 每个方法选的超时档位；
+    // 测试钩子只在这里把常量映射成缩短后的生效值，生产默认完全一致。
+    const effectiveTimeoutMs =
+      timeoutMs === RPC_TIMEOUT_MS
+        ? this.#rpcTimeoutMs
+        : timeoutMs === RESULT_SET_TIMEOUT_MS
+          ? this.#resultSetTimeoutMs
+          : timeoutMs
     const id = this.#nextId++
     const frame: RpcRequest = { id, method, params }
     return new Promise<T>((res, rej) => {
       const timer = setTimeout(() => {
+        // 响应可能刚好先到并被 #settle 清掉，这里再确认一次，避免误杀已完成的请求。
+        if (!this.#pending.has(id)) return
         this.#pending.delete(id)
-        rej(new Error(`驱动宿主调用 ${method} 超时（${timeoutMs}ms）`))
-      }, timeoutMs)
+        if (HOST_TERMINATING_TIMEOUT_METHODS.has(method)) {
+          const error = this.#transactionBoundaryTimeoutError(method, effectiveTimeoutMs)
+          // 先同步把句柄标记为 closed（#terminate -> #finish），再拒绝本次调用。
+          // 这样调用方紧接着发起的 rollback/commit 会在句柄层被拒绝，绝不会写进
+          // 仍在逐行写入的宿主 stdin。进程被 SIGKILL 后，数据库连接断开，
+          // 未提交事务由数据库回滚。
+          this.#terminate(error)
+          rej(error)
+          return
+        }
+        rej(new Error(`驱动宿主调用 ${method} 超时（${effectiveTimeoutMs}ms）`))
+      }, effectiveTimeoutMs)
       this.#pending.set(id, {
         resolve: res as (v: unknown) => void,
         reject: rej,
@@ -363,6 +497,34 @@ export class DriverHostHandle {
         rej(e instanceof Error ? e : new Error(String(e)))
       }
     })
+  }
+
+  /** 构造事务边界超时错误：类型/文案都要让上层能区分「结果未知」。 */
+  #transactionBoundaryTimeoutError(method: RpcMethod, timeoutMs: number): Error {
+    if (method === 'commitTransaction') {
+      return new CommitOutcomeUnknownError(
+        'timeout',
+        `COMMIT_OUTCOME_UNKNOWN: 提交事务超时（${timeoutMs}ms），无法确认数据库是否已提交；` +
+          '已强制终止驱动宿主并断开连接。请重新连接并核对数据后，再决定是否重试。'
+      )
+    }
+    if (method === 'rollbackTransaction') {
+      return new DriverHostTimeoutError(
+        method,
+        timeoutMs,
+        true,
+        `HOST_TERMINATED_TIMEOUT: 回滚事务超时（${timeoutMs}ms），回滚结果未知；` +
+          '已强制终止驱动宿主并断开连接，未提交事务由数据库在连接断开时回滚。'
+      )
+    }
+    return new DriverHostTimeoutError(
+      method,
+      timeoutMs,
+      true,
+      `HOST_TERMINATED_TIMEOUT: 导入批次写入超时（${timeoutMs}ms），` +
+        '已强制终止驱动宿主以阻止后续写入；未提交事务随连接断开回滚。' +
+        '请重新连接后核对导入结果。'
+    )
   }
 
   // ---- 语义化的便捷方法（对上层隐藏 RPC 细节） ----
@@ -494,6 +656,15 @@ export class DriverHostHandle {
     )
   }
 
+  /** 批量导入写入。沿用结果集超时：锁等待或大事务都不应被 15s 误杀。 */
+  importBatch(tableId: string, batch: ImportBatch): Promise<ImportBatchResult> {
+    return this.#requestWithTimeout<ImportBatchResult>(
+      'importBatch',
+      { tableId, batch },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
   /** 按主键批量删除（不自动提交）。空数组在宿主侧被拒。 */
   deleteRows(
     tableId: string,
@@ -565,6 +736,20 @@ export class DriverHostHandle {
     )
   }
 
+  /**
+   * 解析导出对象 → 读取语句 + INSERT 落点。
+   *
+   * 超时用结果集的 60s：它内部要查一次元数据（确认对象存在），
+   * 慢库上可能真的慢。
+   */
+  resolveTransferSource(nodeId: string): Promise<TransferSourceResolution> {
+    return this.#requestWithTimeout<TransferSourceResolution>(
+      'resolveTransferSource',
+      { nodeId },
+      RESULT_SET_TIMEOUT_MS
+    )
+  }
+
   /** 优雅关闭：先 disconnect，再关 stdin 让宿主自行退出；超时则强杀。 */
   close(): Promise<void> {
     if (!this.#closing) this.#closing = this.#close()
@@ -610,6 +795,7 @@ export type RemoteAdapterShape = Pick<
   | 'rollbackTransaction'
   | 'transactionState'
   | 'insertRow'
+  | 'importBatch'
   | 'deleteRows'
   | 'countRows'
   | 'fetchCellValue'
@@ -619,6 +805,7 @@ export type RemoteAdapterShape = Pick<
   | 'dropView'
   | 'renameTable'
   | 'cancelQuery'
+  | 'resolveTransferSource'
 >
 
 export type { DialectInfo }

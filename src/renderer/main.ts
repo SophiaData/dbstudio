@@ -17,7 +17,7 @@ import type {
   SshHostKeyCheck
 } from '../core/driver'
 import type { ExecuteOptions } from '../core/resultset'
-import type { ObjectRef, TableDescription } from '../core/model'
+import type { ColumnDescription, ObjectRef, TableDescription } from '../core/model'
 import { MetadataTree } from './tree'
 import { ResultTabs, type ActiveTabContext } from './tabs'
 import { SqlEditor } from './sql-editor'
@@ -45,6 +45,16 @@ import { pickQuotingRules, quoteIdentifier } from './grid'
 import type { QuotingRules } from '../core/driver'
 import { parseFilter, buildFilteredSql, describeFilterError } from './filter-sql'
 import { getTransactionController, guardAllTransactions, runConnectionOperation } from './transaction-controller'
+// P2.2 导出向导：把 P2.1 的流式导出任务接到界面上。
+import {
+  openTransferWizard,
+  wizardScopesForTab,
+  type TabSourceLike,
+  type WizardScope
+} from './transfer-dialog'
+// P2.3 导入向导：把 CSV 导入任务接到界面上（表节点右键「导入 CSV…」）。
+import { openImportWizard } from './import-dialog'
+import { openComparePanel } from './compare-panel'
 
 declare global {
   interface Window {
@@ -142,6 +152,9 @@ async function boot(): Promise<void> {
       onActiveChange: (context) => {
         activeContext = context
         syncToolsVisibility()
+        // 「导出向导」只在有结果标签时可用（它导的是当前标签的数据）。
+        const wizardBtn = el<HTMLButtonElement>('btn-export-wizard')
+        wizardBtn.disabled = context === null
         const input = document.getElementById('filter-input') as HTMLInputElement | null
         const bar = document.getElementById('filter-bar')
         if (input) input.value = context?.filterDraft ?? ''
@@ -279,9 +292,191 @@ async function boot(): Promise<void> {
       // E1-C 追加：连接节点右键「查看 ER 图」→ 切到 ER 面板并生成。
       onViewErDiagram: (connRef) => {
         void openErDiagram(connRef)
+      },
+      // P2.2：表/视图右键「导出向导…」→ 打开流式导出向导。
+      onExportTable: (ref) => {
+        openWizardForTable(ref)
+      },
+      // P2.3：表右键「导入 CSV…」→ 打开 CSV 导入向导。
+      onImportTable: (ref) => {
+        void openImportWizardForTable(ref)
       }
     }
   )
+
+  // =====================================================================
+  // P2.2 导出向导
+  // =====================================================================
+  //
+  // 「导出向导」与既有的「导出全部」是**两条不同的路**：
+  //   - 「导出全部」：把结果集拉进渲染进程内存拼 CSV 后下载，5 万行上限；
+  //   - 「导出向导」：主进程逐批读、逐批写到你指定的路径，内存与行数无关。
+  //
+  // 两者并存而不是替换：前者快、顺手（下载到浏览器目录），后者能写大结果集
+  // 与自定义路径。把两者混成一个按钮会让用户以为"导出"只有一种行为。
+  /**
+   * 默认导出目录。
+   *
+   * ===== 为什么不在渲染进程里算 =====
+   *
+   * 渲染进程是 contextIsolation 的：**没有 `process`**，拿不到 home 目录
+   * （实测 `typeof process === 'undefined'`）。而默认路径必须是绝对路径——
+   * 相对路径会被向导当场拒绝，用户第一次点「开始导出」就撞墙。
+   *
+   * 所以这里用一条**已存在的**跨进程能力取路径：
+   * `listConnections()` 会返回每个 SQLite 连接的配置，其中 `options.file`
+   * 就是库文件的绝对路径——它的**所在目录**就是最自然的默认导出位置
+   * （导出就在源数据旁边，用户不用到处找）。
+   *
+   * 拿不到时退回 null：向导会明确提示"必须填绝对路径"，
+   * 这比塞一个注定被拒的相对路径诚实。
+   */
+  const defaultExportDirectory = async (): Promise<string | null> => {
+    try {
+      const connections = await api.listConnections()
+      const withFile = connections.find((item) => typeof item.options['file'] === 'string')
+      const file = withFile?.options['file']
+      if (typeof file !== 'string' || file === '') return null
+      const dir = file.slice(0, Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')))
+      return dir === '' ? null : dir
+    } catch {
+      // 拿不到就退回"必须手填绝对路径"，不让导出功能整体挂掉。
+      return null
+    }
+  }
+
+  const openWizard = async (scopes: readonly WizardScope[]): Promise<void> => {
+    const defaultDirectory = await defaultExportDirectory()
+    openTransferWizard({
+      api,
+      scopes,
+      defaultDirectory,
+      cb: {
+        onStatus: (t, isErr) => setStatus(t, isErr)
+      }
+    })
+  }
+
+  /** 从当前结果标签打开向导（含"筛选结果 / 原始结果集"的范围选择）。 */
+  const openWizardForActiveTab = (): void => {
+    const context = activeContext
+    if (!context) {
+      setStatus('没有可导出的结果', true)
+      return
+    }
+    openWizard(
+      wizardScopesForTab({
+        source: tabSourceFor(context.source),
+        baseSource: tabSourceFor(context.baseSource),
+        filterText: context.filterText
+      })
+    )
+  }
+
+  // 树上的表/视图右键导出：只有表来源，没有"筛选结果"的概念。
+  // 用 tree 的 onExportTable 回调接进来（未接线时该菜单项是 disabled 的）。
+  const openWizardForTable = (ref: ObjectRef): void => {
+    openWizard([
+      {
+        id: 'current',
+        label: ref.kind === 'view' ? '整个视图' : '整张表',
+        /**
+         * 视图必须用 `kind: 'view'` 标出来：视图**没有可插入的落点**，
+         * 所以 SQL INSERT 格式对它不适用。早先一律标成 `kind: 'table'`，
+         * 结果向导层的"SQL INSERT 需要表来源"规则对视图不触发，
+         * 用户只能在提交之后才看到主进程的报错。
+         */
+        source:
+          ref.kind === 'view'
+            ? { kind: 'view', nodeId: ref.id, name: ref.name }
+            : { kind: 'table', nodeId: ref.id, name: ref.name }
+      }
+    ])
+  }
+
+  // =====================================================================
+  // P2.3 导入向导
+  // =====================================================================
+  //
+  // 入口是**表节点右键**「导入 CSV…」，落点就是这张表。
+  //
+  // 为什么要先 `describeTable`：向导需要目标表的列名清单，
+  // 才能做两件事——
+  //   1. 给用户列出可点的列名（省掉手抄列名）；
+  //   2. 在前端就拦住"目标表里没有这一列"（否则要等提交后端才报错）。
+  //
+  // 取不到列信息**不阻断**导入：向导会退化成"让用户手写列名"，
+  // 列名校验交给后端。理由是 `describeTable` 可能因为连接瞬断而失败，
+  // 而"导不进去"比"少几个便捷按钮"更糟。
+  let importWizardRequestSeq = 0
+  const openImportWizardForTable = async (ref: ObjectRef): Promise<void> => {
+    const requestSeq = ++importWizardRequestSeq
+    let columns: ColumnDescription[] = []
+    try {
+      const desc = await api.describeTable(ref.id)
+      // 连续右键不同表时，只允许最后一次选择打开向导。
+      if (requestSeq !== importWizardRequestSeq) return
+      columns = [...desc.columns]
+    } catch (e) {
+      if (requestSeq !== importWizardRequestSeq) return
+      setStatus(`读取表结构失败，将由后端校验列名：${errText(e)}`, true)
+    }
+    if (requestSeq !== importWizardRequestSeq) return
+    openImportWizard({
+      api,
+      targetNodeId: ref.id,
+      targetName: ref.name,
+      targetColumns: columns,
+      cb: {
+        onStatus: (t, isErr) => setStatus(t, isErr),
+        // 导入是在渲染进程之外发生的，网格不会自己知道数据变了。
+        // 必须显式刷新，否则用户看到的是导入前的旧数据。
+        //
+        // 返回 Promise 是刻意的：向导会**等刷新完成**再写最终状态栏。
+        // 否则刷新时网格那句「已返回 N 行」会把「导入完成」冲掉。
+        onImported: async () => {
+          await tabs.reloadTableTabs(ref.id)
+        }
+      }
+    })
+  }
+
+  el<HTMLButtonElement>('btn-export-wizard').addEventListener('click', () => {
+    openWizardForActiveTab()
+  })
+
+  /**
+   * 把标签来源转成向导要的形状。
+   *
+   * ===== 为什么要多这一步 =====
+   *
+   * 标签的来源（tabs.ts 的 `TabSource`）与向导的来源（`TabSourceLike`）
+   * 形状不同，差在三处：
+   *   1. 表来源的**对象种类**（表 / 视图）——视图不能生成 INSERT；
+   *   2. SQL 来源的**绑定参数**——参数化查询光有 SQL 跑不起来；
+   *   3. SQL 来源的**方言**——决定占位符形态与字面量转义规则。
+   *
+   * 第 2 条最关键：早先漏掉参数，导出带 `:id` 的查询时报"缺少参数 id"，
+   * 而界面上显示的来源还是那句带占位符的 SQL，用户完全无从判断出了什么事。
+   */
+  const tabSourceFor = (source: ActiveTabContext['source']): TabSourceLike => {
+    if (source.kind === 'table') {
+      return {
+        kind: 'table',
+        ref: { id: source.ref.id, name: source.ref.name },
+        objectKind: source.ref.kind === 'view' ? 'view' : 'table'
+      }
+    }
+    return {
+      kind: 'sql',
+      nodeId: source.nodeId,
+      sql: source.sql,
+      ...(source.options?.parameters === undefined
+        ? {}
+        : { parameters: source.options.parameters }),
+      dialect: currentParameterDialect
+    }
+  }
 
   // ---- SQL 历史与收藏 ----
   let sqlLibrary: SqlLibraryPanel | null = null
@@ -555,6 +750,9 @@ async function boot(): Promise<void> {
 
   el('btn-refresh').addEventListener('click', () => {
     void tree.loadRoots()
+  })
+  el('btn-compare').addEventListener('click', () => {
+    openComparePanel({ api, onStatus: (text, isError) => setStatus(text, isError) })
   })
   el('btn-new-connection').addEventListener('click', () => {
     void openConnectionDialog(api, (summary) => {
@@ -895,6 +1093,28 @@ async function showDetail(
         )
       }
       content.appendChild(bar)
+      return
+    }
+
+    // 非 SQL 数据源（Redis key、Kafka topic/分区）把只读属性放在 meta 里，这里原样展示。
+    const meta = Object.entries(ref.meta ?? {})
+    if (meta.length > 0) {
+      empty.hidden = true
+      const h2 = document.createElement('h2')
+      h2.textContent = ref.name
+      const table = document.createElement('table')
+      table.className = 'detail-meta'
+      table.dataset['testid'] = 'detail-meta'
+      for (const [key, value] of meta) {
+        const tr = document.createElement('tr')
+        const th = document.createElement('th')
+        th.textContent = key
+        const td = document.createElement('td')
+        td.textContent = value === null ? '—' : String(value)
+        tr.append(th, td)
+        table.appendChild(tr)
+      }
+      content.append(h2, table)
       return
     }
 

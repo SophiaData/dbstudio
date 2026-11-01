@@ -41,3 +41,9 @@ out/gui-flow/
 # 备份目录（可能含证书/私钥，绝不入库）
 backups/
 tests/.ssh-fixture/
+
+# 临时/验证产物（手工清理时容易漏，显式忽略）
+tmp-*/
+verify-*/
+# electron-builder 会把 renderer 入口复制到项目根，属构建产物
+/index.html

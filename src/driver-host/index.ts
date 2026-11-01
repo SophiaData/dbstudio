@@ -66,6 +66,7 @@ import type {
   StatementResult
 } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
+import type { ImportBatch, ImportBatchResult } from '../core/transfer'
 import { normalizeSqlParameterValue } from '../core/sql-parameters'
 import { registerBuiltinDrivers } from '../drivers'
 
@@ -416,6 +417,57 @@ function parseCellValueRecord(
     out[key] = parseCellValue(value, method, `${where}.${key}`)
   }
   return out
+}
+
+/** 校验批量导入请求；列名和行值在这里只检查结构，语义由 adapter 白名单校验。 */
+function parseImportBatch(raw: unknown, method: RpcMethod): ImportBatch {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new RpcFailure('bad_params', `${method}: batch 必须是对象`)
+  }
+  const batch = raw as Record<string, unknown>
+  const batchIndex = parseNonNegativeInt(batch.batchIndex, 'batch.batchIndex', method)
+  if (!Array.isArray(batch.columns) || batch.columns.length === 0) {
+    throw new RpcFailure('bad_params', `${method}: batch.columns 必须是非空数组`)
+  }
+  const columns = batch.columns.map((column, index) => {
+    if (typeof column !== 'string' || column.trim() === '') {
+      throw new RpcFailure('bad_params', `${method}: batch.columns[${index}] 必须是非空字符串`)
+    }
+    return column
+  })
+  if (!Array.isArray(batch.rows) || batch.rows.length === 0) {
+    throw new RpcFailure('bad_params', `${method}: batch.rows 必须是非空数组`)
+  }
+  const rows = batch.rows.map((rawRow, rowIndex) => {
+    if (typeof rawRow !== 'object' || rawRow === null || Array.isArray(rawRow)) {
+      throw new RpcFailure('bad_params', `${method}: batch.rows[${rowIndex}] 必须是对象`)
+    }
+    const row = rawRow as Record<string, unknown>
+    const rowNumber = parsePositiveInt(row.rowNumber, `batch.rows[${rowIndex}].rowNumber`, method)
+    const lineNumber =
+      row.lineNumber === undefined
+        ? undefined
+        : parsePositiveInt(row.lineNumber, `batch.rows[${rowIndex}].lineNumber`, method)
+    if (!Array.isArray(row.values)) {
+      throw new RpcFailure('bad_params', `${method}: batch.rows[${rowIndex}].values 必须是数组`)
+    }
+    if (row.values.length !== columns.length) {
+      throw new RpcFailure(
+        'bad_params',
+        `${method}: batch.rows[${rowIndex}].values 有 ${row.values.length} 个值，` +
+          `但 batch.columns 有 ${columns.length} 列`
+      )
+    }
+    const values = row.values.map((value, valueIndex) =>
+      parseCellValue(value, method, `batch.rows[${rowIndex}].values[${valueIndex}]`)
+    )
+    return {
+      rowNumber,
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      values
+    }
+  })
+  return { batchIndex, columns, rows }
 }
 
 /**
@@ -818,6 +870,14 @@ class DriverHost {
         return await this.#adapter.insertRow(tableId, values)
       }
 
+      case 'importBatch': {
+        this.#requireConnected(req.method)
+        const tableId = parseObjectId(params.tableId, req.method, 'tableId')
+        const batch = parseImportBatch(params.batch, req.method)
+        const result: ImportBatchResult = await this.#adapter.importBatch(tableId, batch)
+        return result
+      }
+
       case 'deleteRows': {
         this.#requireConnected(req.method)
         const tableId = parseObjectId(params.tableId, req.method, 'tableId')
@@ -896,6 +956,32 @@ class DriverHost {
         const newName = parseObjectId(params.newName, req.method, 'newName')
         await this.#adapter.renameTable(nodeId, newName)
         return null
+      }
+
+      /**
+       * 解析导出对象 → 读取语句 + INSERT 落点。
+       *
+       * 这条 RPC 只做**解析**，不取数据：真正的取数走既有的
+       * query / fetchResultPage（分页读取），文件写入在主进程。
+       *
+       * 驱动没实现这个可选方法时，明确报 unsupported_method——
+       * 绝不返回一条"猜出来的" SELECT，那可能指向完全错误的对象。
+       */
+      case 'resolveTransferSource': {
+        this.#requireConnected(req.method)
+        const nodeId = parseObjectId(params.nodeId, req.method, 'nodeId')
+        if (typeof this.#adapter.resolveTransferSource !== 'function') {
+          throw new RpcFailure(
+            'unsupported_method',
+            `方言 ${this.#adapter.dialect.id} 不支持按对象导出（未实现 resolveTransferSource）。` +
+              '请改用 SQL 来源导出。'
+          )
+        }
+        const resolution = await this.#adapter.resolveTransferSource(nodeId)
+        return {
+          sql: resolution.sql,
+          ...(resolution.target === undefined ? {} : { target: resolution.target })
+        }
       }
 
       default: {

@@ -137,6 +137,28 @@ export interface TreeCallbacks {
    * 未接线时该菜单项 disabled，不静默失败。
    */
   onViewErDiagram?(connectionRef: ObjectRef): void
+  /**
+   * 对表/视图打开导出向导。
+   *
+   * 为什么放在树右键菜单：这是"从元数据出发导出"的入口，
+   * 与结果集标签栏的「导出向导」是**不同的用户意图**——
+   * 一个是"我手上有这张表"，一个是"我手上有这个结果集"。
+   *
+   * 可选：未接线时菜单项 disabled，不静默失败。
+   */
+  onExportTable?(ref: ObjectRef): void
+  /**
+   * 对表打开 CSV 导入向导。
+   *
+   * 与 `onExportTable` 分开而不是合并成一个"数据传送"回调：
+   * 导出是**读**数据库、导入是**写**数据库，两者的后果完全不同
+   * （导入会改数据、还涉及事务与回滚）。合成一个回调会让调用点
+   * 必须再判断一次 kind，反而更容易出错。
+   *
+   * 只对**表**开放（视图不可插入），由向导层与调用点共同把关。
+   * 可选：未接线时菜单项 disabled，不静默失败。
+   */
+  onImportTable?(ref: ObjectRef): void
 }
 
 export class MetadataTree {
@@ -1261,6 +1283,49 @@ export class MetadataTree {
         label: '删除分组（连接回到顶层）',
         danger: true,
         run: () => this.#openDeleteGroup(node.ref.name)
+      })
+    }
+
+    // ---- 导出向导（表 / 视图）----
+    //
+    // 为什么只给表与视图：它们是"能读出数据"的对象。
+    // 视图也能导出（作为查询来源），但 SQL INSERT 不适用于视图
+    // （没有可插入的落点）——这一限制由向导按格式判断。
+    if (node.ref.kind === 'table' || node.ref.kind === 'view') {
+      const canExport = typeof this.#cb.onExportTable === 'function'
+      items.push({
+        label: '导出向导…',
+        disabled: !canExport,
+        run: () => {
+          if (typeof this.#cb.onExportTable !== 'function') {
+            this.#cb.onStatus('导出向导尚未接入（缺少 onExportTable 回调）', true)
+            return
+          }
+          this.#cb.onExportTable(node.ref)
+        }
+      })
+    }
+
+    // ---- CSV 导入向导（仅表）----
+    //
+    // 为什么只给**表**：导入要往表里写数据，而**视图不可插入**——
+    // 给视图挂一个「导入 CSV…」入口，用户点下去只会被后端拒绝
+    // （"INSERT 目标不是表"），白等一趟。
+    //
+    // 入口放在**表**节点上（而不是连接节点上）：导入的落点是"这张表"，
+    // 从表出发最直接，也和「导出向导…」的位置保持一致。
+    if (node.ref.kind === 'table') {
+      const canImport = typeof this.#cb.onImportTable === 'function'
+      items.push({
+        label: '导入 CSV…',
+        disabled: !canImport,
+        run: () => {
+          if (typeof this.#cb.onImportTable !== 'function') {
+            this.#cb.onStatus('导入向导尚未接入（缺少 onImportTable 回调）', true)
+            return
+          }
+          this.#cb.onImportTable(node.ref)
+        }
       })
     }
 

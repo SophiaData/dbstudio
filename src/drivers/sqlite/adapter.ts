@@ -23,6 +23,11 @@ import { DatabaseSync } from 'node:sqlite'
 
 import type { ConnectionConfig } from '../../core/dialect'
 import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../core/driver'
+import type {
+  ImportBatch,
+  ImportBatchResult,
+  TransferSourceResolution
+} from '../../core/transfer'
 import type { DriverCapabilities, ObjectRef, TableDescription, ColumnDescription } from '../../core/model'
 import type { DriverFactory } from '../../core/registry'
 import type {
@@ -45,6 +50,7 @@ import {
   buildUpdateSql,
   mustGetValue,
   resolveColumns,
+  toBindValue,
   type ColumnMatch,
   type SqliteBind
 } from './edits'
@@ -65,6 +71,7 @@ import {
   normalizeInsertValues
 } from './mutations'
 import { SqliteAdapterError, describeThrown } from './errors'
+import { readSqliteColumnMetadata, toCoreTableMetadata } from './metadata'
 import { SQLITE_INFO } from './info'
 import {
   TABLES_FOLDER_ID,
@@ -83,6 +90,7 @@ import {
   prepareReadOnlyStatement,
   prepareGeneralStatement,
   readGrid,
+  readGridWithTextNulGuard,
   toFullCellValue,
   cellByName,
   type RawGrid,
@@ -113,7 +121,16 @@ const SQLITE_CAPABILITIES: DriverCapabilities = {
   hasSchema: false,
   supportsServerPagination: true,
   supportsCancel: false,
-  supportsInlineEdit: true
+  supportsInlineEdit: true,
+  // SQLite 的 PRAGMA 能读出外键、索引、唯一约束、CHECK 与触发器。
+  // 声明在这里，UI 才能在请求之前就知道"这个连接能给出外键"。
+  metadata: {
+    foreignKeys: true,
+    indexes: true,
+    uniqueConstraints: true,
+    checkConstraints: true,
+    triggers: true
+  }
 }
 
 /** PRAGMA table_info 的一行，先收窄成本模块自己的形状，避免 SQLOutputValue 的联合类型到处扩散。 */
@@ -136,6 +153,145 @@ function readNumber(value: unknown): number | null {
   // 理论上开启 readBigInts 才会出现；保留分支以免将来改了打开选项后静默变成 null
   if (typeof value === 'bigint') return Number(value)
   return null
+}
+
+/**
+ * 从数据库错误里尽量提取列名；提取不到时由调用方退回完整目标列清单。
+ *
+ * ===== 为什么"只接受确实是目标列"的候选 =====
+ *
+ * 错误原文里带引号的内容**未必是列名**。SQLite 的报错多半来自触发器，
+ * 而触发器可以自己拼消息（`RAISE(ABORT, '坏值: ' || NEW.email)`），
+ * 里面的引号内容可能是本行的真实数据。若把这种内容当列名回显，
+ * 就等于把 CSV 的值又抄了一遍出去——正是这个函数要防的事。
+ *
+ * 所以候选必须**与目标列名精确匹配（忽略大小写）**才被采信，
+ * 否则一律视为"无法定位列"，由调用方退回目标列清单。
+ */
+function importErrorColumn(message: string, columns: readonly string[]): string | null {
+  const patterns = [
+    /null value in column\s+"([^"]+)"/i,
+    /NOT NULL constraint failed:\s*(?:\S+\.)?([^\s]+)/i,
+    /constraint failed:\s*(?:\S+\.)?([^\s,]+)/i,
+    /column\s+"([^"]+)"/i
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(message)
+    const candidate = match?.[1]
+    if (candidate === undefined || candidate === '') continue
+    const exact = columns.find((column) => column.toLowerCase() === candidate.toLowerCase())
+    if (exact !== undefined) return exact
+  }
+  return null
+}
+
+/**
+ * 导入写行失败时使用的**固定错误类别**。
+ *
+ * ===== 为什么不能回显引擎原文 =====
+ *
+ * SQLite 的错误消息**由触发器作者完全控制**：
+ * `RAISE(ABORT, '坏值: ' || NEW.email)` 会把本行的真实值写进错误消息，
+ * 而错误消息会一路传到 renderer —— 那就等于"CSV 数据出现在界面上"，
+ * 违反"renderer 永远拿不到行数据"的契约（见 core/transfer.ts 文件头）。
+ *
+ * ===== 为什么"逐值替换式抹除"不够（已实测的漏法） =====
+ *
+ * 旧实现把本行的每个文本值整串从错误文本里替换掉，但触发器**可以先变换再回显**：
+ *   - `substr(NEW.note, 1, 6)` —— 只回显片段，整值替换认不出来；
+ *   - `upper(NEW.note)`        —— 大写之后认不出来；
+ *   - `hex(NEW.num)`           —— 十六进制之后认不出来；
+ *   - SQLite 的**类型亲和性**还会把 '42' 变成整数 42 再拼进消息。
+ * 而且长度为 1 的值只能按"独立词"替换，紧挨别的字符就漏。
+ * 结论：只要回显原文，就一定存在泄漏面。
+ *
+ * 所以改成**不回显原文**：错误消息里只放
+ *   1) 固定措辞的错误类别（由 SQLite 的 result code 决定）；
+ *   2) 批次 / CSV 数据行 / 文件物理行；
+ *   3) 白名单内的目标列名。
+ * 类别取自 SQLite 官方的**结构化数字码**（node:sqlite 暴露为 `errcode`），
+ * 不含任何用户数据。另一个方言（PostgreSQL）按同样的口径处理。
+ */
+const SQLITE_IMPORT_ERROR_HINTS: Readonly<Record<number, string>> = {
+  1: '数据库拒绝了这次写入', // SQLITE_ERROR
+  18: '写入的值超出了目标列的长度限制', // SQLITE_TOOBIG
+  19: '写入的值违反了数据库约束', // SQLITE_CONSTRAINT
+  20: '写入的值类型与目标列不匹配' // SQLITE_MISMATCH
+}
+
+/**
+ * SQLITE_CONSTRAINT 的扩展码 → 更精确的固定类别。
+ *
+ * 扩展码取自 SQLite 官方定义（`errcode >>> 8`）：
+ * 1=CHECK、3=FOREIGNKEY、5=NOTNULL、6=PRIMARYKEY、7=TRIGGER、
+ * 8=UNIQUE、10=ROWID、12=DATATYPE。
+ */
+const SQLITE_IMPORT_CONSTRAINT_HINTS: Readonly<Record<number, string>> = {
+  1: '写入的值违反了 CHECK 约束',
+  3: '写入的值违反了外键约束',
+  5: '写入的值在不允许 NULL 的列上是 NULL',
+  6: '写入的值违反了主键约束',
+  7: '写入被数据库的触发器拒绝',
+  8: '写入的值违反了唯一约束',
+  10: '写入的值违反了行 ID 约束',
+  12: '写入的值类型与目标列不匹配'
+}
+
+/** 从错误对象里读一个数字字段（node:sqlite 的 `errcode` 是数字）。 */
+function readSqliteErrorNumber(thrown: unknown, field: string): number | null {
+  if (typeof thrown !== 'object' || thrown === null) return null
+  const value = (thrown as Record<string, unknown>)[field]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** 从错误对象里读一个字符串字段；读不到就返回 null，绝不猜。 */
+function readSqliteErrorText(thrown: unknown, field: string): string | null {
+  if (typeof thrown !== 'object' || thrown === null) return null
+  const value = (thrown as Record<string, unknown>)[field]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * 把一次写行失败归类成固定措辞。
+ *
+ * 只用 SQLite 的 result code（结构化数字码）判定；读不到码就落到最保守的
+ * 通用类别。**任何情况下都不把引擎原文拼进结果**。
+ */
+function classifySqliteImportFailure(thrown: unknown): string {
+  const errcode = readSqliteErrorNumber(thrown, 'errcode')
+  if (errcode === null) return SQLITE_IMPORT_ERROR_HINTS[1] ?? '数据库拒绝了这次写入'
+  const primary = errcode & 0xff
+  const extended = errcode >>> 8
+  if (primary === 19) {
+    // SQLITE_CONSTRAINT：扩展码能区分具体是哪一类约束（含 TRIGGER）。
+    return (
+      SQLITE_IMPORT_CONSTRAINT_HINTS[extended] ??
+      SQLITE_IMPORT_ERROR_HINTS[19] ??
+      '写入的值违反了数据库约束'
+    )
+  }
+  return SQLITE_IMPORT_ERROR_HINTS[primary] ?? '数据库拒绝了这次写入'
+}
+
+/**
+ * 导入失败时挂的**安全 cause**：只带 SQLite 的结构化码。
+ *
+ * 原来的写法是把原始异常整个挂成 `cause`，那等于把"含本行数据的错误原文"
+ * 留在错误对象里——即使当前 RPC 协议只传 `{ code, message }`（见
+ * src/driver-host/index.ts 的 toRpcError），留着它也迟早被人误用/误序列化。
+ * 这里只保留固定码，排查够用，且不可能夹带数据。
+ */
+function sqliteImportFailureCause(thrown: unknown): {
+  readonly driver: 'sqlite'
+  readonly errorCode: string | null
+  readonly errcode: number | null
+} {
+  const errorCode = readSqliteErrorText(thrown, 'code')
+  return {
+    driver: 'sqlite',
+    errorCode: errorCode !== null && /^[A-Z0-9_]{1,64}$/.test(errorCode) ? errorCode : null,
+    errcode: readSqliteErrorNumber(thrown, 'errcode')
+  }
 }
 
 /**
@@ -372,6 +528,14 @@ export class SqliteDriverAdapter implements DriverAdapter {
    */
   #pendingAffected = 0
 
+  /**
+   * 当前打开的是否是本适配器为 CSV 导入创建的事务。
+   *
+   * 不能只看 `db.isTransaction`：那也可能是用户在线编辑留下的未提交事务。
+   * 导入绝不能复用它，否则成功时的 COMMIT 会把用户无关改动一起提交。
+   */
+  #importActive = false
+
   async connect(config: ConnectionConfig, _secret: SecretValue): Promise<DriverCapabilities> {
     /**
      * 一个 adapter 实例只服务一个连接（一个连接一个宿主进程，见 core/driver.ts）。
@@ -402,6 +566,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     this.#db = null
     this.#cursors.clear()
     this.#pendingAffected = 0
+    this.#importActive = false
     if (db === null) return
     /**
      * 有未提交事务必须先回滚再关连接。
@@ -514,21 +679,61 @@ export class SqliteDriverAdapter implements DriverAdapter {
       )
     }
 
-    const columns = this.#readColumns(db, parsed.name).map(
+    const columns = readSqliteColumnMetadata(db, parsed.name).map(
       (raw): ColumnDescription => ({
         name: raw.name,
         typeName: raw.typeName,
         nullable: raw.nullable,
         primaryKeyOrdinal: raw.primaryKeyOrdinal,
-        defaultValue: raw.defaultValue
+        defaultValue: raw.defaultValue,
+        generated: raw.generated,
+        requiredOnInsert: raw.requiredOnInsert,
+        hidden: raw.hidden
       })
     )
 
-    return {
+    const description: TableDescription = {
       // 回填规范化后的 id（转义/大小写保持不变，但保证与列表节点用同一套构造函数）
       id: parsed.kind === 'table' ? tableObjectId(parsed.name) : viewObjectId(parsed.name),
       columns,
       hasUniqueKey: columns.some((column) => column.primaryKeyOrdinal !== null)
+    }
+
+    return this.#withMetadata(db, parsed.name, description)
+  }
+
+  /**
+   * 追加结构元数据（外键 / 索引 / 唯一约束 / CHECK / 触发器）。
+   *
+   * ===== 为什么失败时整个字段留空，而不是让 describeTable 抛错 =====
+   *
+   * `describeTable` 的本职是"告诉 UI 这张表长什么样"——
+   * 列和唯一键是**网格能否工作**的前提，丢了整张表就打不开。
+   * 而外键、索引这些是**附加信息**：读不到只是 ER 图少画几条线，
+   * 不该让用户连表都看不到。
+   *
+   * 所以这里是"尽力而为"：读失败就**整块省略**这些字段，
+   * 让 UI 落到 `metadataAvailability()` 的 'unavailable' 状态，
+   * 而不是把它误显示成"这张表没有外键"。
+   *
+   * 视图不读元数据：SQLite 的视图没有自己的外键与索引，
+   * 对着 sqlite_master 查一遍只会得到空结果，白花一次查询。
+   */
+  #withMetadata(
+    db: DatabaseSync,
+    tableName: string,
+    description: TableDescription
+  ): TableDescription {
+    try {
+      return {
+        ...description,
+        ...toCoreTableMetadata(db, tableName)
+      }
+    } catch (thrown) {
+      // 只吞"读元数据失败"，不吞参数/状态错误：
+      // 那些是真正的 bug，应该让测试看见，而不是被静默降级。
+      if (!(thrown instanceof SqliteAdapterError)) throw thrown
+      return description
     }
   }
 
@@ -572,7 +777,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     const executedSql = buildPagedSql(statementSql, limit, offset)
 
     const startedAt = performance.now()
-    const grid = this.#runStatement(db, executedSql, params)
+    const grid = this.#runGuardedStatement(db, executedSql, params, offset)
     const elapsedMs = Math.round(performance.now() - startedAt)
 
     /**
@@ -683,7 +888,12 @@ export class SqliteDriverAdapter implements DriverAdapter {
 
     const pageSize = normalizePageSize(limit)
     const start = normalizeOffset(offset)
-    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, pageSize, start), cursor.params)
+    const grid = this.#runGuardedStatement(
+      db,
+      buildPagedSql(cursor.sql, pageSize, start),
+      cursor.params,
+      start
+    )
 
     return {
       // 每页都带列元信息：渲染进程不必另外记一份，也不必假设前后页结构一致
@@ -762,6 +972,135 @@ export class SqliteDriverAdapter implements DriverAdapter {
 
     this.#pendingAffected += 1
     return { affected: 1, keyValues: this.#resolveInsertedKeyValues(target, normalized.byColumn, insertedRowid) }
+  }
+
+  /**
+   * 批量写入 CSV 行。
+   *
+   * 事务归属严格限定：连接上已有任何未提交事务时拒绝导入，避免把用户
+   * 的编辑一起提交。第一批开启事务后置 `#importActive`，后续批次只复用
+   * 这个由导入创建的事务。
+   */
+  async importBatch(tableId: string, batch: ImportBatch): Promise<ImportBatchResult> {
+    const db = this.#requireDb()
+    const target = this.#resolveTableTarget(db, tableId, false)
+    const resolved = resolveColumns(batch.columns, target.availableColumns)
+    if (resolved.unknown.length > 0) {
+      throw new SqliteAdapterError(
+        'bad_params',
+        `导入目标列不存在：${resolved.unknown.join('、')}。「${target.tableName}」的可用列：` +
+          target.availableColumns.join('、')
+      )
+    }
+    const columns = resolved.matched.map((match) => match.canonical)
+    if (new Set(columns).size !== columns.length) {
+      throw new SqliteAdapterError('bad_params', '导入目标列重复，无法确定每个 CSV 值应写入哪一列。')
+    }
+    if (batch.rows.length === 0) {
+      throw new SqliteAdapterError('bad_params', '导入批次为空，已拒绝执行。')
+    }
+    for (let index = 0; index < batch.rows.length; index += 1) {
+      const row = batch.rows[index]
+      if (row === undefined) continue
+      if (row.values.length !== columns.length) {
+        throw new SqliteAdapterError(
+          'bad_params',
+          `导入批次第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行）有 ${row.values.length} 个值，` +
+            `但目标列有 ${columns.length} 个。`
+        )
+      }
+    }
+
+    if (this.#importActive) {
+      if (!db.isTransaction) {
+        throw new SqliteAdapterError('query_failed', '导入事务已意外结束，无法继续写入；请重新开始导入。')
+      }
+    } else {
+      if (db.isTransaction) {
+        throw new SqliteAdapterError(
+          'bad_params',
+          '目标连接上已有未提交事务。请先提交或回滚该事务，再开始 CSV 导入，' +
+            '以免导入把无关改动一起提交。'
+        )
+      }
+      this.#execTransaction(db, 'BEGIN IMMEDIATE')
+      this.#importActive = true
+      this.#pendingAffected = 0
+    }
+
+    const sql = buildInsertSql(this.dialect.quoteIdentifier, target.tableName, columns)
+    let statement: ReturnType<DatabaseSync['prepare']>
+    try {
+      statement = db.prepare(sql)
+    } catch (thrown) {
+      throw new SqliteAdapterError(
+        'query_failed',
+        `导入语句准备失败；目标列「${columns.join('、')}」：${describeThrown(thrown)}`,
+        thrown
+      )
+    }
+
+    let imported = 0
+    for (let index = 0; index < batch.rows.length; index += 1) {
+      const row = batch.rows[index]
+      if (row === undefined) continue
+      const params = row.values.map(toBindValue)
+      const physical = row.lineNumber === undefined ? '' : `（文件物理第 ${row.lineNumber} 行）`
+      /**
+       * `statement.run()` 的 `changes` 是**这一条语句实际写入的行数**
+       * （sqlite3_changes 语义），不是"语句没报错"的同义词。
+       */
+      let changes = 0
+      try {
+        const info = statement.run(...params)
+        changes = readNumber(info.changes) ?? 0
+      } catch (thrown) {
+        /**
+         * **不回显引擎原文**。
+         *
+         * 触发器可以拼任意内容（`RAISE(ABORT, '坏值: ' || substr(NEW.note,1,6))`），
+         * 逐值替换式抹除挡不住变换后的片段（见 classifySqliteImportFailure 的说明）。
+         * 这里只输出三样东西：
+         *   1) 固定措辞的错误类别（由 SQLite 的 result code 决定）；
+         *   2) 批次 / CSV 数据行 / 文件物理行；
+         *   3) 白名单内的目标列名。
+         */
+        const raw = describeThrown(thrown)
+        // 列名仍从原文里取，但**只接受白名单内的目标列**（见 importErrorColumn）；
+        // 认不出来就退回目标列清单，同样全是白名单内的列名。
+        const column = importErrorColumn(raw, columns) ?? columns.join('、')
+        throw new SqliteAdapterError(
+          'query_failed',
+          `导入第 ${batch.batchIndex + 1} 批第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行${physical}）` +
+            `写入列「${column}」失败：${classifySqliteImportFailure(thrown)}`,
+          sqliteImportFailureCause(thrown)
+        )
+      }
+      /**
+       * ===== 必须核对实际写入行数 =====
+       *
+       * `BEFORE INSERT` 触发器里的 `RAISE(IGNORE)` 会让这条 INSERT
+       * **语句成功返回、一行都没写进去**（`changes = 0`）。
+       * 若这里照样 `imported += 1`，上层看到的"已写入行数 == 批次行数"就成立，
+       * 于是直接 COMMIT —— 用户以为导入成功，数据库里却少了行。
+       * 这就是**静默丢数据**，比报错严重得多。
+       *
+       * 所以以 `changes` 为准：对不上就失败并抛给上层，由上层回滚整个导入。
+       * 正常写入一行时 `changes` 恒为 1（我们逐行 INSERT，不做多值插入）。
+       */
+      if (changes !== 1) {
+        throw new SqliteAdapterError(
+          'query_failed',
+          `导入第 ${batch.batchIndex + 1} 批第 ${index + 1} 行（CSV 数据第 ${row.rowNumber} 行${physical}）` +
+            `写入失败：数据库没有写入这一行（实际影响行数为 ${changes}，常见原因是 BEFORE INSERT 触发器用 ` +
+            'RAISE(IGNORE) 跳过了该行）。已中止导入并请求回滚，以免静默丢数据。'
+        )
+      }
+      imported += changes
+    }
+
+    this.#pendingAffected += imported
+    return { rowsImported: imported, inTransaction: db.isTransaction }
   }
 
   /**
@@ -911,7 +1250,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     const row = normalizeOffset(rowIndex)
     const column = normalizeOffset(columnIndex)
     // 一次只取一行：LIMIT 1 OFFSET row
-    const grid = this.#runStatement(db, buildPagedSql(cursor.sql, 1, row), cursor.params)
+    const grid = this.#runGuardedStatement(db, buildPagedSql(cursor.sql, 1, row), cursor.params, row)
     const targetRow = grid.rows[0]
     if (targetRow === undefined) {
       throw new SqliteAdapterError('object_not_found', `结果集里没有第 ${row} 行（可能已到末尾）。`)
@@ -1110,6 +1449,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     }
     this.#execTransaction(db, 'COMMIT')
     this.#pendingAffected = 0
+    this.#importActive = false
     return { active: db.isTransaction, pendingAffected: this.#pendingAffected }
   }
 
@@ -1125,6 +1465,7 @@ export class SqliteDriverAdapter implements DriverAdapter {
     if (db === null) return { active: false, pendingAffected: 0 }
     if (db.isTransaction) this.#execTransaction(db, 'ROLLBACK')
     this.#pendingAffected = 0
+    this.#importActive = false
     return { active: db.isTransaction, pendingAffected: this.#pendingAffected }
   }
 
@@ -1275,6 +1616,31 @@ export class SqliteDriverAdapter implements DriverAdapter {
       return readGrid(db, sql, this.#arrayMode, ...params)
     } catch (thrown) {
       // SqliteAdapterError 已经是可读信息（比如重名列那条），原样往上抛
+      if (thrown instanceof SqliteAdapterError) throw thrown
+      throw new SqliteAdapterError(
+        'query_failed',
+        `查询执行失败（原始错误：${describeThrown(thrown)}）`,
+        thrown
+      )
+    }
+  }
+
+  /**
+   * 与 `#runStatement` 相同，但先用数据库侧表达式检查 TEXT 中的 NUL。
+   *
+   * 只有 SQLite 能把 TEXT 原始字节与 JS 字符串长度区分开；绑定层截断后
+   * JS 侧无法恢复。因此分页查询、后续页和完整单元格读取都走这里，
+   * 发现 NUL 时整页失败，而不是返回半个字符串。
+   */
+  #runGuardedStatement(
+    db: DatabaseSync,
+    sql: string,
+    params: readonly BindValue[] = [],
+    rowOffset = 0
+  ): RawGrid {
+    try {
+      return readGridWithTextNulGuard(db, sql, this.#arrayMode, params, rowOffset)
+    } catch (thrown) {
       if (thrown instanceof SqliteAdapterError) throw thrown
       throw new SqliteAdapterError(
         'query_failed',
@@ -1747,6 +2113,33 @@ export class SqliteDriverAdapter implements DriverAdapter {
         )
       }
       throw new SqliteAdapterError('query_failed', `${hints.action}「${hints.target}」失败（原始错误：${raw}）`, thrown)
+    }
+  }
+
+  /**
+   * 把对象节点解析成「读取语句 + INSERT 落点」。
+   *
+   * ===== 为什么由驱动解析 =====
+   *
+   * SQLite 的对象 id 是 `table:<name>` / `view:<name>`，名字里**可以含冒号**
+   * （只切第一个冒号，见 `ids.ts`）。主进程若自己切，就会把 `a:b` 这类表名
+   * 解析错。而且 SQLite 没有 schema 层——表名就是全名。
+   *
+   * 视图**不能**作为 INSERT 目标（`kind: 'view'`），
+   * 上层会据此拒绝 sql-insert 格式，而不是生成一条注定失败的 INSERT。
+   */
+  async resolveTransferSource(nodeId: string): Promise<TransferSourceResolution> {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || (parsed.kind !== 'table' && parsed.kind !== 'view')) {
+      throw new SqliteAdapterError(
+        'object_not_found',
+        `无法识别的导出对象 id：${nodeId}（只支持表与视图节点）`
+      )
+    }
+    const quoted = this.dialect.quoteIdentifier(parsed.name)
+    return {
+      sql: `SELECT * FROM ${quoted}`,
+      target: { name: parsed.name, kind: parsed.kind }
     }
   }
 
