@@ -137,7 +137,16 @@ export default {
   },
 
   linux: {
-    artifactName: 'dbstudio-${version}-linux-${arch}.${ext}',
+    /*
+     * 这里**不能**用 `${arch}`：electron-builder 在 Linux 上把它展开成
+     * `x86_64`，而 release-gate 期望的架构名是 `x64`，于是产物名与校验期望
+     * 不一致，gate 会以 ENOENT 失败：
+     *   实际: dbstudio-0.4.0-linux-x86_64.AppImage
+     *   期望: dbstudio-0.4.0-linux-x64.AppImage
+     * Linux 目前只出 x64 一个架构，直接写死即可（mac 的 `${arch}` 展开为
+     * arm64、Windows 展开为 x64，都与 gate 一致，不受影响）。
+     */
+    artifactName: 'dbstudio-${version}-linux-x64.${ext}',
     target: ['AppImage'],
     category: 'Development',
     icon: 'build/icon.png'
