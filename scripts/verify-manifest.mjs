@@ -91,6 +91,9 @@ export const STEPS = [
   { id: 'test:data-compare', title: '按唯一键的数据比较与同步计划', group: 'node' },
   { id: 'test:compare-live', title: '真实 SQLite 连接上的结构快照与数据比较（只读）', group: 'node' },
   { id: 'test:nosql-drivers', title: 'Redis / Kafka 只浏览驱动契约', group: 'node' },
+  { id: 'test:bench-resultset', title: '结果集性能基线（首屏 / 分页 p95 / 深分页）', group: 'node' },
+  { id: 'test:bench-transfer', title: '导出性能基线（吞吐与峰值内存线性度）', group: 'node' },
+  { id: 'test:bench-metadata', title: '元数据性能基线（懒加载与读取次数）', group: 'node' },
   { id: 'test:release-gate', title: '发布门禁与 draft 附件校验', group: 'node' },
   { id: 'test:packaged-smoke', title: '打包冒烟脚本的离线回归', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，

@@ -201,6 +201,29 @@ pnpm verify:external   # 需要外部服务：PG / SSL / SSH
 pnpm verify:ci         # 强制要求外部服务就绪（缺环境即判失败）
 ```
 
+性能基线（已进 `verify:node`，因含百万行用例耗时较长；也可单独跑）：
+
+```bash
+pnpm run test:bench-resultset   # 首屏 / 分页 p95 / 深分页
+pnpm run test:bench-transfer    # 导出吞吐与峰值内存线性度
+pnpm run test:bench-metadata    # 元数据懒加载纪律
+```
+
+实测（2026-11-02，Apple Silicon 本机，SQLite）：
+
+| 项目 | 100 万行实测 |
+|---|---|
+| 首屏（前 100 行） | ~3ms |
+| 分页 p95 | ~19ms |
+| 深分页（offset≈100 万） | ~21ms |
+| 导出耗时 | ~56s（17.8k 行/秒） |
+| 导出峰值内存 | 34MB（10 万行）→ 43MB（100 万行），行数 ×10 内存只 ×1.3 |
+| 展开 51 张表的库 | `describeTable` 调用 **0** 次（懒加载生效） |
+
+导出 100 万行要 ~56s，慢在 SQLite 的分页读取（每批 `LIMIT/OFFSET` 重执行并跳过
+offset 行），见下文「一个已知代价」。这些数字是**基线**：门槛设得宽松，用来发现
+数量级退化（比如某次改动让首屏从 3ms 变 2s），不是卡在几毫秒上。
+
 | 分组 | 包含 |
 |---|---|
 | `node` | 类型检查、构建、夹具；元数据、结果集、编辑、持久化、增删改、DDL 与结构化 DDL 预览、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC、CSV 导入解析/预览契约与导入任务事务（SQLite；PG 分支可选）、导入驱动安全/RPC 超时竞态/PG 事务状态同步（模拟 pg Client，非真 PG）、导入终态结果文案分类（纯函数）、ER 关系与布局契约；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |

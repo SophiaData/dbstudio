@@ -108,6 +108,9 @@
     "test:data-compare": "node tests/e2e-data-compare.mjs",
     "test:compare-live": "node tests/e2e-compare-live.mjs",
     "test:nosql-drivers": "node tests/e2e-nosql-drivers.mjs",
+    "test:bench-resultset": "node tests/bench-resultset.mjs",
+    "test:bench-transfer": "node tests/bench-transfer.mjs",
+    "test:bench-metadata": "node tests/bench-metadata.mjs",
     "test:compare-cross-dialect": "node tests/e2e-compare-cross-dialect.mjs",
     "test:nosql-external": "node tests/e2e-nosql-external.mjs"
   },
