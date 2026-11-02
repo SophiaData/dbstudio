@@ -60,6 +60,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # MySQL 8 服务容器：给 test:mysql-contract 用真实库。
+      # 用**空密码**（MYSQL_ALLOW_EMPTY_PASSWORD）而不是密码认证，原因与 PG 用 trust 相同：
+      # test 在 add 时把 secret 交给 ConnectionStore，Linux CI 无 keyring 存不住密码，
+      # 重连会拿不到口令。空密码让测试不依赖密码持久化，仍能真实跑驱动。
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: testdb
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +125,18 @@ jobs:
           node scripts/verify.mjs external --only test:postgres --require-external
           node scripts/verify.mjs external --only test:explain-postgres --require-external
           node scripts/verify.mjs external --only test:sql-params-postgres --require-external
+
+      - name: MySQL 驱动端到端（真实 MySQL 8 服务容器）
+        # 单独列一步，失败时一眼看出是 MySQL 的问题。空密码见 services.mysql 的说明。
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: '3306'
+          MYSQL_USER: root
+          MYSQL_PASSWORD: ''
+          MYSQL_DATABASE: testdb
+        run: |
+          node scripts/build-driver-host.mjs
+          node scripts/verify.mjs external --only test:mysql-contract --require-external
 
       - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
         env:

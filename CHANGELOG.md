@@ -4,6 +4,35 @@
 
 ---
 
+## 0.7.0（2026-11-02）— 第三个 SQL 数据库：MySQL / MariaDB
+
+### 新增
+
+- **MySQL / MariaDB 驱动**（P6.2）：
+  - 只读与元数据：连接、`database` 作命名空间的目录浏览（库 → 表/视图 → 列）、
+    列 / 主键 / 索引 / 外键 / 唯一约束、分页查询、任意语句执行、EXPLAIN、取消（`KILL QUERY`）。
+  - 写入与传输：网格在线编辑（主键定位 UPDATE）、插入 / 删除行、事务（提交/回滚/状态）、
+    完整值读取、分批导出、CSV 批量导入。
+  - 如实声明能力：未实现的 CHECK/触发器读取、结构/数据比较、DDL 结构编辑、SSL/SSH 隧道、
+    参数绑定均在界面与文档中标注为暂不支持，界面对应操作明确拒绝而非半成品。
+- **SDK 驱动契约版本化**（P6.1）：公开驱动 API / 元数据 / 传输 / 整体契约四个版本号；
+  新增 `test:sdk-contract` 契约矩阵（用 SDK 自身 DriverHost 对 SQLite 覆盖 12 类能力）。
+- **CI**：新增真实 MySQL 8 服务容器与 `test:mysql-contract` 步骤，让新驱动在 CI 被真实验证。
+
+### 修复
+
+- **表名限定架构裂缝**（跨驱动，P6 暴露）：原 `previewTable` 把整个 `table:<schema>.<name>`
+  当作单个标识符加引号，PG/MySQL 多 schema/多库下会拼出 `"public.users"` 这类错误表名、
+  静默读到默认库的同名表。新增驱动契约 `tableSelectSql(nodeId)` 由驱动按自身 id 编码生成
+  限定 SELECT；预览、网格排序、筛选全部改用它。渲染进程引号规则改为按当前连接方言取
+  （MySQL 用反引号），不再要求全应用一致。
+
+### 平台
+
+- 与 0.6.0 相同：macOS 只提供 Apple Silicon（arm64），Windows x64，Linux x64 AppImage。
+
+---
+
 ## 0.6.0（2026-11-02）— 首个 Beta
 
 本版完成 Beta 交付阶段：补齐用户文档、建立性能基线、验证配置升级兼容。
