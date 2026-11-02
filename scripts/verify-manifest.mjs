@@ -94,6 +94,7 @@ export const STEPS = [
   { id: 'test:bench-resultset', title: '结果集性能基线（首屏 / 分页 p95 / 深分页）', group: 'node' },
   { id: 'test:bench-transfer', title: '导出性能基线（吞吐与峰值内存线性度）', group: 'node' },
   { id: 'test:bench-metadata', title: '元数据性能基线（懒加载与读取次数）', group: 'node' },
+  { id: 'test:upgrade-compat', title: '配置升级 / 降级兼容（隔离备份，不覆盖）', group: 'node' },
   { id: 'test:release-gate', title: '发布门禁与 draft 附件校验', group: 'node' },
   { id: 'test:packaged-smoke', title: '打包冒烟脚本的离线回归', group: 'node' },
   // 注意：这条跑在 Electron 里，但用 ELECTRON_RUN_AS_NODE 起进程，

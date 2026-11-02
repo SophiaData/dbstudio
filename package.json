@@ -111,6 +111,7 @@
     "test:bench-resultset": "node tests/bench-resultset.mjs",
     "test:bench-transfer": "node tests/bench-transfer.mjs",
     "test:bench-metadata": "node tests/bench-metadata.mjs",
+    "test:upgrade-compat": "node tests/e2e-upgrade-compat.mjs",
     "test:compare-cross-dialect": "node tests/e2e-compare-cross-dialect.mjs",
     "test:nosql-external": "node tests/e2e-nosql-external.mjs"
   },

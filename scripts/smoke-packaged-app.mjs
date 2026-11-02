@@ -87,20 +87,46 @@ export async function runPackagedSmoke({ platform, arch, executable, reportPath,
     // The driver requires a real, existing, absolute path — see sqliteSmokeConnection.
     await writeFile(databaseFile, '')
     const connection = sqliteSmokeConnection(databaseFile)
-    const result = await page.evaluate(async (config) => {
+    /*
+     * 第一次启动：查询 + 建连接并改名 + 断开（保留配置，不 remove）。
+     *
+     * 保留配置是为了下一步验证"重启后恢复"——这是 P7.2 要求的关键一条：
+     * 光证明"能连上、能查询"不够，还要证明**编辑过的配置在重启后还在**。
+     */
+    const firstRun = await page.evaluate(async (config) => {
       const api = window.dbstudio
       const c = await api.addConnection(config)
       if (!c.connected) throw new Error('Packaged SQLite host did not connect')
-      try {
-        const result = await api.runQuery(`connection:${c.id}`, 'SELECT 42 AS packaged_answer')
-        await api.closeCursor(result.cursorId)
-        return { connected: c.connected, value: result.rows[0]?.cells[0]?.value }
-      } finally {
-        await api.disconnectConnection(c.id)
-        await api.removeConnection(c.id)
-      }
+      const query = await api.runQuery(`connection:${c.id}`, 'SELECT 42 AS packaged_answer')
+      await api.closeCursor(query.cursorId)
+      await api.updateConnection(c.id, { name: 'renamed-after-edit' })
+      await api.disconnectConnection(c.id)
+      return { id: c.id, value: query.rows[0]?.cells[0]?.value }
     }, connection)
-    assert.equal(result.value, 42)
+    assert.equal(firstRun.value, 42)
+
+    // 关闭第一次启动（模拟用户退出应用）
+    await app.evaluate(({ app }) => app.exit(0)).catch(() => undefined)
+    await app.close().catch(() => undefined)
+    app = undefined
+
+    // 第二次启动：同一 user-data 目录，验证连接配置（含改名）在重启后恢复
+    app = await electron.launch({
+      executablePath: resolve(executable),
+      cwd: work,
+      env: launchEnv,
+      timeout: 30000,
+      args: [`--user-data-dir=${join(work, 'userdata')}`,
+        ...(process.platform === 'linux' && launchEnv.ELECTRON_DISABLE_SANDBOX === '1' ? ['--no-sandbox'] : [])]
+    })
+    app.process().stdout?.on('data', (data) => logs.push(data.toString()))
+    app.process().stderr?.on('data', (data) => logs.push(data.toString()))
+    const page2 = await app.firstWindow({ timeout: 15000 })
+    await page2.waitForFunction(() => !!window.dbstudio?.listConnections, undefined, { timeout: 15000 })
+    const restored = await page2.evaluate(async () => window.dbstudio.listConnections())
+    const restoredConn = restored.find((c) => c.id === firstRun.id)
+    assert.ok(restoredConn, '重启后连接配置必须还在')
+    assert.equal(restoredConn.name, 'renamed-after-edit', '重启后应恢复编辑后的连接名')
     const methods = {
       dmg: 'Pending native macOS mount, copy to Applications, launch and signing/notarization assessment.',
       zip: 'Pending archive extraction and launch of the extracted application.',
@@ -110,11 +136,11 @@ export async function runPackagedSmoke({ platform, arch, executable, reportPath,
     const report = {
       schemaVersion: 1, ...identity, platform, arch, status: 'passed', evidence: 'unpacked-executable',
       runtimeVersion: runtime.version, executableSha256: (await fileDigest(resolve(executable))).sha256,
-      checks: { packaged: true, renderer: true, preload: true, sqliteHost: true, query: true },
+      checks: { packaged: true, renderer: true, preload: true, sqliteHost: true, query: true, restartRecovery: true },
       installers: Object.fromEntries(target.extensions.map((ext) => [ext, { status: 'unverified', method: methods[ext] }]))
     }
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
-    console.log(`Packaged smoke passed: ${platform}/${arch}, version ${version}, SQLite SELECT 42`)
+    console.log(`Packaged smoke passed: ${platform}/${arch}, version ${version}, SQLite SELECT 42, restart recovery ok`)
     return report
   } finally {
     clearTimeout(watchdog)
