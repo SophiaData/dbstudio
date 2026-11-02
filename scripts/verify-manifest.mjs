@@ -102,6 +102,7 @@ export const STEPS = [
   { id: 'test:electron', title: 'Electron 内置 Node 运行时验收', group: 'node' },
   { id: 'build:sdk', title: '构建 SDK 发布产物', group: 'node' },
   { id: 'test:sdk', title: 'SDK e2e（从 dist 产物导入）', group: 'node' },
+  { id: 'test:sdk-contract', title: 'SDK 驱动契约矩阵（版本化能力 + 12 类能力）', group: 'node' },
   { id: 'test:sdk-package', title: 'SDK 包外安装与使用', group: 'node' },
 
   // ---- 需要真实 Electron 窗口 ----

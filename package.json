@@ -30,6 +30,7 @@
     "build:app:win": "pnpm run build && electron-builder --config electron-builder.config.mjs --win",
     "build:sdk": "cd sdk && node build.mjs",
     "test:sdk": "cd sdk && node test/sdk.e2e.mjs",
+    "test:sdk-contract": "node tests/e2e-sdk-contract.mjs",
     "test:sdk-package": "node tests/e2e-sdk-package.mjs",
     "test:connection-lifecycle": "node tests/e2e-connection-lifecycle.mjs",
     "test:driver-host-stress": "node tests/e2e-driver-host-stress.mjs",

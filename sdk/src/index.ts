@@ -64,6 +64,13 @@ export type {
 } from './contracts/driver.js'
 
 export { quoteIdentifierWith } from './contracts/driver.js'
+// ---- 版本化能力声明（P6.1）----
+export {
+  DRIVER_API_VERSION,
+  METADATA_SCHEMA_VERSION,
+  TRANSFER_SCHEMA_VERSION,
+  SDK_CONTRACT_VERSION
+} from './version.js'
 
 // ---- 实际可用的东西 ----
 export { DriverHost, withDriverHost, type DriverHostOptions, type DriverHostLogLevel } from './host.js'
