@@ -119,16 +119,31 @@ tests/
 
 ---
 
+## 用户文档
+
+面向使用者的说明在 `docs/` 下：
+
+| 文档 | 内容 |
+|---|---|
+| [连接管理](docs/user-guide/connections.md) | 新建/编辑/断开/删除连接，密码怎么存，SSL 与 SSH 隧道 |
+| [SQL 工作台](docs/user-guide/sql-workbench.md) | 多语句、参数绑定、执行计划、取消、结果形态、草稿 |
+| [导入与导出](docs/user-guide/import-export.md) | 四种导出格式、CSV 导入、失败回滚、非快照语义 |
+| [元数据、ER 图与结构比较](docs/user-guide/metadata-and-er.md) | 表结构、ER 关系、结构/数据比较 |
+| [数据库支持矩阵](docs/support/database-matrix.md) | 每个数据库支持什么、不支持什么，及对应验证条目 |
+
+---
+
 ## 安装（普通用户）
 
 从 [Releases](https://github.com/SophiaData/dbstudio/releases) 下载对应平台的安装包：
 
 | 平台 | 文件 |
 |---|---|
-| macOS (Apple Silicon) | `dbstudio-x.y.z-arm64.dmg` |
-| macOS (Intel) | `dbstudio-x.y.z-x64.dmg` |
-| Windows | `dbstudio-x.y.z-setup.exe` |
-| Linux | `dbstudio-x.y.z.AppImage` |
+| macOS (Apple Silicon / arm64) | `dbstudio-<版本>-mac-arm64.dmg`（或 `.zip`） |
+| Windows (x64) | `dbstudio-<版本>-win-x64.exe` |
+| Linux (x64) | `dbstudio-<版本>-linux-x64.AppImage` |
+
+> macOS **只提供 Apple Silicon 版本**，不提供 Intel（x64）安装包。
 
 > ⚠️ **macOS 首次打开会被 Gatekeeper 拦**：当前版本未做代码签名与公证
 > （需要苹果开发者账号，$99/年）。两个绕过办法：
