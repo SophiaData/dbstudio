@@ -113,7 +113,8 @@
     "test:bench-metadata": "node tests/bench-metadata.mjs",
     "test:upgrade-compat": "node tests/e2e-upgrade-compat.mjs",
     "test:compare-cross-dialect": "node tests/e2e-compare-cross-dialect.mjs",
-    "test:nosql-external": "node tests/e2e-nosql-external.mjs"
+    "test:nosql-external": "node tests/e2e-nosql-external.mjs",
+    "test:mysql-contract": "node tests/e2e-mysql-contract.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
@@ -139,6 +140,7 @@
   "dependencies": {
     "ioredis": "^5.11.1",
     "kafkajs": "^2.2.4",
+    "mysql2": "^3.24.6",
     "pg": "^8.23.1",
     "ssh2": "^1.17.0"
   }

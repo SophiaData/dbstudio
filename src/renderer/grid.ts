@@ -150,6 +150,8 @@ export class ResultGrid implements TransactionParticipant {
   /** 当前表是否可从偏好恢复（只有「表」来源才持久化，自由 SQL 不持久化）。 */
   #layoutTableName: string | null = null
 
+  /** 当前连接所属方言 id（打开表时从 ConnectionSummary 取得）。用于按方言取引号规则。 */
+  #connectionDialectId: string | null = null
   /** 方言引号规则缓存。取不到时显示"无法排序"，绝不拼接未转义的列名。 */
   #quoting: QuotingRules | null = null
   #quotingTried = false
@@ -875,6 +877,7 @@ export class ResultGrid implements TransactionParticipant {
        * 拿不到方言时保持空串：`#canPersistLayout` 会因此拒绝持久化，
        * 功能降级而不是存到错的 key 上。
        */
+      if (typeof conn?.dialectId === 'string') this.#connectionDialectId = conn.dialectId
       if (this.#layoutScope !== null && typeof conn?.dialectId === 'string') {
         this.#layoutScope = { ...this.#layoutScope, dialect: conn.dialectId }
         // 方言到位后，若之前因为缺方言而没恢复布局，这里补一次
@@ -1163,12 +1166,16 @@ export class ResultGrid implements TransactionParticipant {
           : ` ORDER BY ${quoteIdentifier(sort.colName, sort.rules)} ${sort.dir === 'asc' ? 'ASC' : 'DESC'}`
       let outcome: SqlExecutionOutcome
       if (src.kind === 'table') {
-        const table = quoteIdentifier(src.ref.name, sort?.rules ?? (await this.#requireQuoting()))
-        const sql = `SELECT * FROM ${table}${order}`
+        // 表名限定（schema/database）与引号由驱动按 src.ref.id 生成；这里只追加 ORDER BY。
+        // 之前在这里用 quoteIdentifier(ref.name) 自拼，多库/多 schema 下会指向默认库的同名表。
+        const base = await api.tableSelectSql(src.ref.id)
+        const sql = `${base}${order}`
         outcome = await this.#openCursor(() => api.runQuery(src.ref.id, sql, { limit: PAGE_SIZE }), true)
       } else {
         // 子查询别名固定且带下划线，避开与原 SQL 里的表别名撞名。
-        const sql = `SELECT * FROM (${src.sql}) _dbstudio_sort${order}`
+        // 去掉原 SQL 结尾分号：`SELECT * FROM (SELECT ...;) ...` 是语法错误。
+        const baseSql = src.sql.trim().replace(/;+\s*$/, '')
+        const sql = `SELECT * FROM (${baseSql}) _dbstudio_sort${order}`
         outcome = await this.#openCursor(() => api.runQuery(src.nodeId, sql, { ...src.options, limit: PAGE_SIZE }), true)
       }
       if (outcome.superseded || outcome.error !== null) return
@@ -1194,7 +1201,7 @@ export class ResultGrid implements TransactionParticipant {
     if (!api) return null
     try {
       const dialects = await api.listDialects()
-      const rules = pickQuotingRules(dialects)
+      const rules = pickQuotingRules(dialects, this.#connectionDialectId)
       if (rules) this.#quoting = rules
       return this.#quoting
     } catch {
@@ -2591,8 +2598,26 @@ function cellDisplayLength(cell: CellValue): number {
  * 里没有 dialectId（只有连接作用域 id），多方言且规则不一时无法可靠判断，
  * 这时就放弃排序并提示。
  */
-export function pickQuotingRules(dialects: readonly { quoting: QuotingRules }[]): QuotingRules | null {
+export function pickQuotingRules(
+  dialects: readonly { id?: string; quoting: QuotingRules }[],
+  dialectId?: string | null
+): QuotingRules | null {
   if (dialects.length === 0) return null
+  /**
+   * ===== 优先按当前连接的方言取 =====
+   *
+   * 加入 MySQL 后，各方言的引号规则不再一致（MySQL 用反引号），原先把
+   * "所有方言规则一致"当作前提的写法会让 `pickQuotingRules` 对所有方言
+   * 都返回 null，等于**把全应用的排序/筛选一起搞挂**。
+   *
+   * 而网格/导出脚本本来就在某个具体连接下工作，只要调用方给出该连接的
+   * dialectId，就能精确定位到它的规则。这条分支是新增的主路径。
+   */
+  if (typeof dialectId === 'string' && dialectId !== '') {
+    const match = dialects.find((d) => d.id === dialectId)
+    if (match && match.quoting) return match.quoting
+  }
+  // 兜底：没给方言时沿用原来的保守逻辑（全部一致才用）。
   const first = dialects[0]?.quoting
   if (!first) return null
   for (const d of dialects) {

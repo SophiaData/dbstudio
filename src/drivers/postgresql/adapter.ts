@@ -1125,6 +1125,15 @@ export class PostgresDriverAdapter implements DriverAdapter {
     return routines
   }
 
+  /** 按对象 id 生成限定到 schema 的 SELECT。 */
+  async tableSelectSql(nodeId: string): Promise<string> {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || (parsed.kind !== 'table' && parsed.kind !== 'view')) {
+      throw new PostgresAdapterError('object_not_found', `tableSelectSql 只接受表或视图节点：${nodeId}`)
+    }
+    return `SELECT * FROM ${this.dialect.quoteIdentifier(parsed.schema)}.${this.dialect.quoteIdentifier(parsed.name)}`
+  }
+
   async describeTable(id: string): Promise<TableDescription> {
     const client = this.#requireClient()
     const parsed = parseObjectId(id)

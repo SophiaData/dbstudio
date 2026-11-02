@@ -205,6 +205,8 @@ const api: DbStudioApi = {
 
   previewTable: (nodeId: string, limit?: number) =>
     ipcRenderer.invoke(IPC.previewTable, nodeId, limit) as Promise<QueryResult>,
+  tableSelectSql: (nodeId: string) =>
+    ipcRenderer.invoke(IPC.tableSelectSql, nodeId) as Promise<string>,
 
   // ---- 在线编辑与事务（第三阶段） ----
 

@@ -800,6 +800,13 @@ class DriverHost {
         return await this.#adapter.listRoutines({ schema })
       }
 
+      case 'tableSelectSql': {
+        this.#requireConnected(req.method)
+        const nodeId = parseObjectId(params.nodeId, req.method)
+        if (typeof this.#adapter.tableSelectSql !== 'function') return null
+        return await this.#adapter.tableSelectSql(nodeId)
+      }
+
       // ---- 结果集（第二阶段） ----
 
       case 'query': {

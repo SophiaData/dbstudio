@@ -348,6 +348,15 @@ export interface DriverAdapter {
    * 或驱动暂不支持。上层据此决定是否把"例程差异"计入比较。
    */
   listRoutines?(options?: { schema?: string | null }): Promise<RoutineInfo[]>
+  /**
+   * 按**对象 id**生成「读取该表/视图全部列」的 SELECT 语句（`SELECT * FROM <限定名>`）。
+   *
+   * 为什么必须由驱动生成、而不是主进程拼：表名的**限定写法**（schema/catalog 前缀、
+   * 引号与转义）是方言私有知识，id 也是驱动私有编码。主进程曾用 `quoteIdentifier(name)`
+   * 把整个 `table:<schema>.<name>` 的 payload 当一个标识符拼，多库/多 schema 下会拼出
+   * `"public.users"` 这种错误表名，静默读到错误库的同名表。此方法把这步交还给驱动。
+   */
+  tableSelectSql?(nodeId: string): Promise<string>
 
   /**
    * 从已打开的游标按偏移量取一页。
@@ -663,7 +672,8 @@ export const RPC_METHODS = [
   'cancelQuery',
   'resolveTransferSource',
   'viewDefinition',
-  'listRoutines'
+  'listRoutines',
+  'tableSelectSql'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

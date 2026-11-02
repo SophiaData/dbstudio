@@ -1392,6 +1392,15 @@ export class ConnectionManager {
    * 这里直接用 `nodeId` 的 adapterId 部分再切掉前缀——不 import adapter，
    * 因为那会把一个持有连接的实现拖进主进程（见文件头 import 注释）。
    */
+  /**
+   * 按对象 id 生成「读取该表/视图」的 SELECT。表名限定与引号由驱动决定，主进程不猜。
+   */
+  async tableSelectSql(nodeId: string): Promise<string> {
+    const { conn, adapterId } = this.#resolveConnection(nodeId)
+    if (adapterId === null) throw new Error('连接节点不能生成表查询，请选择具体的表或视图')
+    return conn.host.tableSelectSql(adapterId)
+  }
+
   async previewTable(nodeId: string, limit = 200): Promise<QueryResult> {
     const { conn, adapterId } = this.#resolveConnection(nodeId)
     if (adapterId === null) {
@@ -1410,12 +1419,11 @@ export class ConnectionManager {
     }
     if (name === '') throw new Error(`对象名为空，无法预览: ${adapterId}`)
 
-    const quoted = quoteIdentifierWith(name, conn.info.quoting)
-    // 只生成「取这张表」的语句，**不自己拼 LIMIT**：
-    // 分页语法（LIMIT/OFFSET、TOP、FETCH FIRST…）是方言知识，
-    // 主进程猜它就等于把方言差异复制一份到 main 里，迟早和驱动侧不一致。
-    // 行数限制通过 QueryOptions.limit 交给 adapter —— 它才是唯一懂自己方言的那个。
-    const sql = `SELECT * FROM ${quoted}`
+    // 表名限定（schema/database 前缀）与引号由**驱动**生成：主进程不认识 id 编码，
+    // 曾用 quoteIdentifier(payload) 把整个 `table:<schema>.<name>` 当单标识符，
+    // 多库/多 schema 下会拼出 `"public.users"` 这种错误表名、静默读错库。
+    // 行数限制仍通过 QueryOptions.limit 交给 adapter（分页语法是方言知识）。
+    const sql = await conn.host.tableSelectSql(adapterId)
     const result = await this.runQuery(nodeId, sql, { limit })
 
     // ===== 兜底校验：确认 adapter 真的落实了 limit =====

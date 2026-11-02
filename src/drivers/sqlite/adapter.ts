@@ -719,6 +719,17 @@ export class SqliteDriverAdapter implements DriverAdapter {
     return []
   }
 
+  /**
+   * 按对象 id 生成「读取该表/视图」的 SELECT。由驱动拼表名——主进程不认识 id 编码。
+   */
+  async tableSelectSql(nodeId: string): Promise<string> {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || (parsed.kind !== 'table' && parsed.kind !== 'view')) {
+      throw new SqliteAdapterError('object_not_found', `tableSelectSql 只接受表或视图节点：${nodeId}`)
+    }
+    return `SELECT * FROM ${this.dialect.quoteIdentifier(parsed.name)}`
+  }
+
   async describeTable(id: string): Promise<TableDescription> {
     const db = this.#requireDb()
     const parsed = parseObjectId(id)

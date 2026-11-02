@@ -174,6 +174,8 @@ export interface DbStudioApi {
 
   /** 便捷方法：直接读一张表/视图的全部行列结构，等价于对表生成 SELECT。 */
   previewTable(nodeId: string, limit?: number): Promise<QueryResult>
+  /** 按对象 id 让驱动生成「读取该表/视图」的 SELECT（表名限定由驱动决定）。 */
+  tableSelectSql(nodeId: string): Promise<string>
 
   /**
    * 应用一批行更新。**不会自动提交**，必须显式 `commitTransaction`。
@@ -384,6 +386,7 @@ export const IPC = {
   fetchResultPage: 'dbstudio:fetchResultPage',
   closeCursor: 'dbstudio:closeCursor',
   previewTable: 'dbstudio:previewTable',
+  tableSelectSql: 'dbstudio:tableSelectSql',
   applyEdits: 'dbstudio:applyEdits',
   commitTransaction: 'dbstudio:commitTransaction',
   rollbackTransaction: 'dbstudio:rollbackTransaction',

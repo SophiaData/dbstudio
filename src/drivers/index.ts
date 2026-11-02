@@ -20,6 +20,8 @@ import { createRedisAdapter } from './redis/adapter'
 import { REDIS_INFO } from './redis/info'
 import { createKafkaAdapter } from './kafka/adapter'
 import { KAFKA_INFO } from './kafka/info'
+import { createMysqlAdapter } from './mysql/adapter'
+import { MYSQL_INFO } from './mysql/info'
 
 /** 把本仓库自带的所有驱动注册进注册表。 */
 export function registerBuiltinDrivers(registry: DriverRegistry): void {
@@ -29,7 +31,9 @@ export function registerBuiltinDrivers(registry: DriverRegistry): void {
   // 只浏览的非 SQL 数据源：测试连接 + 树浏览，SQL 方法一律 unsupported_method。
   registry.register(createRedisAdapter, REDIS_INFO)
   registry.register(createKafkaAdapter, KAFKA_INFO)
+  // 第三个 SQL 方言：MySQL / MariaDB（当前为只读 + 元数据阶段）。
+  registry.register(createMysqlAdapter, MYSQL_INFO)
 }
 
 /** 内置驱动的方言 id 清单，测试用它遍历所有方言做冒烟。 */
-export const BUILTIN_DIALECT_IDS = ['sqlite', 'postgresql', 'redis', 'kafka'] as const
+export const BUILTIN_DIALECT_IDS = ['sqlite', 'postgresql', 'redis', 'kafka', 'mysql'] as const

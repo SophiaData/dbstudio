@@ -73,13 +73,21 @@ async function expectUnsupported(adapter, method) {
 
 console.log('\n[1] 注册表')
 const dialects = mod.listDialects()
-check('四个方言都注册了', dialects.map((d) => d.id).join(',') === 'sqlite,postgresql,redis,kafka', dialects.map((d) => d.id).join(','))
+check('五个方言都注册了', dialects.map((d) => d.id).join(',') === 'sqlite,postgresql,redis,kafka,mysql', dialects.map((d) => d.id).join(','))
 check('Redis 有 host/port 字段', dialects.find((d) => d.id === 'redis')?.fields.map((f) => f.key).includes('host'))
 check('Kafka 有 brokers 字段', dialects.find((d) => d.id === 'kafka')?.fields.some((f) => f.key === 'brokers'))
-// 渲染进程的 pickQuotingRules 要求所有方言引号规则一致，否则整个应用拿不到引号规则
-// （实测后果：表格排序被禁用）。只浏览方言也必须遵守这条不变量。
-const quotingKeys = dialects.map((d) => `${d.quoting.open}|${d.quoting.close}|${d.quoting.escape}`)
-check('所有方言的引号规则一致（否则渲染进程禁用排序）', new Set(quotingKeys).size === 1, [...new Set(quotingKeys)].join(' / '))
+/*
+ * 引号规则契约（P6 更新）：
+ *  - 只浏览方言（Redis/Kafka）没有标识符语义，沿用双引号占位，与 SQLite/PostgreSQL 一致；
+ *  - MySQL 是真正的 SQL 方言，用自己的反引号；
+ *  - 渲染进程的 pickQuotingRules 已改为**按当前连接的 dialectId** 取规则（见 grid.ts），
+ *    不再要求"全应用所有方言一致"——那条旧前提会让加入反引号后排序被整体禁用。
+ */
+const browseKeys = dialects
+  .filter((d) => ['sqlite', 'postgresql', 'redis', 'kafka'].includes(d.id))
+  .map((d) => `${d.quoting.open}|${d.quoting.close}|${d.quoting.escape}`)
+check('主流与只浏览方言引号一致（双引号占位）', new Set(browseKeys).size === 1, [...new Set(browseKeys)].join(' / '))
+check('MySQL 用反引号', dialects.find((d) => d.id === 'mysql')?.quoting.open === '`', String(dialects.find((d) => d.id === 'mysql')?.quoting.open))
 
 console.log('\n[2] 只浏览：SQL 方法必须 unsupported_method')
 for (const [name, make] of [['Redis', mod.createRedisAdapter], ['Kafka', mod.createKafkaAdapter]]) {

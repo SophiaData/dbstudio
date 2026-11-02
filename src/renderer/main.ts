@@ -220,10 +220,22 @@ async function boot(): Promise<void> {
    * 引用规则一致时才拼 SQL，否则返回 null 让调用方拒绝执行——
    * 猜一个规则去拼标识符，比拒绝更危险。
    */
-  const resolveQuoting = async (): Promise<QuotingRules | null> => {
+  /**
+   * 取标识符引用规则。
+   *
+   * 传入当前连接的 id，就能按**该连接所属方言**取规则（加入 MySQL 后各方言
+   * 规则不再一致，全局"取一致项"的做法会一律返回 null）。调用点都持有
+   * activeContext，拿得到 connectionId。
+   */
+  const resolveQuoting = async (connectionId?: string | null): Promise<QuotingRules | null> => {
     try {
       const dialects = await api.listDialects()
-      return pickQuotingRules(dialects)
+      let dialectId: string | null = null
+      if (connectionId) {
+        const connections = await api.listConnections()
+        dialectId = connections.find((c) => c.id === connectionId)?.dialectId ?? null
+      }
+      return pickQuotingRules(dialects, dialectId)
     } catch {
       return null
     }
@@ -858,7 +870,7 @@ async function boot(): Promise<void> {
           setStatus('INSERT 导出需要"表"来源（自由 SQL 结果没有表名）', true)
           return
         }
-        const rules = await resolveQuoting()
+        const rules = await resolveQuoting(context?.connectionId)
         if (!rules) {
           setStatus('无法获取方言引号规则，已取消 INSERT 导出（不会拼接未转义的标识符）', true)
           return
@@ -920,7 +932,7 @@ async function boot(): Promise<void> {
       setStatus('没有可筛选的结果', true)
       return
     }
-    const rules = await resolveQuoting()
+    const rules = await resolveQuoting(context?.connectionId)
     if (!rules) {
       setStatus('无法获取方言引号规则，已取消筛选（不会拼接未转义的列名）', true)
       return
@@ -937,9 +949,11 @@ async function boot(): Promise<void> {
     //   表 → SELECT * FROM "t" WHERE ...
     //   SQL → SELECT * FROM (<原SQL>) _dbstudio_filter WHERE ...（WHERE 作用于原查询结果）
     //
+    // 表来源也走「子查询包装」：表名限定（schema/database）与引号交给驱动生成，
+    // 主进程/渲染进程不再用 ref.name 自拼——多库下会指向默认库的同名表。
     const base =
       context.baseSource.kind === 'table'
-        ? ({ sourceKind: 'table', tableName: context.baseSource.ref.name } as const)
+        ? ({ sourceKind: 'sql', sql: await api.tableSelectSql(context.baseSource.ref.id) } as const)
         : ({ sourceKind: 'sql', sql: context.baseSource.sql } as const)
     const sql = buildFilteredSql(base, parsed.conditions, quote)
 

@@ -252,7 +252,7 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       const api = window.dbstudio;
       // 结果集相关的 API 必须全部就位——白名单从 7 扩到 11 时，
       // 只要漏了任何一个，网格在真实点击时才会炸，自检要提前发现。
-      const gridApi = api ? ['runQuery','fetchResultPage','closeCursor','previewTable']
+      const gridApi = api ? ['runQuery','fetchResultPage','closeCursor','previewTable','tableSelectSql']
         .filter(k => typeof api[k] === 'function') : [];
       // 持久化相关 API（第四阶段）：白名单 15 → 17 的两个新增项。
       const persistApi = api ? ['connectConnection','disconnectConnection']
@@ -321,12 +321,12 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
       r.hasSpacer &&
       r.apiInjected &&
       typeof r.renderedRows === 'number' &&
-      // 结果集：DOM 容器 + SQL 输入框 + 4 个新 API 必须齐全
+      // 结果集：DOM 容器 + SQL 输入框 + 5 个 API 必须齐全（含 tableSelectSql）
       r.hasTabbar &&
       r.hasResultStack &&
       r.hasSqlEditorHost &&
       r.hasSqlEditorTextarea &&
-      r.gridApiCount === 4 &&
+      r.gridApiCount === 5 &&
       // 持久化：connectConnection / disconnectConnection 两个新方法必须注入
       r.persistApiCount === 2 &&
       // 在线编辑：4 个方法必须齐全（缺 rollback 会让连接卡在未提交事务里）
@@ -453,6 +453,7 @@ function registerIpc(): void {
     closeCursor: async (cursorId: string) => getManager().closeCursor(cursorId),
     previewTable: async (nodeId: string, limit?: number) =>
       getManager().previewTable(nodeId, limit),
+    tableSelectSql: async (nodeId: string) => getManager().tableSelectSql(nodeId),
     // 在线编辑与事务。这四个共享结果集的 60s 超时（写比读慢，见 DriverHostHandle）。
     // 注意 applyEdits **不自动提交**：主进程不做任何"帮你提交"的兜底，
     // 提交时机完全由 UI 决定（用户点"应用"或"回滚"）。这层不做主，
@@ -585,6 +586,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.previewTable, (_e, nodeId: string, limit?: number) =>
     api.previewTable(nodeId, limit)
   )
+  ipcMain.handle(IPC.tableSelectSql, (_e, nodeId: string) => api.tableSelectSql(nodeId))
 
   // ---- 在线编辑与事务通道（第三阶段新增） ----
   ipcMain.handle(IPC.applyEdits, (_e, tableNodeId: string, updates: readonly RowUpdate[]) =>

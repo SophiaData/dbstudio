@@ -550,6 +550,10 @@ export class DriverHostHandle {
     return this.request<RoutineInfo[]>('listRoutines', { schema: options?.schema ?? null })
   }
 
+  tableSelectSql(nodeId: string): Promise<string> {
+    return this.request<string>('tableSelectSql', { nodeId })
+  }
+
   testConnection(config: ConnectionConfig, secret?: SecretInput): Promise<TestConnectionResult> {
     return this.request<TestConnectionResult>('testConnection', { config, secret })
   }
@@ -817,6 +821,7 @@ export type RemoteAdapterShape = Pick<
   | 'resolveTransferSource'
   | 'viewDefinition'
   | 'listRoutines'
+  | 'tableSelectSql'
 >
 
 export type { DialectInfo }

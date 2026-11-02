@@ -167,6 +167,12 @@ export const STEPS = [
     env: ['DBSTUDIO_PG_URL']
   },
   {
+    id: 'test:mysql-contract',
+    title: 'MySQL 驱动契约（真实 MySQL，只读 + 元数据 + 执行）',
+    group: 'external',
+    env: ['MYSQL_HOST']
+  },
+  {
     id: 'test:postgresql-metadata',
     title: 'PostgreSQL 外键、索引、CHECK 与触发器读取',
     group: 'external',
