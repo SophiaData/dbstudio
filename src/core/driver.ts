@@ -233,6 +233,11 @@ export interface RoutineInfo {
   readonly kind: 'function' | 'procedure'
   /** DDL 文本（`CREATE FUNCTION ...`）。拿不到时为 null，不要用空串冒充。 */
   readonly definition: string | null
+  /**
+   * 参数类型列表，用于区分重载（`f(int)` 与 `f(text)`）。
+   * 无参例程为空数组；不支持时留 undefined。
+   */
+  readonly signature?: readonly string[]
 }
 
 export interface DriverAdapter {

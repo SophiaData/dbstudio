@@ -33,6 +33,18 @@ export interface SchemaObjectDefinition {
 
 export interface RoutineDefinition extends SchemaObjectDefinition {
   readonly kind: 'function' | 'procedure'
+  /**
+   * 参数类型列表，用于区分**重载**。
+   *
+   * ===== 为什么必须有 =====
+   * PostgreSQL 允许多个同名函数共存，区别只在参数类型（`f(int)` 与 `f(text)`）。
+   * 只按 name 对齐会把它们当成"重复对象"而直接报错，而且
+   * `DROP FUNCTION public.f` 对重载本来就非法——PG 要求带参数类型。
+   *
+   * 空数组表示无参例程；`undefined` 表示驱动没提供签名信息（老实现/不支持），
+   * 此时退化为按名字对齐，与加入该字段前的行为一致。
+   */
+  readonly signature?: readonly string[]
 }
 
 /**
@@ -264,7 +276,19 @@ function diffWarnings(
     warnings.push(`有 ${names.length} 个视图没读到定义（${names.join(', ')}），视图定义变更未参与比较。`)
   }
   if (source.routines.length === 0 && target.routines.length === 0) {
-    warnings.push('例程（函数/存储过程）未参与比较：当前驱动没有提供例程清单。')
+    /*
+     * 两侧都没有例程时，措辞要能区分两种情况，否则会对 SQLite 用户产生误导：
+     *   - SQLite 本来就没有持久化例程，它实现了 listRoutines 并如实返回 []，
+     *     这时说"驱动没有提供清单"是错的；
+     *   - 反过来，某驱动确实没实现该能力时，也不能说成"确实没有例程"。
+     * 两种情况下这条都只是**信息性提示**（比较范围说明），不是错误告警，
+     * 文案上也不该让人以为出了问题。
+     */
+    warnings.push(
+      dialect === 'sqlite'
+        ? '例程比较：SQLite 没有持久化的函数/存储过程，此项不适用。'
+        : '例程比较：两侧均未读到期程（函数/存储过程），此项未参与比较。'
+    )
   }
   if (dialect === 'sqlite') {
     const left = indexBy(source.tables, tableKey)
@@ -374,14 +398,25 @@ function diffNamedObjects(
 }
 
 /**
- * 例程按 kind + schema + name 对齐。definition 必须是完整的 CREATE 语句
- * （PG 的 pg_get_functiondef 即是），这里不再拼 CREATE 前缀。
+ * 例程按 kind + schema + name + **参数签名** 对齐。
+ *
+ * definition 必须是完整的 CREATE 语句（PG 的 `pg_get_functiondef` 即是），
+ * 这里不再拼 CREATE 前缀。
+ *
+ * ===== 为什么要带参数签名 =====
+ * PostgreSQL 支持函数重载：`f(int)` 与 `f(text)` 是两个独立对象，可以有不同
+ * 实现。只按名字对齐会有两个后果：
+ *   1. 同名的两个重载在 indexBy 里撞 key，整次比较直接抛错；
+ *   2. `DROP FUNCTION public.f` 对重载不合法，PG 要求写成 `f(integer)`。
+ * 所以对齐键与 DROP 语句都带上参数类型。驱动没给签名时（signature 为
+ * undefined）退化成按名字对齐，与加入该字段前的行为一致。
  */
 function diffRoutines(
   source: readonly RoutineDefinition[],
   target: readonly RoutineDefinition[]
 ): SchemaChange[] {
-  const keyOf = (r: RoutineDefinition): string => `${r.kind}:${r.schema ?? ''}.${r.name}`
+  const keyOf = (r: RoutineDefinition): string =>
+    `${r.kind}:${r.schema ?? ''}.${r.name}(${(r.signature ?? []).join(',')})`
   const left = indexBy(source, keyOf)
   const right = indexBy(target, keyOf)
   const changes: SchemaChange[] = []
@@ -389,17 +424,49 @@ function diffRoutines(
     const from = left.get(key)
     const to = right.get(key)
     const label = key
-    const drop = (r: RoutineDefinition): string => `DROP ${r.kind.toUpperCase()} ${qualified(r)}`
-    const create = (r: RoutineDefinition): string => {
-      if (r.definition === null || r.definition.trim() === '') throw new Error(`缺少例程 ${r.name} 的定义`)
+    /*
+     * DROP 语句：有签名时带上参数类型，否则 PG 会拒绝删除重载函数。
+     * 签名缺失时退回不带括号的写法——SQLite 之类没有重载的方言可以接受，
+     * 而 PG 驱动总是提供签名，不会走到这里。
+     */
+    const drop = (r: RoutineDefinition): string => {
+      const signature = r.signature
+      const args = signature === undefined ? '' : `(${signature.join(', ')})`
+      return `DROP ${r.kind.toUpperCase()} ${qualified(r)}${args}`
+    }
+    const create = (r: RoutineDefinition): string | null => {
+      if (r.definition === null || r.definition.trim() === '') return null
       return r.definition.trim()
     }
     if (from !== undefined && to === undefined) {
-      changes.push(createChange('routine', label, [create(from)]))
+      // 定义未知时无法生成创建语句：跳过并由 warnings 说明，与视图分支同一原则。
+      const sql = create(from)
+      if (sql === null) continue
+      changes.push(createChange('routine', label, [sql]))
     } else if (from === undefined && to !== undefined) {
       changes.push(dropChange('routine', label, drop(to)))
-    } else if (from !== undefined && to !== undefined && normalizeSql(from.definition) !== normalizeSql(to.definition)) {
-      changes.push({ kind: 'alter', objectType: 'routine', target: label, statements: [drop(to), create(from)], destructive: true })
+    } else if (from !== undefined && to !== undefined) {
+      /*
+       * ===== 任一侧没有定义时，既不判"变化"也不生成 DROP =====
+       * 这是与视图分支对齐的守卫。缺了它会有两种坏结果：
+       *   - 源端 null：create() 抛错 → 整次结构比较失败；
+       *   - 目标端 null：normalizeSql 把 null 当空串，判定"有变化"，
+       *     于是生成 DROP + CREATE —— 而实际可能只是没读到定义，
+       *     这条 SQL 会真的删掉用户的函数。
+       * PG 适配器对单个例程读取失败会降级为 null（权限不足、并发 drop），
+       * 这条路径是可达的，必须显式跳过并交给上层告警。
+       */
+      if (from.definition === null || to.definition === null) continue
+      if (normalizeSql(from.definition) === normalizeSql(to.definition)) continue
+      const sql = create(from)
+      if (sql === null) continue
+      changes.push({
+        kind: 'alter',
+        objectType: 'routine',
+        target: label,
+        statements: [drop(to), sql],
+        destructive: true
+      })
     }
   }
   return changes

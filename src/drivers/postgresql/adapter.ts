@@ -1082,7 +1082,8 @@ export class PostgresDriverAdapter implements DriverAdapter {
       `SELECT n.nspname AS schema,
               p.proname AS name,
               CASE WHEN p.prokind = 'p' THEN 'procedure' ELSE 'function' END AS kind,
-              p.oid::text AS oid
+              p.oid::text AS oid,
+              pg_get_function_identity_arguments(p.oid) AS signature
          FROM pg_proc p
          JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE p.prokind IN ('f', 'p')
@@ -1093,7 +1094,13 @@ export class PostgresDriverAdapter implements DriverAdapter {
       params
     )
     const routines: RoutineInfo[] = []
-    for (const row of result.rows as { schema: string; name: string; kind: 'function' | 'procedure'; oid: string }[]) {
+    for (const row of result.rows as {
+      schema: string
+      name: string
+      kind: 'function' | 'procedure'
+      oid: string
+      signature: string | null
+    }[]) {
       let definition: string | null = null
       try {
         const defResult = await client.query('SELECT pg_get_functiondef($1::oid) AS definition', [row.oid])
@@ -1103,7 +1110,17 @@ export class PostgresDriverAdapter implements DriverAdapter {
         // 单个例程拿不到定义：留 null，由上层告警"定义未捕获"，不影响其它例程。
         definition = null
       }
-      routines.push({ schema: row.schema, name: row.name, kind: row.kind, definition })
+      /*
+       * signature 用于区分重载：PG 允许 f(int) 与 f(text) 共存，
+       * 比较器按 name+签名对齐，DROP 语句也必须带参数类型才合法。
+       * `pg_get_function_identity_arguments` 返回的正是 DROP 需要的形态
+       * （如 `integer, text`），按逗号切分即可；无参函数返回空串 → []。
+       */
+      const signature = (row.signature ?? '')
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+      routines.push({ schema: row.schema, name: row.name, kind: row.kind, definition, signature })
     }
     return routines
   }

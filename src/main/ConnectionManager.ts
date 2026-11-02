@@ -857,7 +857,9 @@ export class ConnectionManager {
         schema: routine.schema,
         name: routine.name,
         kind: routine.kind,
-        definition: routine.definition
+        definition: routine.definition,
+        // 签名原样透传给比较器：它是区分重载的唯一依据，不能在中间层丢掉。
+        ...(routine.signature === undefined ? {} : { signature: routine.signature })
       }))
     } catch {
       routines = []

@@ -206,5 +206,95 @@ check(
   procChanged.statements.join(' | ')
 )
 
+// ===== 重载例程：同名不同参，不能被当成"重复对象" =====
+// PostgreSQL 允许 f(int) 与 f(text) 共存。早期实现只按 kind+schema+name 对齐，
+// 撞 key 会让 indexBy 抛错，导致**任何含重载函数的 PG 库都无法做结构比较**。
+const overloadSource = snapshot([], [], [
+  { schema: 'public', name: 'f', kind: 'function', signature: ['integer'], definition: 'CREATE FUNCTION public.f(x integer) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql' },
+  { schema: 'public', name: 'f', kind: 'function', signature: ['text'], definition: 'CREATE FUNCTION public.f(x text) RETURNS int AS $$ SELECT 2 $$ LANGUAGE sql' }
+])
+let overloadThrew = false
+let overloadDiff = null
+try {
+  overloadDiff = compare.diffSchema(overloadSource, snapshot([], []), 'postgresql')
+} catch (e) {
+  overloadThrew = true
+}
+check('两个重载函数不会被判定为重复对象', !overloadThrew)
+check(
+  '重载函数各自生成一条创建语句',
+  overloadThrew === false && overloadDiff.changes.filter((c) => c.objectType === 'routine').length === 2,
+  overloadThrew ? '抛错' : JSON.stringify(overloadDiff.changes.map((c) => c.target))
+)
+check(
+  '重载键包含参数签名以区分彼此',
+  overloadThrew === false &&
+    overloadDiff.changes.some((c) => c.target === 'function:public.f(integer)') &&
+    overloadDiff.changes.some((c) => c.target === 'function:public.f(text)'),
+  overloadThrew ? '抛错' : JSON.stringify(overloadDiff.changes.map((c) => c.target))
+)
+
+// 重载的 DROP 必须带参数类型，否则 PG 会拒绝执行。
+const overloadDrop = compare.diffSchema(
+  snapshot([], []),
+  snapshot([], [], [
+    { schema: 'public', name: 'f', kind: 'function', signature: ['integer', 'text'], definition: 'CREATE FUNCTION public.f(a integer, b text) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql' }
+  ]),
+  'postgresql'
+)
+check(
+  '重载函数的 DROP 带参数类型',
+  overloadDrop.statements[0] === 'DROP FUNCTION "public"."f"(integer, text)',
+  JSON.stringify(overloadDrop.statements)
+)
+
+// ===== 例程单侧定义缺失：两个方向都必须安全 =====
+// 早期实现：源端 null 直接抛错（整次比较失败）；目标端 null 被判为"有变化"，
+// 生成 DROP + CREATE —— 实际可能只是没读到定义，这条 SQL 会真的删掉用户的函数。
+const fnWithDef = (definition) => [{ schema: 'public', name: 'h', kind: 'function', definition }]
+let sourceNullThrew = false
+let sourceNullDiff = null
+try {
+  sourceNullDiff = compare.diffSchema(
+    snapshot([], [], fnWithDef(null)),
+    snapshot([], [], fnWithDef('CREATE FUNCTION public.h() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql')),
+    'postgresql'
+  )
+} catch {
+  sourceNullThrew = true
+}
+check('例程源端定义缺失时不抛错', !sourceNullThrew)
+check('例程源端定义缺失时不生成差异', !sourceNullThrew && sourceNullDiff.changes.length === 0,
+  sourceNullThrew ? '抛错' : JSON.stringify(sourceNullDiff.changes))
+
+const targetNullDiff = compare.diffSchema(
+  snapshot([], [], fnWithDef('CREATE FUNCTION public.h() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql')),
+  snapshot([], [], fnWithDef(null)),
+  'postgresql'
+)
+check(
+  '例程目标端定义缺失时不得生成危险的 DROP',
+  targetNullDiff.changes.length === 0 && targetNullDiff.statements.length === 0,
+  JSON.stringify(targetNullDiff.statements)
+)
+
+// 两侧都有定义且确实不同 → 仍必须正常报差异（守卫不能把真实变更也吞掉）。
+const realChange = compare.diffSchema(
+  snapshot([], [], fnWithDef('CREATE FUNCTION public.h() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql')),
+  snapshot([], [], fnWithDef('CREATE FUNCTION public.h() RETURNS int AS $$ SELECT 2 $$ LANGUAGE sql')),
+  'postgresql'
+)
+check('例程定义真实变化仍被识别', realChange.changes.length === 1 && realChange.destructive === true,
+  JSON.stringify(realChange.statements))
+
+// SQLite 没有例程是既定事实，措辞不应暗示驱动有问题。
+const sqliteRoutineWarn = compare.diffSchema(snapshot([]), snapshot([]), 'sqlite')
+check(
+  'SQLite 的例程提示不谎称"驱动未提供"',
+  sqliteRoutineWarn.warnings.some((w) => w.includes('SQLite') && w.includes('不适用')) &&
+    !sqliteRoutineWarn.warnings.some((w) => w.includes('当前驱动没有提供例程清单')),
+  JSON.stringify(sqliteRoutineWarn.warnings)
+)
+
 console.log(`\n结构比较 ${pass} 通过 / ${fail} 失败`)
 if (fail > 0) process.exit(1)
