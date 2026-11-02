@@ -18,6 +18,7 @@ import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../cor
 import type { DriverCapabilities, ObjectRef, TableDescription, ColumnDescription } from '../../core/model'
 import type {
   CellValue,
+  EditApplyResult,
   ExplainResult,
   QueryOptions,
   QueryResult,
@@ -25,9 +26,13 @@ import type {
   ResultPage,
   ResultRow,
   ResultValueType,
-  StatementResult
+  RowEditOutcome,
+  RowUpdate,
+  StatementResult,
+  TransactionState
 } from '../../core/resultset'
-import { MAX_CELL_TEXT_CHARS, MAX_BLOB_PREVIEW_BYTES } from '../../core/resultset'
+import { MAX_CELL_TEXT_CHARS, MAX_BLOB_PREVIEW_BYTES, cellValueToSqlParam } from '../../core/resultset'
+import type { ImportBatch, ImportBatchResult, TransferSourceResolution } from '../../core/transfer'
 import { mysqlDialect } from './dialect'
 import { MYSQL_INFO } from './info'
 import {
@@ -56,8 +61,8 @@ const MYSQL_CAPABILITIES: DriverCapabilities = {
   supportsServerPagination: true,
   // 用独立连接执行 KILL QUERY，是真取消。
   supportsCancel: true,
-  // Step 1 不做网格编辑（applyEdits 未实现），如实声明 false，UI 会据此禁用编辑。
-  supportsInlineEdit: false,
+  // Step 3 已实现主键编辑/插入/删除（事务内），可按行编辑。
+  supportsInlineEdit: true,
   // 只声明**真正读得出来**的元数据。CHECK / 触发器本阶段未实现读取，
   // 如实标 false——否则 UI 会把"读不到"当成"确认没有"，是比缺失更坏的错误。
   metadata: {
@@ -171,6 +176,10 @@ export class MysqlDriverAdapter implements DriverAdapter {
   readonly info = MYSQL_INFO
 
   #conn: Connection | null = null
+  /** 是否处于由本驱动开启的事务中（executeStatement 手动 BEGIN 不在此跟踪，见注） */
+  #inTransaction = false
+  /** 事务内累计影响行数 */
+  #pendingAffected = 0
   #config: ConnectionConfig | null = null
   #secret: SecretValue = {}
   #database: string | null = null
@@ -582,57 +591,225 @@ export class MysqlDriverAdapter implements DriverAdapter {
   }
 
   // ===== 以下为 Step 3（写入 / 事务 / 传输 / DDL）未实现部分 =====
-  // 明确抛 unsupported_method，而非半实现给出错误语义。
+  // ===== 写入与传输（P6.2 Step 3） =====
+  // 注：用户在 SQL 窗口手写的 BEGIN/COMMIT 不由 #inTransaction 跟踪；事务工具栏与
+  // 网格编辑走这里的专用方法。这是本阶段的已知边界，记录在此而非假装覆盖。
 
-  #unsupported(method: string): never {
-    throw new MysqlAdapterError(
-      'unsupported_method',
-      `MySQL 驱动当前版本暂不支持「${method}」（只读 + 元数据阶段）。写入/事务/导入导出在后续阶段提供。`
+  /** 解析表目标 → 限定表名（`db`.`name`）。视图或非表 id 报错。 */
+  #tableTarget(tableId: string): { schema: string; name: string; qualified: string } {
+    const parsed = parseObjectId(tableId)
+    if (parsed === null || parsed.kind !== 'table') {
+      throw new MysqlAdapterError('object_not_found', `写操作只接受表节点，收到的 id：${tableId}`)
+    }
+    const qualified = `${mysqlDialect.quoteIdentifier(parsed.schema)}.${mysqlDialect.quoteIdentifier(parsed.name)}`
+    return { schema: parsed.schema, name: parsed.name, qualified }
+  }
+
+  async #readPrimaryKeyColumns(conn: Connection, schema: string, table: string): Promise<string[]> {
+    const [rows] = await conn.query(
+      `SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
+        ORDER BY ORDINAL_POSITION`,
+      [schema, table]
     )
+    return (rows as unknown as { name: string }[]).map((r) => r.name)
   }
 
-  async applyEdits(): Promise<never> {
-    this.#unsupported('网格编辑')
+  /** 确保处于事务中；返回 true 表示是本次开启的（失败时可撤销空事务）。 */
+  async #ensureTransaction(conn: Connection): Promise<boolean> {
+    if (this.#inTransaction) return false
+    await conn.query('START TRANSACTION')
+    this.#inTransaction = true
+    this.#pendingAffected = 0
+    return true
   }
-  async insertRow(): Promise<never> {
-    this.#unsupported('插入行')
+
+  async applyEdits(tableId: string, updates: readonly RowUpdate[]): Promise<EditApplyResult> {
+    const conn = this.#requireConn()
+    const target = this.#tableTarget(tableId)
+    if (updates.length === 0) return { affected: 0, outcomes: [], ok: true, inTransaction: this.#inTransaction }
+    await this.#ensureTransaction(conn)
+    const outcomes: RowEditOutcome[] = []
+    let total = 0
+    for (let index = 0; index < updates.length; index += 1) {
+      const update = updates[index]
+      if (update === undefined) continue
+      const setCols = Object.keys(update.changes)
+      const keyCols = Object.keys(update.keyValues)
+      if (setCols.length === 0) { outcomes.push({ index, affected: 0, error: '没有要更新的列', sql: '' }); continue }
+      if (keyCols.length === 0) { outcomes.push({ index, affected: 0, error: '缺少主键值，拒绝无条件更新', sql: '' }); continue }
+      const setSql = setCols.map((c) => `${mysqlDialect.quoteIdentifier(c)} = ?`).join(', ')
+      const whereSql = keyCols.map((c) => `${mysqlDialect.quoteIdentifier(c)} = ?`).join(' AND ')
+      const sql = `UPDATE ${target.qualified} SET ${setSql} WHERE ${whereSql}`
+      const params = [
+        ...setCols.map((c) => cellValueToSqlParam(update.changes[c]!)),
+        ...keyCols.map((c) => cellValueToSqlParam(update.keyValues[c]!))
+      ]
+      try {
+        const [res] = await conn.query(sql, params)
+        const affected = Number((res as { affectedRows?: number }).affectedRows ?? 0)
+        total += affected
+        outcomes.push({ index, affected, error: null, sql })
+      } catch (thrown) {
+        outcomes.push({ index, affected: 0, error: describeThrown(thrown), sql })
+      }
+    }
+    this.#pendingAffected += total
+    return { affected: total, outcomes, ok: outcomes.every((o) => o.error === null), inTransaction: this.#inTransaction }
   }
-  async deleteRows(): Promise<never> {
-    this.#unsupported('删除行')
+
+  async insertRow(
+    tableId: string,
+    values: Readonly<Record<string, CellValue>>
+  ): Promise<{ affected: number; keyValues: Record<string, CellValue> }> {
+    const conn = this.#requireConn()
+    const target = this.#tableTarget(tableId)
+    const cols = Object.keys(values)
+    if (cols.length === 0) throw new MysqlAdapterError('bad_params', '插入必须至少提供一个列值')
+    const inOwn = await this.#ensureTransaction(conn)
+    const sql = `INSERT INTO ${target.qualified} (${cols.map((c) => mysqlDialect.quoteIdentifier(c)).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`
+    const params = cols.map((c) => cellValueToSqlParam(values[c]!))
+    try {
+      const [res] = await conn.query(sql, params)
+      this.#pendingAffected += 1
+      const insertId = Number((res as { insertId?: number }).insertId ?? 0)
+      const keyValues: Record<string, CellValue> = {}
+      const pkCols = await this.#readPrimaryKeyColumns(conn, target.schema, target.name)
+      if (pkCols.length === 1 && insertId > 0) keyValues[pkCols[0]!] = { kind: 'number', value: insertId }
+      return { affected: Number((res as { affectedRows?: number }).affectedRows ?? 1), keyValues }
+    } catch (thrown) {
+      if (inOwn) {
+        await conn.query('ROLLBACK').catch(() => undefined)
+        this.#inTransaction = false
+        this.#pendingAffected = 0
+      }
+      throw thrown instanceof MysqlAdapterError ? thrown : new MysqlAdapterError('query_failed', `插入失败：${describeThrown(thrown)}`)
+    }
   }
-  async commitTransaction(): Promise<never> {
-    this.#unsupported('提交事务')
+
+  async deleteRows(
+    tableId: string,
+    keys: readonly Readonly<Record<string, CellValue>>[]
+  ): Promise<EditApplyResult> {
+    const conn = this.#requireConn()
+    const target = this.#tableTarget(tableId)
+    if (keys.length === 0) throw new MysqlAdapterError('bad_params', '拒绝空删除条件（会删掉整张表）')
+    await this.#ensureTransaction(conn)
+    const outcomes: RowEditOutcome[] = []
+    let total = 0
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]
+      if (key === undefined) continue
+      const keyCols = Object.keys(key)
+      if (keyCols.length === 0) { outcomes.push({ index, affected: 0, error: '缺少主键值，拒绝无条件删除', sql: '' }); continue }
+      const whereSql = keyCols.map((c) => `${mysqlDialect.quoteIdentifier(c)} = ?`).join(' AND ')
+      const sql = `DELETE FROM ${target.qualified} WHERE ${whereSql}`
+      const params = keyCols.map((c) => cellValueToSqlParam(key[c]!))
+      try {
+        const [res] = await conn.query(sql, params)
+        const affected = Number((res as { affectedRows?: number }).affectedRows ?? 0)
+        total += affected
+        outcomes.push({ index, affected, error: null, sql })
+      } catch (thrown) {
+        outcomes.push({ index, affected: 0, error: describeThrown(thrown), sql })
+      }
+    }
+    this.#pendingAffected += total
+    return { affected: total, outcomes, ok: outcomes.every((o) => o.error === null), inTransaction: this.#inTransaction }
   }
-  async rollbackTransaction(): Promise<never> {
-    this.#unsupported('回滚事务')
+
+  async countRows(tableId: string): Promise<number> {
+    const conn = this.#requireConn()
+    const target = this.#tableTarget(tableId)
+    const [rows] = await conn.query(`SELECT COUNT(*) AS c FROM ${target.qualified}`)
+    return Number((rows as unknown as { c: number }[])[0]?.c ?? 0)
   }
-  async transactionState(): Promise<never> {
-    this.#unsupported('事务状态')
+
+  async fetchCellValue(cursorId: string, rowIndex: number, columnIndex: number): Promise<CellValue> {
+    const conn = this.#requireConn()
+    const cursor = this.#cursors.get(cursorId)
+    if (!cursor) throw new MysqlAdapterError('object_not_found', `未知游标：${cursorId}`)
+    const [rows] = await conn.query({ sql: cursor.sql, rowsAsArray: true })
+    const row = (rows as unknown as unknown[][])[rowIndex]
+    if (!row) throw new MysqlAdapterError('bad_params', `行号越界：${rowIndex}`)
+    return toFullCellValue(row[columnIndex])
   }
-  async importBatch(): Promise<never> {
-    this.#unsupported('CSV 导入')
+
+  async transactionState(): Promise<TransactionState> {
+    if (this.#conn === null) return { active: false, pendingAffected: 0 }
+    return { active: this.#inTransaction, pendingAffected: this.#pendingAffected }
   }
-  async countRows(): Promise<never> {
-    this.#unsupported('行数统计')
+
+  async commitTransaction(): Promise<TransactionState> {
+    const conn = this.#requireConn()
+    if (!this.#inTransaction) throw new MysqlAdapterError('bad_params', '当前没有未提交的事务，无法提交')
+    await conn.query('COMMIT')
+    this.#inTransaction = false
+    this.#pendingAffected = 0
+    return { active: false, pendingAffected: 0 }
   }
-  async fetchCellValue(): Promise<never> {
-    this.#unsupported('取完整单元格值')
+
+  async rollbackTransaction(): Promise<TransactionState> {
+    const conn = this.#conn
+    if (conn === null) return { active: false, pendingAffected: 0 }
+    if (this.#inTransaction) {
+      await conn.query('ROLLBACK').catch(() => undefined)
+      this.#inTransaction = false
+      this.#pendingAffected = 0
+    }
+    return { active: false, pendingAffected: 0 }
   }
-  async createTable(): Promise<never> {
-    this.#unsupported('建表')
+
+  async importBatch(tableId: string, batch: ImportBatch): Promise<ImportBatchResult> {
+    const conn = this.#requireConn()
+    const target = this.#tableTarget(tableId)
+    if (batch.rows.length === 0) return { rowsImported: 0, inTransaction: this.#inTransaction }
+    const cols = [...batch.columns]
+    if (cols.length === 0) throw new MysqlAdapterError('bad_params', '导入批次缺少列')
+    await this.#ensureTransaction(conn)
+    const rowPlaceholder = `(${cols.map(() => '?').join(', ')})`
+    const sql = `INSERT INTO ${target.qualified} (${cols.map((c) => mysqlDialect.quoteIdentifier(c)).join(', ')}) VALUES ${batch.rows.map(() => rowPlaceholder).join(', ')}`
+    const params: (string | number | boolean | null | Uint8Array)[] = []
+    for (const row of batch.rows) for (const v of row.values) params.push(cellValueToSqlParam(v))
+    try {
+      const [res] = await conn.query(sql, params)
+      const n = Number((res as { affectedRows?: number }).affectedRows ?? batch.rows.length)
+      this.#pendingAffected += n
+      return { rowsImported: n, inTransaction: this.#inTransaction }
+    } catch (thrown) {
+      throw new MysqlAdapterError('query_failed', `导入第 ${batch.batchIndex} 批失败：${describeThrown(thrown)}`)
+    }
   }
-  async dropTable(): Promise<never> {
-    this.#unsupported('删表')
+
+  async resolveTransferSource(nodeId: string): Promise<TransferSourceResolution> {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || (parsed.kind !== 'table' && parsed.kind !== 'view')) {
+      throw new MysqlAdapterError('object_not_found', `导出只支持表或视图节点：${nodeId}`)
+    }
+    const qualified = `${mysqlDialect.quoteIdentifier(parsed.schema)}.${mysqlDialect.quoteIdentifier(parsed.name)}`
+    return { sql: `SELECT * FROM ${qualified}`, target: { name: parsed.name, kind: parsed.kind } }
   }
-  async createView(): Promise<never> {
-    this.#unsupported('建视图')
+
+  // ===== DDL 结构编辑（建表/删表/视图/重命名）本阶段仍不支持 =====
+  #unsupported(method: string): never {
+    throw new MysqlAdapterError('unsupported_method', `MySQL 驱动当前版本暂不支持「${method}」。`)
   }
-  async dropView(): Promise<never> {
-    this.#unsupported('删视图')
-  }
-  async renameTable(): Promise<never> {
-    this.#unsupported('重命名表')
-  }
+  async createTable(): Promise<never> { this.#unsupported('建表') }
+  async dropTable(): Promise<never> { this.#unsupported('删表') }
+  async createView(): Promise<never> { this.#unsupported('建视图') }
+  async dropView(): Promise<never> { this.#unsupported('删视图') }
+  async renameTable(): Promise<never> { this.#unsupported('重命名表') }
+}
+
+/** 完整单元格值（不截断）——「取完整值」专用，与网格首屏的截断版区分。 */
+function toFullCellValue(value: unknown): CellValue {
+  if (value === null || value === undefined) return { kind: 'null' }
+  if (Buffer.isBuffer(value)) return { kind: 'blob', previewBase64: value.toString('base64'), length: value.length, truncated: false }
+  if (typeof value === 'bigint') return { kind: 'text', text: value.toString() }
+  if (typeof value === 'number') return { kind: 'number', value }
+  if (typeof value === 'boolean') return { kind: 'boolean', value }
+  if (value instanceof Date) return { kind: 'text', text: value.toISOString() }
+  return { kind: 'text', text: String(value) }
 }
 
 function describeThrown(thrown: unknown): string {

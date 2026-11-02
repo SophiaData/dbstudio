@@ -126,7 +126,7 @@ try {
   check('声明服务端分页能力', summary.capabilities?.supportsServerPagination === true)
   check('声明取消能力', summary.capabilities?.supportsCancel === true)
   check('声明 schema（database 作为命名空间）', summary.capabilities?.hasSchema === true)
-  check('当前阶段不声明网格编辑', summary.capabilities?.supportsInlineEdit === false)
+  check('已声明网格编辑能力（Step 3）', summary.capabilities?.supportsInlineEdit === true)
 
   const rootId = `connection:${conn.id}`
 
@@ -198,15 +198,71 @@ try {
   check('EXPLAIN 有行', plan.rows.length >= 1, String(plan.rows.length))
 
   console.log('\n[7] 未实现方法如实拒绝（不是半实现）')
-  let txErr = null
+  let ddlErr = null
   try {
-    // commitTransaction 不经过"空更新"前置校验，会直达 adapter —— 用它验证
-    // adapter 对未实现能力确实抛 unsupported_method，而不是假装成功。
-    await manager.commitTransaction(`connection:${conn.id}`)
+    // 事务/编辑已实现；DDL 结构编辑（删表）本阶段仍不支持，用它验证 adapter
+    // 对未实现能力确实抛 unsupported_method，而不是假装成功（也不会真的删表）。
+    await manager.dropTable(empNode.id)
   } catch (e) {
-    txErr = e
+    ddlErr = e
   }
-  check('事务提交抛 unsupported_method', Boolean(txErr) && /unsupported_method|暂不支持/.test(String(txErr?.message ?? txErr)))
+  check('DDL 删表抛 unsupported_method', Boolean(ddlErr) && /unsupported_method|暂不支持/.test(String(ddlErr?.message ?? ddlErr)))
+  console.log('\n[8] 写入与事务（真实 MySQL）')
+  const ins2 = await manager.insertRow(empNode.id, {
+    name: { kind: 'text', text: '赵六' },
+    dept_id: { kind: 'number', value: 1 },
+    salary: { kind: 'text', text: '8000.00' }
+  })
+  check('insertRow 受影响 1 行', ins2.affected === 1, JSON.stringify(ins2))
+  const newId = ins2.keyValues.id?.kind === 'number' ? ins2.keyValues.id.value : null
+  check('insertRow 回填自增主键', typeof newId === 'number' && newId > 0, JSON.stringify(ins2.keyValues))
+
+  const edit = await manager.applyEdits(empNode.id, [
+    { keyValues: { id: { kind: 'number', value: newId } }, changes: { name: { kind: 'text', text: '赵六改' } } }
+  ])
+  check('applyEdits 影响 1 行且全部成功', edit.affected === 1 && edit.ok === true, JSON.stringify(edit.outcomes))
+  const tx = await manager.transactionState(`connection:${conn.id}`)
+  check('编辑后处于未提交事务', tx.active === true, JSON.stringify(tx))
+  await manager.commitTransaction(`connection:${conn.id}`)
+  const verifyEdit = await manager.runQuery(`connection:${conn.id}`, `SELECT name FROM emp WHERE id = ${newId}`)
+  check('提交后改名生效', verifyEdit.rows[0]?.cells[0]?.text === '赵六改', JSON.stringify(verifyEdit.rows[0]?.cells))
+
+  await manager.applyEdits(empNode.id, [
+    { keyValues: { id: { kind: 'number', value: newId } }, changes: { name: { kind: 'text', text: '不应生效' } } }
+  ])
+  await manager.rollbackTransaction(`connection:${conn.id}`)
+  const afterRollback = await manager.runQuery(`connection:${conn.id}`, `SELECT name FROM emp WHERE id = ${newId}`)
+  check('回滚后名字未变（事务生效）', afterRollback.rows[0]?.cells[0]?.text === '赵六改', JSON.stringify(afterRollback.rows[0]?.cells))
+
+  let emptyDelErr = null
+  try { await manager.deleteRows(empNode.id, []) } catch (e) { emptyDelErr = e }
+  check('空删除条件被拒绝', Boolean(emptyDelErr) && /为空|拒绝|空删除/.test(String(emptyDelErr?.message ?? '')))
+
+  const cnt = await manager.countRows(empNode.id)
+  check('countRows 正确（4 行）', cnt === 4, String(cnt))
+  const del = await manager.deleteRows(empNode.id, [{ id: { kind: 'number', value: newId } }])
+  check('deleteRows 影响 1 行', del.affected === 1, JSON.stringify(del.outcomes))
+  await manager.commitTransaction(`connection:${conn.id}`)
+  const cnt2 = await manager.countRows(empNode.id)
+  check('删除并提交后计数回到 3', cnt2 === 3, String(cnt2))
+
+  console.log('\n[9] 完整单元格值')
+  await manager.executeStatement(`connection:${conn.id}`, "INSERT INTO emp (name, bio) VALUES ('长文', REPEAT('y', 1500))")
+  const longQ = await manager.runQuery(`connection:${conn.id}`, "SELECT bio FROM emp WHERE name = '长文'")
+  const firstCell = longQ.rows[0]?.cells[0]
+  check('首屏 bio 被截断到 1000', firstCell?.kind === 'text' && firstCell?.truncated === true && firstCell.text.length === 1000, JSON.stringify({ len: firstCell?.text?.length, t: firstCell?.truncated }))
+  const full = await manager.fetchCellValue(longQ.cursorId, 0, 0)
+  check('fetchCellValue 取回完整 1500', full.kind === 'text' && full.text.length === 1500 && full.truncated !== true, JSON.stringify({ len: full.text?.length }))
+  await manager.closeCursor(longQ.cursorId)
+  await manager.executeStatement(`connection:${conn.id}`, "DELETE FROM emp WHERE name = '长文'")
+
+  console.log('\n[10] 导出（走 resolveTransferSource）')
+  const exportPath = join(work, 'emp-export.csv')
+  const task = manager.startTransfer({ source: { nodeId: empNode.id, connectionId: conn.id }, format: 'csv', destinationPath: exportPath })
+  const tr = await manager.waitTransfer(task.taskId)
+  check('导出任务成功', tr.status === 'completed', tr.status)
+  check('导出 CSV 非空', tr.bytesWritten > 0, String(tr.bytesWritten))
+
 } finally {
   await manager.disconnectConnection(conn.id).catch(() => undefined)
   rmSync(probeDir, { recursive: true, force: true })
