@@ -402,6 +402,24 @@ try {
   )
 
   await switchToTab(1)
+  /*
+   * 广播是异步的：切标签后固定等 500ms 在慢机器上不够，会读到尚未同步的旧网格，
+   * 于是下面"另一个标签的网格同步看到删除"偶发失败（实测约 40% 复现）。
+   *
+   * 改成等待条件：直到另一个标签的网格真的不再包含被删除的行，再读取状态。
+   * 超时仍会走到下面的断言并在真正没同步时失败，不会把问题藏起来。
+   */
+  await win
+    .waitForFunction(
+      () => {
+        const root = document.querySelector('.tab-pane:not([hidden]) .tab-grid-root')
+        const rows = [...(root?.querySelectorAll('.grid-row') ?? [])].map((r) => r.textContent ?? '')
+        return rows.length > 0 && !rows.some((text) => text.includes('remove-me'))
+      },
+      undefined,
+      { timeout: 5000 }
+    )
+    .catch(() => undefined)
   const otherTabAfterDelete = await toolbarState()
   check(
     '★ 另一个标签的「提交」也可用',
