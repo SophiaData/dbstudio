@@ -72,13 +72,14 @@ try {
     results.push({ rows, elapsed, bytes, peakDelta, rowsPerSec })
 
     /*
-     * 时间门槛 120s：实测 100 万行约 56s（2026-11-02，本机）。
+     * 时间门槛 300s：实测 100 万行约 56s（2026-11-02，本机 Apple Silicon）。
+     * CI 的 runner 更慢（2 核，可能慢 2–4 倍），300s 给足余量避免假红。
      * 慢的原因是 SQLite 导出走分页读取，每批 `SELECT ... LIMIT n OFFSET m`
      * 会重执行并跳过 offset 行，越往后越慢——这是 README「一个已知代价」
-     * 里记的同一件事，不是新问题。120s 给足波动余量，同时仍能拦住
-     * "某次改动让导出慢一个数量级"的退化。
+     * 里记的同一件事，不是新问题。300s 仍能拦住"某次改动让导出慢一个数量级"
+     * 的退化（那会是 10 分钟以上）。
      */
-    bench.record(`导出 ${rows.toLocaleString()} 行在 120s 内完成`, elapsed < 120_000, ms(elapsed))
+    bench.record(`导出 ${rows.toLocaleString()} 行在 300s 内完成`, elapsed < 300_000, ms(elapsed))
     bench.record(`导出文件非空（${rows.toLocaleString()} 行）`, bytes > 0, mb(bytes))
     bench.record(`导出行数正确（${rows.toLocaleString()} 行）`, result.rowsRead === rows, `${result.rowsRead}`)
 
