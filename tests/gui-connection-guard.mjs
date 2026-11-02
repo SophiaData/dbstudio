@@ -24,7 +24,6 @@ async function trigger(f, entry) {
   const row = f.win.locator('.tree-row').filter({ has: f.win.getByText('guard-db', { exact: true }) })
   if (entry === 'toolbar' || entry === 'delete') {
     await row.locator('.row-label').click()
-    if (entry === 'delete') f.win.once('dialog', (d) => d.accept())
     await f.win.locator('.conn-actions').getByRole('button', { name: entry === 'delete' ? '删除连接' : '断开', exact: true }).click()
   } else {
     await row.dispatchEvent('contextmenu', { clientX: 100, clientY: 130 })
@@ -39,6 +38,19 @@ async function trigger(f, entry) {
 for (const entry of ['toolbar', 'tree', 'delete', 'update']) {
   for (const action of ['cancel', 'apply-commit', 'discard-rollback']) {
     const f = await launchTransactionApp()
+    /*
+     * 常驻 dialog 处理器（与 tests/gui-mutation-transaction.mjs 同一做法）。
+     *
+     * 不用 `once('dialog')`：那是「先挂一次、再点按钮」，如果按钮当时没被点中
+     * （未启用/选择丢失/DOM 重绘），这次 once 会留到下一次操作才触发，真正需要
+     * 它的那次 confirm 就没人接，页面永久卡在确认框上。
+     *
+     * 这里每个用例都新起一个 app，错位风险比 mutation 用例小，但保持一致
+     * 的做法可以避免将来加用例时踩同一个坑。
+     */
+    f.win.on('dialog', (dialog) => {
+      void dialog.accept().catch(() => undefined)
+    })
     try {
       const { primary, other, otherPath } = await prepare(f)
       const configPath = join(f.work, 'userdata', 'connections.json')
