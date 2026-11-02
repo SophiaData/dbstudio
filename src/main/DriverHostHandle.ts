@@ -25,6 +25,7 @@ import type {
   RpcMethod,
   RpcRequest,
   RpcResponse,
+  RoutineInfo,
   SecretInput,
   TestConnectionResult
 } from '../core/driver'
@@ -541,6 +542,14 @@ export class DriverHostHandle {
     return this.request<TableDescription>('describeTable', { id })
   }
 
+  viewDefinition(id: string): Promise<string | null> {
+    return this.request<string | null>('viewDefinition', { id })
+  }
+
+  listRoutines(options?: { schema?: string | null }): Promise<RoutineInfo[]> {
+    return this.request<RoutineInfo[]>('listRoutines', { schema: options?.schema ?? null })
+  }
+
   testConnection(config: ConnectionConfig, secret?: SecretInput): Promise<TestConnectionResult> {
     return this.request<TestConnectionResult>('testConnection', { config, secret })
   }
@@ -806,6 +815,8 @@ export type RemoteAdapterShape = Pick<
   | 'renameTable'
   | 'cancelQuery'
   | 'resolveTransferSource'
+  | 'viewDefinition'
+  | 'listRoutines'
 >
 
 export type { DialectInfo }

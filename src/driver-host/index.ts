@@ -779,6 +779,27 @@ class DriverHost {
         return desc
       }
 
+      /*
+       * 视图定义 / 例程列表：驱动没实现时**降级返回空值**，而不是抛错。
+       *
+       * 理由：这两条只服务于"结构比较"的完整性。某方言不提供定义时，
+       * 上层需要的是"把该视图标为定义未捕获并告警"，而不是让整次快照直接失败——
+       * 抛错会把"某个视图读不到定义"升级成"整个结构比较不可用"，代价过大。
+       */
+      case 'viewDefinition': {
+        this.#requireConnected(req.method)
+        const id = parseObjectId(params.id, req.method)
+        if (typeof this.#adapter.viewDefinition !== 'function') return null
+        return await this.#adapter.viewDefinition(id)
+      }
+
+      case 'listRoutines': {
+        this.#requireConnected(req.method)
+        const schema = typeof params.schema === 'string' ? params.schema : null
+        if (typeof this.#adapter.listRoutines !== 'function') return []
+        return await this.#adapter.listRoutines({ schema })
+      }
+
       // ---- 结果集（第二阶段） ----
 
       case 'query': {

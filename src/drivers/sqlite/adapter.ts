@@ -22,7 +22,7 @@ import { isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import type { ConnectionConfig } from '../../core/dialect'
-import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../core/driver'
+import type { DriverAdapter, RoutineInfo, SecretValue, TestConnectionResult } from '../../core/driver'
 import type {
   ImportBatch,
   ImportBatchResult,
@@ -669,6 +669,56 @@ export class SqliteDriverAdapter implements DriverAdapter {
    *    但 rowid 不出现在 `PRAGMA table_info` 里，UI 网格也看不到它。
    * 所以"无主键表"会被判为不可编辑——偏保守，符合"宁可少给能力也不给错能力"。
    */
+  /**
+   * 读取视图定义。
+   *
+   * SQLite 把视图的原始 DDL 存在 `sqlite_master.sql` 里，直接取即可——
+   * 不需要（也没有）`pg_get_viewdef` 那样的重构函数。
+   * 注意 `sqlite_master.sql` 是**建视图时的原文**，可能带 IF NOT EXISTS 等修饰，
+   * 这对"定义是否变化"的比较是有利的：改了视图就等于改了这段文本。
+   */
+  async viewDefinition(id: string): Promise<string | null> {
+    const db = this.#requireDb()
+    const parsed = parseObjectId(id)
+    if (parsed === null || parsed.kind !== 'view') {
+      throw new SqliteAdapterError(
+        'object_not_found',
+        `viewDefinition 只接受视图节点，收到的 id 是：${id}`
+      )
+    }
+    /*
+     * ===== 这里必须按「数组行」取值 =====
+     * 本连接以 `returnArrays: true` 打开（见 #requireDb 附近的说明），
+     * 所以 `.get()` 返回的是 `["CREATE VIEW ..."]` 这样的**数组**，
+     * 而不是 `{ sql: '...' }` 对象。按字段名取会永远拿到 undefined，
+     * 表现为"视图定义静默变成 null"——比报错更难查。
+     *
+     * 用列名先定位下标，再取该下标：这样即使将来连接模式改回对象行，
+     * 这段代码也不用动。
+     */
+    const statement = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?")
+    const columnNames = statement.columns().map((column) => column.name)
+    const sqlIndex = columnNames.indexOf('sql')
+    if (sqlIndex === -1) return null
+    const rows = statement.all(parsed.name) as readonly unknown[]
+    const first = rows[0]
+    if (first === undefined) return null
+    const columnName = columnNames[sqlIndex] ?? 'sql'
+    const value = Array.isArray(first)
+      ? (first as readonly unknown[])[sqlIndex]
+      : (first as Record<string, unknown>)[columnName]
+    return typeof value === 'string' ? value : null
+  }
+
+  /**
+   * SQLite 没有存储过程 / 用户自定义持久函数的概念（只有内置函数和运行期
+   * 注册的临时函数，二者都不属于 schema）。返回空数组表示"该方言没有例程"，
+   * 而不是"读取失败"——上层据此跳过例程比较，不会误报差异。
+   */
+  async listRoutines(): Promise<RoutineInfo[]> {
+    return []
+  }
+
   async describeTable(id: string): Promise<TableDescription> {
     const db = this.#requireDb()
     const parsed = parseObjectId(id)

@@ -35,6 +35,7 @@ import type {
   ConnectionTestCheck,
   ConnectionTestStage,
   DriverAdapter,
+  RoutineInfo,
   SecretValue,
   SshHostKeyCheck,
   TestConnectionResult
@@ -1027,6 +1028,86 @@ export class PostgresDriverAdapter implements DriverAdapter {
    * 这比 `pg_index` 更标准、更易读；`pg_index` 的优势是快（一次 join 不跨三张系统视图），
    * 但本阶段数据量小，可读性优先（与任务说明"优先 information_schema，需要性能时用 pg_catalog"一致）。
    */
+  /**
+   * 读取视图定义。
+   *
+   * 用 `pg_get_viewdef(oid, true)`：第二个参数 pretty=true 让输出带缩进，
+   * 便于用户在差异里阅读。**参数化查询**，不拼接名字——视图名可能含引号或
+   * 大小写，拼接既有注入风险又容易引错对象。
+   *
+   * 只认 `relkind = 'v'`（普通视图）；物化视图是 'm'，暂不纳入结构比较范围
+   * （它们是"有数据的物化结果"，刷新语义与普通视图不同，混在一起比会误导）。
+   */
+  async viewDefinition(id: string): Promise<string | null> {
+    const client = this.#requireClient()
+    const parsed = parseObjectId(id)
+    if (parsed === null || parsed.kind !== 'view') {
+      throw new PostgresAdapterError(
+        'object_not_found',
+        `viewDefinition 只接受视图节点，收到的 id 是：${id}`
+      )
+    }
+    const result = await client.query(
+      `SELECT pg_get_viewdef(c.oid, true) AS definition
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'v' AND n.nspname = $1 AND c.relname = $2`,
+      [parsed.schema, parsed.name]
+    )
+    const definition = result.rows[0]?.definition
+    return typeof definition === 'string' ? definition : null
+  }
+
+  /**
+   * 列出例程（函数 / 存储过程）及其定义。
+   *
+   * ===== 关键取舍 =====
+   * 1. 只取 `prokind IN ('f','p')`：聚合函数是 'a'、窗口函数是 'w'，
+   *    `pg_get_functiondef` 对它们会直接报错（PostgreSQL 限制），必须先过滤掉，
+   *    否则一条聚合函数就能让整个例程读取失败。
+   * 2. 排除系统 schema，否则会把上千个 pg_catalog 内置函数全列出来。
+   * 3. **定义按例程隔离失败**：某个函数拿不到定义（比如被 drop 或权限不足）时，
+   *    只把它的 definition 记为 null 继续，不让整次采集失败——这与
+   *    describeTable 里"元数据读失败不拖垮整表"的原则一致。
+   */
+  async listRoutines(options?: { schema?: string | null }): Promise<RoutineInfo[]> {
+    const client = this.#requireClient()
+    const params: string[] = []
+    let schemaFilter = ''
+    if (options?.schema) {
+      params.push(options.schema)
+      schemaFilter = ` AND n.nspname = $${params.length}`
+    }
+    const result = await client.query(
+      `SELECT n.nspname AS schema,
+              p.proname AS name,
+              CASE WHEN p.prokind = 'p' THEN 'procedure' ELSE 'function' END AS kind,
+              p.oid::text AS oid
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.prokind IN ('f', 'p')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%'
+          ${schemaFilter}
+        ORDER BY n.nspname, p.proname`,
+      params
+    )
+    const routines: RoutineInfo[] = []
+    for (const row of result.rows as { schema: string; name: string; kind: 'function' | 'procedure'; oid: string }[]) {
+      let definition: string | null = null
+      try {
+        const defResult = await client.query('SELECT pg_get_functiondef($1::oid) AS definition', [row.oid])
+        const text = defResult.rows[0]?.definition
+        if (typeof text === 'string') definition = text
+      } catch {
+        // 单个例程拿不到定义：留 null，由上层告警"定义未捕获"，不影响其它例程。
+        definition = null
+      }
+      routines.push({ schema: row.schema, name: row.name, kind: row.kind, definition })
+    }
+    return routines
+  }
+
   async describeTable(id: string): Promise<TableDescription> {
     const client = this.#requireClient()
     const parsed = parseObjectId(id)

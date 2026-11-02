@@ -626,7 +626,20 @@ function definitionSql(keyword: string, object: SchemaObjectDefinition): string 
   if (object.definition === null || object.definition.trim() === '') {
     throw new Error(`缺少 ${object.name} 的定义，不能生成创建语句`)
   }
-  return `${keyword} ${qualified(object)} AS ${object.definition.trim()}`
+  const definition = object.definition.trim()
+  /*
+   * 两种驱动的定义形态不同，必须都兼容：
+   *   - PostgreSQL 的 `pg_get_viewdef` 只返回查询体（`SELECT ...`），需要补
+   *     `CREATE VIEW <name> AS` 头部；
+   *   - SQLite 的 `sqlite_master.sql` 返回**完整 DDL**（`CREATE VIEW ... AS SELECT ...`），
+   *     再补一次头部会变成 `CREATE VIEW "v" AS CREATE VIEW v AS SELECT ...`，
+   *     直接是语法错误。
+   *
+   * 所以先看定义本身有没有 CREATE 头部：有就原样使用（它就是一条可执行 DDL），
+   * 没有才补。这比让每个驱动各自剥前缀更稳——剥前缀要小心视图名里出现 "AS"。
+   */
+  if (/^\s*CREATE\s/i.test(definition)) return definition
+  return `${keyword} ${qualified(object)} AS ${definition}`
 }
 
 function normalizeSql(value: string | null): string {

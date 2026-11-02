@@ -25,6 +25,7 @@ import {
   type DataCompareRequest,
   type DataCompareResult,
   type DataCompareRow,
+  type RoutineDefinition,
   type SchemaSnapshot,
   type SnapshotTable
 } from '../core/compare'
@@ -798,6 +799,8 @@ export class ConnectionManager {
     const views: { schema: string | null; name: string; definition: string | null }[] = []
     // 只下钻 folder / schema，表和视图是叶子（它们的子节点是列，不需要）。
     // 深度上限防止异常驱动返回环。
+    const conn = this.#connections.get(connectionId)
+    if (!conn) throw new Error(`连接不存在或已断开: ${connectionId}`)
     const walk = async (nodeId: string, currentSchema: string | null, depth: number): Promise<void> => {
       if (depth > 4) return
       for (const node of await this.listChildren(nodeId)) {
@@ -809,12 +812,27 @@ export class ConnectionManager {
         } else if (node.kind === 'table') {
           tables.push({ ...(await this.describeTable(node.id)), schema: currentSchema, name: node.name })
         } else if (node.kind === 'view') {
-          views.push({ schema: currentSchema, name: node.name, definition: null })
+          /*
+           * 读取视图的真实 DDL。没有这一步，快照里所有视图的 definition 都是
+           * null，比较器只能判断"视图存在与否"，判断不出"定义改没改"——
+           * 那会让用户以为结构一致，实际视图逻辑已经不同。
+           *
+           * 单条读取失败不拖垮整次快照：拿不到就留 null，上层会把它标成
+           * "定义未捕获"并告警（可见的不确定，好过静默的错误结论）。
+           */
+          let definition: string | null = null
+          const viewAdapterId = NodeId.parse(node.id)?.adapterId ?? null
+          if (viewAdapterId !== null) {
+            try {
+              definition = await conn.host.viewDefinition(viewAdapterId)
+            } catch {
+              definition = null
+            }
+          }
+          views.push({ schema: currentSchema, name: node.name, definition })
         }
       }
     }
-    const conn = this.#connections.get(connectionId)
-    if (!conn) throw new Error(`连接不存在或已断开: ${connectionId}`)
     // 只浏览数据源（Redis / Kafka）没有表结构。放它进来会得到一张空快照，
     // 再被拿去和目标库比较，就会生成"删除目标端全部表"的 DROP 计划。
     if (conn.config.dialectId !== 'sqlite' && conn.config.dialectId !== 'postgresql') {
@@ -825,11 +843,30 @@ export class ConnectionManager {
       `${a.schema ?? ''}.${a.name}`.localeCompare(`${b.schema ?? ''}.${b.name}`)
     tables.sort(byName)
     views.sort(byName)
+    /*
+     * 例程（函数 / 存储过程）。它们不在树节点里（树只展开表/视图），
+     * 所以单独查一次。驱动不支持时 host 会返回空数组（见 driver-host 的
+     * listRoutines 分支），SQLite 就是这种情况——它没有持久化例程。
+     *
+     * 同样按"失败不拖垮快照"处理：查不到就当没有例程，不抛错。
+     */
+    let routines: RoutineDefinition[] = []
+    try {
+      const raw = await conn.host.listRoutines({ schema: schema ?? null })
+      routines = raw.map((routine) => ({
+        schema: routine.schema,
+        name: routine.name,
+        kind: routine.kind,
+        definition: routine.definition
+      }))
+    } catch {
+      routines = []
+    }
     return {
       source: { connectionId, schema: schema ?? null },
       tables,
       views,
-      routines: []
+      routines
     }
   }
 

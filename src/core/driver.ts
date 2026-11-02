@@ -221,6 +221,20 @@ export interface TestConnectionResult {
  *   `closeCursor`     ← 释放结果集句柄（对应 DBeaver 关闭 ResultSet）
  *   `capabilities`    ← 取代 DBeaver 那套「三机制并存」的能力探测
  */
+/**
+ * 例程（函数 / 存储过程）的定义快照。
+ *
+ * 单独定义而不复用 compare.ts 的 RoutineDefinition：driver.ts 是底层契约，
+ * 不应反过来依赖上层的比较模型。两者字段一致，由 main 层负责转换。
+ */
+export interface RoutineInfo {
+  readonly schema: string | null
+  readonly name: string
+  readonly kind: 'function' | 'procedure'
+  /** DDL 文本（`CREATE FUNCTION ...`）。拿不到时为 null，不要用空串冒充。 */
+  readonly definition: string | null
+}
+
 export interface DriverAdapter {
   /** 本 adapter 提供的方言。语法知识与 I/O 在这一层汇合。 */
   readonly dialect: SqlDialect
@@ -305,6 +319,30 @@ export interface DriverAdapter {
 
   /** 按当前方言生成并执行一条只读执行计划。 */
   explain(sql: string): Promise<ExplainResult>
+
+  /**
+   * 读取视图的 DDL 定义（`CREATE VIEW ...`）。
+   *
+   * ===== 为什么是可选方法 =====
+   * 结构比较要判断"视图定义变了没有"。没有这条能力时，比较器只能看到视图
+   * 存在与否，不能判断定义变化——那会让用户以为"结构一致"，实则视图逻辑
+   * 已经不同。这属于**静默给出错误结论**，必须避免。
+   *
+   * 所以：驱动要么实现它并返回真实 DDL；要么不实现（`undefined`），
+   * 上层据此把该视图标为"定义未捕获"并告警，而不是假装比较过。
+   *
+   * 读不到时返回 `null`（例如权限不足、视图定义已被加密），语义是
+   * "这个视图存在但定义拿不到"，同样由上层告警。
+   */
+  viewDefinition?(id: string): Promise<string | null>
+
+  /**
+   * 列出例程（函数 / 存储过程）及其定义。
+   *
+   * 同上：可选。不实现表示该方言没有例程概念（如 SQLite），
+   * 或驱动暂不支持。上层据此决定是否把"例程差异"计入比较。
+   */
+  listRoutines?(options?: { schema?: string | null }): Promise<RoutineInfo[]>
 
   /**
    * 从已打开的游标按偏移量取一页。
@@ -618,7 +656,9 @@ export const RPC_METHODS = [
   'dropView',
   'renameTable',
   'cancelQuery',
-  'resolveTransferSource'
+  'resolveTransferSource',
+  'viewDefinition',
+  'listRoutines'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

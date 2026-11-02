@@ -81,6 +81,13 @@ function makeDb(file, variant) {
     insert.run(id, email, bio)
   }
   if (variant === 'target') insert.run(9001, 'extra@example.test', null) // 目标端多出 → DELETE
+  // 视图：两侧同名但定义不同，用来验证 viewDefinition 真的把 DDL 读了出来。
+  // 早期实现里 definition 硬编码为 null，这里会退化成"看不出定义变化"。
+  db.exec(
+    variant === 'source'
+      ? `CREATE VIEW users_view AS SELECT id, email FROM users WHERE id > 0`
+      : `CREATE VIEW users_view AS SELECT id, email FROM users WHERE id > 1`
+  )
   db.close()
 }
 const sourceFile = join(dataDir, 'source.db')
@@ -103,6 +110,21 @@ try {
   check('两次快照的 diff 完全一致', JSON.stringify(diff) === JSON.stringify(again))
   check('源端独有表生成 CREATE TABLE', diff.statements.some((sql) => sql.startsWith('CREATE TABLE "audit"')), diff.statements.join(' | '))
   check('目标端独有表生成 DROP TABLE 且标危险', diff.statements.includes('DROP TABLE "legacy"') && diff.destructive)
+
+  // ===== 视图定义：真实读到 DDL，且能识别两库定义不同 =====
+  const viewEntry = s1.views.find((v) => v.name === 'users_view')
+  check('快照捕获到视图', viewEntry !== undefined, JSON.stringify(s1.views.map((v) => v.name)))
+  check(
+    '视图 definition 是真实 DDL（不再是 null）',
+    typeof viewEntry?.definition === 'string' && /CREATE\s+VIEW/i.test(viewEntry.definition),
+    JSON.stringify(viewEntry?.definition)
+  )
+  check(
+    '两库视图定义不同被识别为 alter',
+    diff.changes.some((c) => c.objectType === 'view' && c.kind === 'alter') &&
+      diff.statements.some((sql) => sql.startsWith('DROP VIEW')),
+    diff.statements.join(' | ')
+  )
 
   console.log('\n[2] 数据比较（按主键、分批、长值全文）')
   const tableNode = async (connId) => {
