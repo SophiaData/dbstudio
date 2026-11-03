@@ -17,7 +17,7 @@
 │  虚拟化懒加载元数据树 · 详情面板 · 新建连接表单    │
 │  只知道 window.dbstudio，不知道 SQLite 是什么      │
 └─────────────────────┬───────────────────────────┘
-                      │ 33 个白名单方法（src/core/api.ts）
+                      │ 48 个白名单方法（src/core/api.ts）
 ┌─────────────────────▼───────────────────────────┐
 │  preload (src/preload)                           │
 │  contextBridge 显式枚举，多一个都不给              │
@@ -32,8 +32,8 @@
                       │ spawn + JSON-RPC（NDJSON）
 ┌─────────────────────▼───────────────────────────┐
 │  驱动宿主进程 (src/driver-host)  ← 一个连接一个   │
-│  DriverRegistry → DriverAdapter (SQLite)          │
-│  node:sqlite，零原生依赖                          │
+│  DriverRegistry → DriverAdapter                    │
+│  SQLite / PostgreSQL / MySQL / Redis / Kafka       │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -99,9 +99,13 @@ src/
   drivers/
     index.ts         ★ 驱动清单唯一出口（新增方言只有这一处要改）
     sqlite/          SQLite 适配器（node:sqlite，零原生依赖）
+    postgresql/      PostgreSQL 适配器（pg + ssh2，含 SSL / SSH 隧道）
+    mysql/           MySQL / MariaDB 适配器（mysql2）
+    redis/           Redis 只读浏览（ioredis）
+    kafka/           Kafka 只读浏览（kafkajs）
   driver-host/     驱动宿主进程（纯 Node，禁止 import electron）
   main/            Electron 主进程
-  preload/         白名单桥（33 个方法）
+  preload/         白名单桥（48 个方法）
   renderer/
     tree.ts         虚拟化懒加载元数据树
     grid.ts         结果集网格：虚拟滚动 + 按页取数
