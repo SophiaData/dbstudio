@@ -13,9 +13,18 @@
  */
 
 import { createConnection, type Connection, type FieldPacket } from 'mysql2/promise'
+import type { Duplex } from 'node:stream'
 import type { ConnectionConfig } from '../../core/dialect'
-import type { DriverAdapter, SecretValue, TestConnectionResult } from '../../core/driver'
-import type { DriverCapabilities, ObjectRef, TableDescription, ColumnDescription } from '../../core/model'
+import type {
+  ConnectionTestCheck,
+  ConnectionTestStage,
+  DriverAdapter,
+  RoutineInfo,
+  SecretValue,
+  SshHostKeyCheck,
+  TestConnectionResult
+} from '../../core/driver'
+import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription, ColumnDescription } from '../../core/model'
 import type {
   CellValue,
   EditApplyResult,
@@ -28,13 +37,37 @@ import type {
   ResultValueType,
   RowEditOutcome,
   RowUpdate,
+  SqlParameterValue,
   StatementResult,
   TransactionState
 } from '../../core/resultset'
 import { MAX_CELL_TEXT_CHARS, MAX_BLOB_PREVIEW_BYTES, cellValueToSqlParam } from '../../core/resultset'
+import { bindSqlParameters } from '../../core/sql-parameters'
 import type { ImportBatch, ImportBatchResult, TransferSourceResolution } from '../../core/transfer'
+import {
+  openSshTunnel,
+  SshTunnelError,
+  type SshCredentials,
+  type SshTunnel,
+  type SshTunnelConfig
+} from '../ssh-tunnel'
 import { mysqlDialect } from './dialect'
+import {
+  buildCreateTableSql,
+  buildCreateViewSql,
+  buildDropTableSql,
+  buildDropViewSql,
+  buildRenameTableSql
+} from './ddl'
+import { MysqlAdapterError } from './errors'
 import { MYSQL_INFO } from './info'
+import {
+  DEFAULT_MYSQL_SSL_MODE,
+  isMysqlSslMode,
+  planMysqlSsl,
+  type MysqlSslMode,
+  type MysqlSslOptions
+} from './ssl'
 import {
   SCHEMAS_FOLDER_ID,
   columnObjectId,
@@ -46,14 +79,7 @@ import {
   type SchemaFolder
 } from './ids'
 
-export class MysqlAdapterError extends Error {
-  readonly code: string
-  constructor(code: string, message: string) {
-    super(message)
-    this.name = 'MysqlAdapterError'
-    this.code = code
-  }
-}
+export { MysqlAdapterError } from './errors'
 
 const MYSQL_CAPABILITIES: DriverCapabilities = {
   hasCatalog: false,
@@ -63,14 +89,14 @@ const MYSQL_CAPABILITIES: DriverCapabilities = {
   supportsCancel: true,
   // Step 3 已实现主键编辑/插入/删除（事务内），可按行编辑。
   supportsInlineEdit: true,
-  // 只声明**真正读得出来**的元数据。CHECK / 触发器本阶段未实现读取，
-  // 如实标 false——否则 UI 会把"读不到"当成"确认没有"，是比缺失更坏的错误。
+  // 如实声明**真正读得出来**的元数据。MySQL 8.0.16+ 与 MariaDB 10.2+
+  // 都提供 information_schema.CHECK_CONSTRAINTS / TRIGGERS。
   metadata: {
     foreignKeys: true,
     indexes: true,
     uniqueConstraints: true,
-    checkConstraints: false,
-    triggers: false
+    checkConstraints: true,
+    triggers: true
   }
 }
 
@@ -78,13 +104,146 @@ const MYSQL_CAPABILITIES: DriverCapabilities = {
 const SYSTEM_SCHEMAS = new Set(['information_schema', 'mysql', 'performance_schema', 'sys'])
 
 interface Cursor {
-  readonly sql: string
+  readonly sql: string;
+  /** 绑定参数。分页取数与「取完整值」都要原样重放。 */
+  readonly params: readonly SqlParameterValue[]
+}
+
+/**
+ * Uint8Array → Buffer：mysql2 只认 Buffer 作为二进制参数。
+ *
+ * 绑定层为了跨 IPC 可序列化，统一用 Uint8Array；到了真正发查询前再转。
+ */
+function toMysqlParams(values: readonly SqlParameterValue[]): unknown[] {
+  return values.map((value) => (value instanceof Uint8Array ? Buffer.from(value) : value))
 }
 
 function readOption(config: ConnectionConfig, key: string): string | null {
   const raw = (config.options as Record<string, unknown> | undefined)?.[key]
   if (raw === undefined || raw === null) return null
   return String(raw)
+}
+
+/** 读取字符串选项；缺失统一成空串（比 null 少一层判空）。 */
+function readOptionString(config: ConnectionConfig, key: string): string {
+  return readOption(config, key)?.trim() ?? ''
+}
+
+/** 连接参数（已解析、已验证），connect / testConnection / cancel 共用。 */
+interface ResolvedMysqlConnection {
+  readonly host: string
+  readonly port: number
+  readonly database: string | undefined
+  readonly user: string
+  readonly password: string
+  readonly ssl: MysqlSslOptions | undefined
+  readonly ssh: SshTunnelConfig | undefined
+  readonly sshCredentials: SshCredentials | undefined
+}
+
+function resolveConnectionInfo(config: ConnectionConfig, secret: SecretValue): ResolvedMysqlConnection {
+  const host = readOptionString(config, 'host') || '127.0.0.1'
+  const portRaw = readOptionString(config, 'port')
+  const port = portRaw === '' ? 3306 : Number(portRaw)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new MysqlAdapterError('connection_failed', `连接「${config.name}」的端口非法：${portRaw}（应为 1-65535 的整数）。`)
+  }
+  const database = readOptionString(config, 'database')
+  if (database === '') {
+    throw new MysqlAdapterError('connection_failed', `连接「${config.name}」缺少数据库名（database）。`)
+  }
+  const user = readOptionString(config, 'user') || 'root'
+  const password = secret.dbPassword ?? ''
+
+  const sslModeRaw = readOptionString(config, 'sslmode')
+  const sslMode: MysqlSslMode =
+    sslModeRaw === ''
+      ? DEFAULT_MYSQL_SSL_MODE
+      : isMysqlSslMode(sslModeRaw)
+        ? sslModeRaw
+        : (() => {
+            throw new MysqlAdapterError(
+              'connection_failed',
+              `SSL 模式非法：${sslModeRaw}。可选值：disable / require / verify-ca / verify-full。`
+            )
+          })()
+  const caPath = readOptionString(config, 'sslrootcert')
+  let ssl: MysqlSslOptions | undefined
+  try {
+    ssl = planMysqlSsl(sslMode, caPath === '' ? undefined : caPath)
+  } catch (thrown) {
+    throw new MysqlAdapterError('connection_failed', describeThrown(thrown))
+  }
+
+  /*
+   * SSH 隧道。`sshHost` 留空即不启用——与 PostgreSQL 驱动同一约定，
+   * 表单里的其它 SSH 字段不会误触发隧道。
+   */
+  const sshHost = readOptionString(config, 'sshHost')
+  let ssh: SshTunnelConfig | undefined
+  if (sshHost !== '') {
+    const sshUser = readOptionString(config, 'sshUser')
+    if (sshUser === '') {
+      throw new MysqlAdapterError('connection_failed', '启用 SSH 隧道时必须填写 SSH 用户名（sshUser）。')
+    }
+    const sshPortRaw = readOptionString(config, 'sshPort')
+    const sshPort = sshPortRaw === '' ? 22 : Number(sshPortRaw)
+    if (!Number.isInteger(sshPort) || sshPort <= 0 || sshPort > 65535) {
+      throw new MysqlAdapterError('connection_failed', `SSH 端口非法：${sshPortRaw}（应为 1-65535 的整数）。`)
+    }
+    const targetHostRaw = readOptionString(config, 'sshTargetHost')
+    const targetPortRaw = readOptionString(config, 'sshTargetPort')
+    const targetPort = targetPortRaw === '' ? port : Number(targetPortRaw)
+    if (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) {
+      throw new MysqlAdapterError('connection_failed', `SSH 目标数据库端口非法：${targetPortRaw}（应为 1-65535 的整数）。`)
+    }
+    const privateKeyPath = readOptionString(config, 'sshPrivateKey')
+    const hostKeySha256 = readOptionString(config, 'sshHostKeySha256')
+    ssh = {
+      host: sshHost,
+      port: sshPort,
+      username: sshUser,
+      privateKeyPath: privateKeyPath === '' ? undefined : privateKeyPath,
+      hostKeySha256: hostKeySha256 === '' ? undefined : hostKeySha256,
+      targetHost: targetHostRaw === '' ? host : targetHostRaw,
+      targetPort
+    }
+  }
+
+  return {
+    host,
+    port,
+    database,
+    user,
+    password,
+    ssl,
+    ssh,
+    sshCredentials:
+      ssh === undefined
+        ? undefined
+        : { password: secret.sshPassword, privateKeyPassphrase: secret.sshPassphrase }
+  }
+}
+
+function toSshHostKeyCheck(ssh: SshTunnelConfig, error: SshTunnelError): SshHostKeyCheck | undefined {
+  if (error.code !== 'ssh_host_unverified' && error.code !== 'ssh_host_key_mismatch') return undefined
+  return {
+    host: ssh.host,
+    port: ssh.port,
+    fingerprint: error.hostKeySha256 ?? '',
+    ...(error.expectedHostKeySha256 === undefined ? {} : { expectedFingerprint: error.expectedHostKeySha256 }),
+    state: error.code === 'ssh_host_unverified' ? 'unverified' : 'mismatch'
+  }
+}
+
+function recordCheck(
+  checks: ConnectionTestCheck[],
+  stage: ConnectionTestStage,
+  status: 'passed' | 'failed' | 'skipped',
+  message?: string,
+  elapsedMs?: number
+): void {
+  checks.push({ stage, status, ...(message === undefined ? {} : { message }), ...(elapsedMs === undefined ? {} : { elapsedMs }) })
 }
 
 /** 去掉末尾分号：派生表包装里子查询不能带分号。 */
@@ -180,9 +339,10 @@ export class MysqlDriverAdapter implements DriverAdapter {
   #inTransaction = false
   /** 事务内累计影响行数 */
   #pendingAffected = 0
-  #config: ConnectionConfig | null = null
-  #secret: SecretValue = {}
   #database: string | null = null
+  /** 已解析的连接参数，取消查询时要用同一套 SSL / 隧道设置。 */
+  #info: ResolvedMysqlConnection | null = null
+  #tunnel: SshTunnel | null = null
   #cursors = new Map<string, Cursor>()
   #nextCursor = 1
 
@@ -191,41 +351,67 @@ export class MysqlDriverAdapter implements DriverAdapter {
     return this.#conn
   }
 
+  /**
+   * 建一条 mysql2 连接。SSH 隧道启用时，先开一条通道把它当 `stream` 交给 mysql2。
+   *
+   * 每次调用都可能新开一条 channel（取消查询也要一条），所以隧道实例
+   * 由 adapter 持有并复用，`disconnect()` 时统一关闭。
+   */
+  async #openConnection(info: ResolvedMysqlConnection, connectTimeout?: number): Promise<Connection> {
+    let stream: Duplex | undefined
+    if (info.ssh !== undefined) {
+      if (this.#tunnel === null) {
+        this.#tunnel = await openSshTunnel(
+          info.ssh,
+          info.sshCredentials ?? { password: undefined, privateKeyPassphrase: undefined }
+        )
+      }
+      stream = await this.#tunnel.forward()
+    }
+    return createConnection({
+      host: info.host,
+      port: info.port,
+      user: info.user,
+      password: info.password,
+      ...(info.database === undefined ? {} : { database: info.database }),
+      ...(info.ssl === undefined ? {} : { ssl: info.ssl }),
+      ...(stream === undefined ? {} : { stream }),
+      ...(connectTimeout === undefined ? {} : { connectTimeout }),
+      // 注意：**不**在这里设 rowsAsArray。元数据查询需要对象行（按列名取），
+      // 只有 query/fetchResultPage 这类结果集查询才按需用 { rowsAsArray: true }。
+      // DATE/DATETIME 直接返回字符串，避免本地时区把时间"挪"了。
+      dateStrings: true,
+      // 大整数按字符串返回，避免 JS number 精度丢失。
+      supportBigNumbers: true,
+      bigNumberStrings: true,
+      // 一次只跑一条语句：多语句交给上层脚本切分器，驱动不猜。
+      multipleStatements: false
+    })
+  }
+
   async connect(config: ConnectionConfig, secret: SecretValue): Promise<DriverCapabilities> {
-    const host = readOption(config, 'host') ?? '127.0.0.1'
-    const port = Number(readOption(config, 'port') ?? 3306)
-    const database = readOption(config, 'database') ?? undefined
-    const user = readOption(config, 'user') ?? 'root'
-    const password = secret?.dbPassword ?? ''
     try {
-      this.#conn = await createConnection({
-        host,
-        port,
-        user,
-        password,
-        ...(database === undefined ? {} : { database }),
-        // 注意：**不**在这里设 rowsAsArray。元数据查询需要对象行（按列名取），
-        // 只有 query/fetchResultPage 这类结果集查询才按需用 { rowsAsArray: true }。
-        // DATE/DATETIME 直接返回字符串，避免本地时区把时间"挪"了。
-        dateStrings: true,
-        // 大整数按字符串返回，避免 JS number 精度丢失。
-        supportBigNumbers: true,
-        bigNumberStrings: true,
-        // 一次只跑一条语句：多语句交给上层脚本切分器，驱动不猜。
-        multipleStatements: false
-      })
-      this.#database = database ?? null
-      this.#config = config
-      this.#secret = secret
+      const info = resolveConnectionInfo(config, secret)
+      this.#conn = await this.#openConnection(info)
+      this.#info = info
+      this.#database = info.database ?? null
       return MYSQL_CAPABILITIES
     } catch (thrown) {
-      throw new MysqlAdapterError('connection_failed', `无法连接到 MySQL ${host}:${port}：${describeThrown(thrown)}`)
+      // 连接失败时不要留下半开的隧道。
+      const tunnel = this.#tunnel
+      this.#tunnel = null
+      if (tunnel !== null) await tunnel.close().catch(() => undefined)
+      if (thrown instanceof MysqlAdapterError) throw thrown
+      throw new MysqlAdapterError('connection_failed', `无法连接到 MySQL：${describeThrown(thrown)}`)
     }
   }
 
   async disconnect(): Promise<void> {
     const conn = this.#conn
+    const tunnel = this.#tunnel
     this.#conn = null
+    this.#info = null
+    this.#tunnel = null
     this.#cursors.clear()
     if (conn) {
       try {
@@ -234,32 +420,99 @@ export class MysqlDriverAdapter implements DriverAdapter {
         // 断开失败不抛：可能对端已关。
       }
     }
+    if (tunnel !== null) {
+      try {
+        await tunnel.close()
+      } catch {
+        // 隧道关闭失败同样不阻塞断开。
+      }
+    }
   }
 
   async testConnection(config: ConnectionConfig, secret: SecretValue): Promise<TestConnectionResult> {
     const startedAt = performance.now()
+    const checks: ConnectionTestCheck[] = []
+    let info: ResolvedMysqlConnection | null = null
     let probe: Connection | null = null
+    let tunnel: SshTunnel | null = null
     try {
-      const host = readOption(config, 'host') ?? '127.0.0.1'
-      const port = Number(readOption(config, 'port') ?? 3306)
-      const database = readOption(config, 'database') ?? undefined
-      const user = readOption(config, 'user') ?? 'root'
+      info = resolveConnectionInfo(config, secret)
+      recordCheck(checks, 'config', 'passed', '连接参数解析通过')
+
+      let stream: Duplex | undefined
+      if (info.ssh !== undefined) {
+        const sshStartedAt = performance.now()
+        tunnel = await openSshTunnel(
+          info.ssh,
+          info.sshCredentials ?? { password: undefined, privateKeyPassphrase: undefined }
+        )
+        stream = await tunnel.forward()
+        recordCheck(checks, 'ssh_connect', 'passed', `SSH 已连接 ${info.ssh.host}:${info.ssh.port}`, Math.round(performance.now() - sshStartedAt))
+        recordCheck(checks, 'ssh_host_key', 'passed', 'SSH 主机密钥与已保存指纹一致')
+        recordCheck(checks, 'ssh_auth', 'passed', 'SSH 认证通过')
+        recordCheck(checks, 'ssh_forward', 'passed', `SSH 转发通道可用，目标 ${info.ssh.targetHost}:${info.ssh.targetPort}`)
+      } else {
+        recordCheck(checks, 'ssh_connect', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_host_key', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_auth', 'skipped', '未启用 SSH 隧道')
+        recordCheck(checks, 'ssh_forward', 'skipped', '未启用 SSH 隧道')
+      }
+
+      const databaseStartedAt = performance.now()
       probe = await createConnection({
-        host,
-        port,
-        user,
-        password: secret?.dbPassword ?? '',
-        ...(database === undefined ? {} : { database }),
+        host: info.host,
+        port: info.port,
+        user: info.user,
+        password: info.password,
+        ...(info.database === undefined ? {} : { database: info.database }),
+        ...(info.ssl === undefined ? {} : { ssl: info.ssl }),
+        ...(stream === undefined ? {} : { stream }),
         connectTimeout: 8000
       })
+      recordCheck(
+        checks,
+        'database',
+        'passed',
+        `已连接数据库 ${info.host}:${info.port}/${info.database ?? ''}`,
+        Math.round(performance.now() - databaseStartedAt)
+      )
+
+      const queryStartedAt = performance.now()
       const [rows] = await probe.query('SELECT VERSION() AS v')
+      recordCheck(checks, 'server_query', 'passed', '服务端探测查询通过', Math.round(performance.now() - queryStartedAt))
       const raw = Array.isArray(rows) && rows.length > 0 ? (rows[0] as Record<string, unknown>) : null
       const version = raw && typeof raw.v === 'string' ? raw.v : undefined
-      return { ok: true, elapsedMs: Math.round(performance.now() - startedAt), ...(version ? { serverVersion: `MySQL ${version}` } : {}) }
+      return {
+        ok: true,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        checks,
+        ...(version ? { serverVersion: `MySQL ${version}` } : {})
+      }
     } catch (thrown) {
-      return { ok: false, message: describeThrown(thrown), elapsedMs: Math.round(performance.now() - startedAt) }
+      let failedStage: ConnectionTestStage =
+        probe !== null ? 'server_query' : info === null ? 'config' : info.ssh !== undefined && tunnel === null ? 'ssh_connect' : 'database'
+      let sshHostKey: SshHostKeyCheck | undefined
+      const message = describeThrown(thrown)
+      if (thrown instanceof SshTunnelError) {
+        failedStage =
+          thrown.code === 'ssh_host_unverified' || thrown.code === 'ssh_host_key_mismatch'
+            ? 'ssh_host_key'
+            : thrown.code === 'ssh_auth_failed' || thrown.code === 'ssh_missing_credentials'
+              ? 'ssh_auth'
+              : 'ssh_connect'
+        if (info?.ssh !== undefined) sshHostKey = toSshHostKeyCheck(info.ssh, thrown)
+      }
+      recordCheck(checks, failedStage, 'failed', message)
+      return {
+        ok: false,
+        message,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        checks,
+        ...(sshHostKey === undefined ? {} : { sshHostKey })
+      }
     } finally {
       if (probe) await probe.end().catch(() => undefined)
+      if (tunnel !== null) await tunnel.close().catch(() => undefined)
     }
   }
 
@@ -412,6 +665,11 @@ export class MysqlDriverAdapter implements DriverAdapter {
     table: string,
     description: TableDescription
   ): Promise<TableDescription> {
+    let result = description
+    /*
+     * 索引 / 外键 / 唯一约束放在同一个 try 里：它们来自同一组稳定的
+     * information_schema 表，一次失败通常意味着连接或权限问题。
+     */
     try {
       const [idxRows] = await conn.query(
         `SELECT INDEX_NAME AS indexName, NON_UNIQUE AS nonUnique, COLUMN_NAME AS columnName,
@@ -437,12 +695,45 @@ export class MysqlDriverAdapter implements DriverAdapter {
           ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
         [schema, table]
       )
-      const fkMap = new Map<string, { name: string; columns: string[]; refSchema: string; refTable: string; refColumns: string[] }>()
+      const fkMap = new Map<string, {
+        name: string
+        columns: string[]
+        refSchema: string
+        refTable: string
+        refColumns: string[]
+        onUpdate: string | null
+        onDelete: string | null
+      }>()
       for (const r of fkRows as unknown as { name: string; columnName: string; refSchema: string; refTable: string; refColumn: string }[]) {
-        const cur = fkMap.get(r.name) ?? { name: r.name, columns: [], refSchema: r.refSchema, refTable: r.refTable, refColumns: [] }
+        const cur = fkMap.get(r.name) ?? {
+          name: r.name,
+          columns: [],
+          refSchema: r.refSchema,
+          refTable: r.refTable,
+          refColumns: [],
+          onUpdate: null,
+          onDelete: null
+        }
         cur.columns.push(r.columnName)
         cur.refColumns.push(r.refColumn)
         fkMap.set(r.name, cur)
+      }
+      // 外键动作（ON UPDATE / ON DELETE）在 REFERENTIAL_CONSTRAINTS 里。
+      try {
+        const [ruleRows] = await conn.query(
+          `SELECT CONSTRAINT_NAME AS name, UPDATE_RULE AS onUpdate, DELETE_RULE AS onDelete
+             FROM information_schema.REFERENTIAL_CONSTRAINTS
+            WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?`,
+          [schema, table]
+        )
+        for (const r of ruleRows as unknown as { name: string; onUpdate: string | null; onDelete: string | null }[]) {
+          const cur = fkMap.get(r.name)
+          if (cur === undefined) continue
+          cur.onUpdate = r.onUpdate
+          cur.onDelete = r.onDelete
+        }
+      } catch {
+        // 读不到动作不影响外键本身，保持 null。
       }
       const foreignKeys = [...fkMap.values()].map((f) => ({
         name: f.name,
@@ -450,31 +741,167 @@ export class MysqlDriverAdapter implements DriverAdapter {
         referencedSchema: f.refSchema,
         referencedTable: f.refTable,
         referencedColumns: f.refColumns,
-        onUpdate: null,
-        onDelete: null
+        onUpdate: f.onUpdate,
+        onDelete: f.onDelete
       }))
 
       // 唯一约束从"唯一索引"派生（MySQL 里 UNIQUE KEY 就是唯一索引）。
       const uniqueConstraints = [...indexMap.values()]
         .filter((i) => i.unique)
         .map((i) => ({ name: i.name, columns: i.columns }))
-      return { ...description, indexes, foreignKeys, uniqueConstraints }
+      result = { ...result, indexes, foreignKeys, uniqueConstraints }
     } catch (thrown) {
       if (thrown instanceof MysqlAdapterError) throw thrown
-      return description
+      return result
+    }
+
+    /*
+     * CHECK 约束单独一个 try：MySQL 8.0.16 之前没有 CHECK_CONSTRAINTS。
+     * 这条查询失败时只应让 checks 保持 undefined（"驱动没说"），
+     * 不能因此把已经读到的索引/外键一起丢掉。
+     */
+    try {
+      const [checkRows] = await conn.query(
+        `SELECT tc.CONSTRAINT_NAME AS name, cc.CHECK_CLAUSE AS expression
+           FROM information_schema.TABLE_CONSTRAINTS tc
+           JOIN information_schema.CHECK_CONSTRAINTS cc
+             ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+            AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+          WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK'
+          ORDER BY tc.CONSTRAINT_NAME`,
+        [schema, table]
+      )
+      const checks = (checkRows as unknown as { name: string; expression: string | null }[])
+        .filter((r) => typeof r.expression === 'string')
+        .map((r) => ({ name: r.name, expression: r.expression as string }))
+      result = { ...result, checks }
+    } catch {
+      // 旧版本 MySQL 没有 CHECK_CONSTRAINTS：保持 undefined，UI 显示"未知"。
+    }
+
+    try {
+      const [triggerRows] = await conn.query(
+        `SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event,
+                ACTION_STATEMENT AS statement, ACTION_CONDITION AS cond
+           FROM information_schema.TRIGGERS
+          WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?
+          ORDER BY TRIGGER_NAME`,
+        [schema, table]
+      )
+      const triggers = (triggerRows as unknown as {
+        name: string
+        timing: string
+        event: string
+        statement: string | null
+        cond: string | null
+      }[])
+        .filter((r) => isTriggerTiming(r.timing) && isTriggerEvent(r.event))
+        .map((r) => ({
+          name: r.name,
+          timing: r.timing as 'BEFORE' | 'AFTER' | 'INSTEAD OF',
+          event: r.event as 'INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE',
+          statement: r.statement ?? '',
+          updateOf: [] as string[],
+          when: r.cond ?? null,
+          // MySQL 不能单独禁用触发器；读到的都视为启用。
+          enabled: true
+        }))
+      result = { ...result, triggers }
+    } catch {
+      // 权限不足等：保持 undefined，不假装"没有触发器"。
+    }
+
+    return result
+  }
+
+  /** 读取视图定义（`information_schema.VIEWS`）。拿不到时返回 null。 */
+  async viewDefinition(id: string): Promise<string | null> {
+    const conn = this.#requireConn()
+    const parsed = parseObjectId(id)
+    if (parsed === null || parsed.kind !== 'view') {
+      throw new MysqlAdapterError('object_not_found', `viewDefinition 只接受视图节点，收到的 id 是：${id}`)
+    }
+    try {
+      const [rows] = await conn.query(
+        'SELECT VIEW_DEFINITION AS definition FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+        [parsed.schema, parsed.name]
+      )
+      const definition = (rows as unknown as { definition: string | null }[])[0]?.definition
+      return typeof definition === 'string' && definition.trim() !== '' ? definition : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 列出例程（函数 / 存储过程）。
+   *
+   * MySQL 不支持同名重载，所以不提供 `signature`——`DROP PROCEDURE name`
+   * 本来就不能带参数列表。定义用 `SHOW CREATE` 取完整 DDL
+   * （information_schema 的 `ROUTINE_DEFINITION` 只有函数体，不足以重建）。
+   * 单个例程取不到定义时留 null，不影响其它例程。
+   */
+  async listRoutines(options?: { schema?: string | null }): Promise<RoutineInfo[]> {
+    const conn = this.#requireConn()
+    const params: string[] = []
+    let filter = ''
+    if (options?.schema) {
+      params.push(options.schema)
+      filter = ' AND ROUTINE_SCHEMA = ?'
+    }
+    const [rows] = await conn.query(
+      `SELECT ROUTINE_SCHEMA AS routineSchema, ROUTINE_NAME AS name, ROUTINE_TYPE AS kind
+         FROM information_schema.ROUTINES
+        WHERE ROUTINE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+        ${filter}
+        ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME`,
+      params
+    )
+    const routines: RoutineInfo[] = []
+    for (const row of rows as unknown as { routineSchema: string; name: string; kind: string }[]) {
+      const kind = row.kind === 'PROCEDURE' ? 'procedure' : 'function'
+      const definition = await this.#routineDefinition(conn, row.routineSchema, row.name, kind)
+      routines.push({ schema: row.routineSchema, name: row.name, kind, definition })
+    }
+    return routines
+  }
+
+  async #routineDefinition(
+    conn: Connection,
+    schema: string,
+    name: string,
+    kind: 'function' | 'procedure'
+  ): Promise<string | null> {
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    try {
+      const [rows] = await conn.query(`SHOW CREATE ${kind.toUpperCase()} ${quote(schema)}.${quote(name)}`)
+      const row = (rows as unknown as Record<string, unknown>[])[0]
+      if (row === undefined) return null
+      const key = Object.keys(row).find((k) => /^Create (Function|Procedure)$/i.test(k))
+      const value = key === undefined ? undefined : row[key]
+      if (typeof value !== 'string' || value.trim() === '') return null
+      /*
+       * 去掉 DEFINER：`SHOW CREATE` 会带上原定义者（``DEFINER=`root`@`%` ``），
+       * 拿到另一个环境执行时往往因权限不足失败。去掉后由执行者自己作为定义者，
+       * 这是结构同步最可移植的形态。
+       */
+      return value.trim().replace(/^(CREATE\s+)DEFINER=(?:`[^`]*`|[^\s@]+)@(?:`[^`]*`|[^\s]+)\s+/i, '$1')
+    } catch {
+      return null
     }
   }
 
   async query(sql: string, options?: QueryOptions): Promise<QueryResult> {
     const conn = this.#requireConn()
+    const bound = bindSqlParameters(sql, options?.parameters, 'mysql')
     const limit = normalizeLimit(options?.limit)
     const offset = normalizeOffset(options?.offset)
-    const executedSql = buildPagedSql(sql, limit, offset)
+    const executedSql = buildPagedSql(bound.sql, limit, offset)
     const startedAt = performance.now()
-    const [rows, fields] = await conn.query({ sql: executedSql, rowsAsArray: true })
+    const [rows, fields] = await conn.query({ sql: executedSql, rowsAsArray: true }, toMysqlParams(bound.values))
     const elapsedMs = Math.round(performance.now() - startedAt)
     const rawRows = rows as unknown as unknown[][]
-    const cursorId = options?.keepCursor === false ? null : this.#openCursor(sql)
+    const cursorId = options?.keepCursor === false ? null : this.#openCursor(bound.sql, bound.values)
     return {
       columns: buildColumns(fields ?? []),
       rows: buildRows(rawRows, offset),
@@ -494,7 +921,7 @@ export class MysqlDriverAdapter implements DriverAdapter {
     const off = normalizeOffset(offset)
     const lim = normalizeLimit(limit)
     const executedSql = buildPagedSql(cursor.sql, lim, off)
-    const [rows, fields] = await conn.query({ sql: executedSql, rowsAsArray: true })
+    const [rows, fields] = await conn.query({ sql: executedSql, rowsAsArray: true }, toMysqlParams(cursor.params))
     const rawRows = rows as unknown as unknown[][]
     return {
       columns: buildColumns(fields ?? []),
@@ -509,17 +936,19 @@ export class MysqlDriverAdapter implements DriverAdapter {
     this.#cursors.delete(cursorId)
   }
 
-  #openCursor(sql: string): string {
+  #openCursor(sql: string, params: readonly SqlParameterValue[] = []): string {
     const id = `mysql-cursor-${this.#nextCursor++}`
-    this.#cursors.set(id, { sql })
+    this.#cursors.set(id, { sql, params })
     return id
   }
 
   async executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
     const conn = this.#requireConn()
+    const bound = bindSqlParameters(sql, options?.parameters, 'mysql')
+    const statementSql = stripTrailingSemicolon(bound.sql)
+    const params = toMysqlParams(bound.values)
     const startedAt = performance.now()
-    void startedAt
-    const [rows, fields] = await conn.query({ sql: stripTrailingSemicolon(sql), rowsAsArray: true })
+    const [rows, fields] = await conn.query({ sql: statementSql, rowsAsArray: true }, params)
     // SELECT / SHOW / 返回结果集的语句：rows 是数组。
     if (Array.isArray(rows) && Array.isArray(fields) && fields.length > 0) {
       const rawRows = rows as unknown as unknown[][]
@@ -531,7 +960,7 @@ export class MysqlDriverAdapter implements DriverAdapter {
           offset: 0,
           returned: rawRows.length,
           hasMore: false,
-          cursorId: this.#openCursor(sql),
+          cursorId: this.#openCursor(statementSql, bound.values),
           executedSql: sql,
           elapsedMs: Math.round(performance.now() - startedAt)
         }
@@ -543,9 +972,9 @@ export class MysqlDriverAdapter implements DriverAdapter {
     return {
       kind: 'affected',
       affected: Number(header?.affectedRows ?? 0),
-      // Step 1 不使用事务；这些字段如实反映"无用户事务、自动提交"。
-      inTransaction: false,
-      transactionState: { active: false, pendingAffected: 0 },
+      // 事务状态如实反映本驱动的跟踪结果（手写 BEGIN/COMMIT 不在跟踪范围内）。
+      inTransaction: this.#inTransaction,
+      transactionState: { active: this.#inTransaction, pendingAffected: this.#pendingAffected },
       executedSql: sql,
       elapsedMs: Math.round(performance.now() - startedAt)
     }
@@ -567,18 +996,27 @@ export class MysqlDriverAdapter implements DriverAdapter {
 
   async cancelQuery(): Promise<boolean> {
     const conn = this.#conn
-    const config = this.#config
-    if (conn === null || config === null) return false
+    const info = this.#info
+    if (conn === null || info === null) return false
     const threadId = conn.threadId
     if (typeof threadId !== 'number') return false
     // 用**独立连接**执行 KILL QUERY：主连接正忙着跑那条查询，在它上面发只会排队。
+    // 取消连接必须复用同一套 SSL / SSH 设置：远端要求 TLS 或只能经跳板机到达时，
+    // 用明文直连会失败，表现为"取消按钮点了没反应"，且本机永远复现不了。
     let killer: Connection | null = null
     try {
+      let stream: Duplex | undefined
+      if (info.ssh !== undefined) {
+        if (this.#tunnel === null) return false
+        stream = await this.#tunnel.forward()
+      }
       killer = await createConnection({
-        host: readOption(config, 'host') ?? '127.0.0.1',
-        port: Number(readOption(config, 'port') ?? 3306),
-        user: readOption(config, 'user') ?? 'root',
-        password: this.#secret?.dbPassword ?? '',
+        host: info.host,
+        port: info.port,
+        user: info.user,
+        password: info.password,
+        ...(info.ssl === undefined ? {} : { ssl: info.ssl }),
+        ...(stream === undefined ? {} : { stream }),
         connectTimeout: 5000
       })
       await killer.query(`KILL QUERY ${threadId}`)
@@ -729,7 +1167,7 @@ export class MysqlDriverAdapter implements DriverAdapter {
     const conn = this.#requireConn()
     const cursor = this.#cursors.get(cursorId)
     if (!cursor) throw new MysqlAdapterError('object_not_found', `未知游标：${cursorId}`)
-    const [rows] = await conn.query({ sql: cursor.sql, rowsAsArray: true })
+    const [rows] = await conn.query({ sql: cursor.sql, rowsAsArray: true }, toMysqlParams(cursor.params))
     const row = (rows as unknown as unknown[][])[rowIndex]
     if (!row) throw new MysqlAdapterError('bad_params', `行号越界：${rowIndex}`)
     return toFullCellValue(row[columnIndex])
@@ -787,18 +1225,116 @@ export class MysqlDriverAdapter implements DriverAdapter {
       throw new MysqlAdapterError('object_not_found', `导出只支持表或视图节点：${nodeId}`)
     }
     const qualified = `${mysqlDialect.quoteIdentifier(parsed.schema)}.${mysqlDialect.quoteIdentifier(parsed.name)}`
-    return { sql: `SELECT * FROM ${qualified}`, target: { name: parsed.name, kind: parsed.kind } }
+    return { sql: `SELECT * FROM ${qualified}`, target: { schema: parsed.schema, name: parsed.name, kind: parsed.kind } }
   }
 
-  // ===== DDL 结构编辑（建表/删表/视图/重命名）本阶段仍不支持 =====
-  #unsupported(method: string): never {
-    throw new MysqlAdapterError('unsupported_method', `MySQL 驱动当前版本暂不支持「${method}」。`)
+  // ===== DDL 结构编辑（建表/删表/视图/重命名） =====
+
+  /** DDL 需要明确的目标库。连接未指定 database 时按错误处理，不猜。 */
+  #requireDatabase(): string {
+    if (this.#database === null || this.#database.trim() === '') {
+      throw new MysqlAdapterError('bad_params', '当前连接没有指定 database，无法确定 DDL 的目标库。')
+    }
+    return this.#database
   }
-  async createTable(): Promise<never> { this.#unsupported('建表') }
-  async dropTable(): Promise<never> { this.#unsupported('删表') }
-  async createView(): Promise<never> { this.#unsupported('建视图') }
-  async dropView(): Promise<never> { this.#unsupported('删视图') }
-  async renameTable(): Promise<never> { this.#unsupported('重命名表') }
+
+  /**
+   * MySQL 的 DDL 会**隐式提交**当前事务。若用户有未提交的网格编辑，
+   * 直接执行 DDL 会把它们一起提交——这是静默的数据事故。
+   * 所以有跟踪中的事务时明确拒绝，让用户先提交或回滚。
+   */
+  #assertNoTransaction(action: string): void {
+    if (this.#inTransaction) {
+      throw new MysqlAdapterError(
+        'bad_params',
+        `当前有未提交的事务，${action}会隐式提交它。请先提交或回滚，再执行 DDL。`
+      )
+    }
+  }
+
+  #requireName(value: string, label: string): string {
+    const name = value.trim()
+    if (name === '' || name.includes('\0')) {
+      throw new MysqlAdapterError('bad_params', `${label}不能为空或包含 NUL 字符。`)
+    }
+    return name
+  }
+
+  #requireRelationName(nodeId: string, kind: 'table' | 'view', action: string): { schema: string; name: string } {
+    const parsed = parseObjectId(nodeId)
+    if (parsed === null || parsed.kind !== kind) {
+      throw new MysqlAdapterError('object_not_found', `${action}只接受${kind === 'table' ? '表' : '视图'}节点，收到的 id：${nodeId}`)
+    }
+    return { schema: parsed.schema, name: parsed.name }
+  }
+
+  async #runDdl(action: string, sql: string): Promise<void> {
+    const conn = this.#requireConn()
+    try {
+      await conn.query(sql)
+    } catch (thrown) {
+      throw new MysqlAdapterError('query_failed', `${action}失败：${describeThrown(thrown)}`)
+    }
+  }
+
+  async createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
+    void connectionId
+    this.#assertNoTransaction('建表')
+    const schema = this.#requireDatabase()
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    const raw = buildCreateTableSql(quote, spec)
+    const sql = raw.replace(/^CREATE TABLE /, `CREATE TABLE ${quote(schema)}.`)
+    await this.#runDdl('建表', sql)
+  }
+
+  async dropTable(nodeId: string): Promise<void> {
+    this.#assertNoTransaction('删表')
+    const { schema, name } = this.#requireRelationName(nodeId, 'table', '删表')
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    await this.#runDdl('删表', buildDropTableSql(quote, schema, name))
+  }
+
+  async createView(connectionId: string, viewName: string, selectSql: string): Promise<void> {
+    void connectionId
+    this.#assertNoTransaction('建视图')
+    const schema = this.#requireDatabase()
+    const name = this.#requireName(viewName, '视图名')
+    const select = this.#requireReadOnlySelect(selectSql)
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    await this.#runDdl('建视图', buildCreateViewSql(quote, schema, name, select))
+  }
+
+  async dropView(nodeId: string): Promise<void> {
+    this.#assertNoTransaction('删视图')
+    const { schema, name } = this.#requireRelationName(nodeId, 'view', '删视图')
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    await this.#runDdl('删视图', buildDropViewSql(quote, schema, name))
+  }
+
+  async renameTable(nodeId: string, newName: string): Promise<void> {
+    this.#assertNoTransaction('重命名表')
+    const { schema, name } = this.#requireRelationName(nodeId, 'table', '重命名表')
+    const target = this.#requireName(newName, '新表名')
+    const quote = mysqlDialect.quoteIdentifier.bind(mysqlDialect)
+    await this.#runDdl('重命名表', buildRenameTableSql(quote, schema, name, target))
+  }
+
+  /**
+   * 视图定义只允许单条 SELECT / WITH 查询。
+   *
+   * MySQL 的 CREATE VIEW 不接受多语句；如果这里放过 `SELECT ...; DROP ...`，
+   * 在多语句关闭时服务器会报错，但错误信息会离真正原因很远，而且等于把
+   * 注入面交给服务器去兜底。这里提前拒绝。
+   */
+  #requireReadOnlySelect(selectSql: string): string {
+    const sql = stripTrailingSemicolon(selectSql)
+    if (sql.trim() === '') throw new MysqlAdapterError('bad_params', '视图定义不能为空。')
+    if (sql.includes(';')) throw new MysqlAdapterError('bad_params', '视图定义只能包含一条 SELECT 语句。')
+    if (!/^(SELECT|WITH)\b/i.test(sql.trim())) {
+      throw new MysqlAdapterError('bad_params', '视图定义必须以 SELECT 或 WITH 开头。')
+    }
+    return sql
+  }
 }
 
 /** 完整单元格值（不截断）——「取完整值」专用，与网格首屏的截断版区分。 */
@@ -815,6 +1351,14 @@ function toFullCellValue(value: unknown): CellValue {
 function describeThrown(thrown: unknown): string {
   if (thrown instanceof Error) return thrown.message
   return String(thrown)
+}
+
+function isTriggerTiming(value: string): value is 'BEFORE' | 'AFTER' {
+  return value === 'BEFORE' || value === 'AFTER'
+}
+
+function isTriggerEvent(value: string): value is 'INSERT' | 'UPDATE' | 'DELETE' {
+  return value === 'INSERT' || value === 'UPDATE' || value === 'DELETE'
 }
 
 export function createMysqlAdapter(): DriverAdapter {

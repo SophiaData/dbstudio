@@ -1,5 +1,9 @@
 /**
- * SSH 隧道：让数据库连接穿过跳板机。
+ * SSH 隧道：让数据库连接穿过跳板机（PostgreSQL / MySQL 共用）。
+ *
+ * 本模块原本只服务 PG，后来 MySQL 也需要同一条隧道能力，于是移到
+ * `src/drivers/` 共享层。隧道本身与数据库协议无关：它只提供一条通往
+ * 目标地址的 Duplex，具体怎么用由各驱动决定。
  *
  * ============================================================================
  * 为什么需要它（不是"高级功能"，而是连不上的硬门槛）
@@ -122,7 +126,7 @@ export function hostKeyFingerprint(key: Buffer): string {
 
 /** 一个已建立的隧道。调用方负责 `close()`。 */
 export interface SshTunnel {
-  /** 打开一条通往目标数据库的 TCP 通道（每次新建 pg 连接都要一条）。 */
+  /** 打开一条通往目标数据库的 TCP 通道（每次新建数据库连接都要一条）。 */
   forward(): Promise<Duplex>
   close(): Promise<void>
 }

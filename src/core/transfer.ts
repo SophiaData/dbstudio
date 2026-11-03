@@ -584,6 +584,12 @@ export function cellToSqlLiteral(cell: CellValue | undefined, dialectId: string)
         const escaped = cell.text.replace(/\\/g, '\\\\').replace(/'/g, "''")
         return `E'${escaped}'`
       }
+      if (dialectId === 'mysql') {
+        // MySQL 默认把反斜杠当转义符（NO_BACKSLASH_ESCAPES 关闭时），
+        // 必须先把 \ 翻倍，再处理引号，否则 `\n` 会变成换行。
+        const escaped = cell.text.replace(/\\/g, '\\\\').replace(/'/g, "''")
+        return `'${escaped}'`
+      }
       const escaped = cell.text.replace(/'/g, "''")
       return `'${escaped}'`
     }
@@ -602,6 +608,7 @@ export function cellToSqlLiteral(cell: CellValue | undefined, dialectId: string)
  * 那会在错误的方言上生成语法错误甚至错误的表名。
  */
 export function quoteTransferIdentifier(name: string, dialectId: string): string {
+  if (dialectId === 'mysql') return `\`${name.replaceAll('`', '``')}\``
   if (dialectId !== 'sqlite' && dialectId !== 'postgresql') {
     throw new Error(`未知的方言 "${dialectId}"，无法安全地引用标识符，已拒绝生成 SQL`)
   }
@@ -629,11 +636,11 @@ export function buildInsertTarget(target: TransferTarget, dialectId: string): st
   if (dialectId === 'sqlite') {
     return `${quoteTransferIdentifier('main', dialectId)}.${quoteTransferIdentifier(target.name, dialectId)}`
   }
-  if (dialectId === 'postgresql') {
+  if (dialectId === 'postgresql' || dialectId === 'mysql') {
     if (target.schema === undefined || target.schema.trim() === '') {
       throw new Error(
-        'PostgreSQL 的 INSERT 目标必须带 schema 限定名：同名表可能存在于多个 schema，' +
-          '只写表名会插入到 search_path 命中的第一张同名表上。已拒绝生成 SQL。'
+        `${dialectId === 'mysql' ? 'MySQL' : 'PostgreSQL'} 的 INSERT 目标必须带 schema/database 限定名：` +
+          '同名表可能存在于多个库，只写表名会插入到当前库的同名表上。已拒绝生成 SQL。'
       )
     }
     return `${quoteTransferIdentifier(target.schema, dialectId)}.${quoteTransferIdentifier(target.name, dialectId)}`

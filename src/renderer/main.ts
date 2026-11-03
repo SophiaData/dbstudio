@@ -199,7 +199,9 @@ async function boot(): Promise<void> {
       ])
       const connection = connections.find((item) => item.id === connectionId)
       if (currentConnectionNodeId !== connectionNodeId) return
-      currentParameterDialect = connection?.dialectId === 'postgresql' ? 'postgresql' : 'sqlite'
+      const dialectId = connection?.dialectId
+      currentParameterDialect =
+        dialectId === 'postgresql' ? 'postgresql' : dialectId === 'mysql' ? 'mysql' : 'sqlite'
       sqlEditor.setCancelCapability(connection?.capabilities?.supportsCancel ?? null)
       currentScriptRules =
         dialects.find((dialect) => dialect.id === connection?.dialectId)?.scriptRules ??

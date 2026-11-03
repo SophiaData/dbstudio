@@ -8,7 +8,7 @@
 
 import type { ColumnCreateSpec, TableCreateSpec } from './model'
 
-export type DdlDialect = 'sqlite' | 'postgresql'
+export type DdlDialect = 'sqlite' | 'postgresql' | 'mysql'
 
 export interface TableTarget {
   readonly name: string
@@ -67,7 +67,7 @@ export type DropObjectType = 'table' | 'view' | 'index' | 'trigger' | 'schema'
 const ACTIONS = new Set(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'])
 
 export function previewDdl(operation: DdlOperation, dialect: DdlDialect): DdlPreview {
-  if (dialect !== 'sqlite' && dialect !== 'postgresql') {
+  if (dialect !== 'sqlite' && dialect !== 'postgresql' && dialect !== 'mysql') {
     throw new Error(`不支持的 DDL 方言：${String(dialect)}`)
   }
 
@@ -77,7 +77,7 @@ export function previewDdl(operation: DdlOperation, dialect: DdlDialect): DdlPre
     case 'alter-table':
       return previewAlterTable(operation.target, operation.changes, dialect)
     case 'create-index':
-      return previewCreateIndex(operation.target, operation.index)
+      return previewCreateIndex(operation.target, operation.index, dialect)
     case 'create-foreign-key':
       return previewCreateForeignKey(operation.target, operation.foreignKey, dialect)
     case 'drop-object':
@@ -110,13 +110,13 @@ function previewCreateTable(
   const sqliteInlinePrimaryKey =
     dialect === 'sqlite' && singlePrimaryKey !== undefined && singlePrimaryKey.autoIncrement === true
   if (primaryKeys.length > 0 && !sqliteInlinePrimaryKey) {
-    definitions.push(`PRIMARY KEY (${primaryKeys.map((column) => quote(column.name)).join(', ')})`)
+    definitions.push(`PRIMARY KEY (${primaryKeys.map((column) => quote(column.name, dialect)).join(', ')})`)
   }
 
   const warnings = primaryKeys.length === 0 ? ['未定义主键：后续在线编辑可能无法安全定位行。'] : []
   return {
     statements: [
-      `CREATE TABLE ${qualified(target.schema, name)} (\n  ${definitions.join(',\n  ')}\n)`
+      `CREATE TABLE ${qualified(target.schema, name, dialect)} (\n  ${definitions.join(',\n  ')}\n)`
     ],
     warnings,
     requiresTransaction: dialect === 'sqlite' && definitions.length > 1,
@@ -130,7 +130,7 @@ function previewAlterTable(
   dialect: DdlDialect
 ): DdlPreview {
   if (changes.length === 0) throw new Error('alter-table 至少需要一个变更')
-  const table = qualified(target.schema, target.name)
+  const table = qualified(target.schema, target.name, dialect)
   const statements: string[] = []
   const warnings: string[] = []
   let destructive = false
@@ -142,33 +142,52 @@ function previewAlterTable(
         statements.push(`ALTER TABLE ${table} ADD COLUMN ${columnDefinition(change.column, dialect, false)}`)
         break
       case 'drop-column':
-        statements.push(`ALTER TABLE ${table} DROP COLUMN ${quoteNonEmpty(change.columnName, '列名')}`)
+        statements.push(`ALTER TABLE ${table} DROP COLUMN ${quoteNonEmpty(change.columnName, '列名', dialect)}`)
         warnings.push(`删除列「${change.columnName}」会永久丢失该列数据。`)
         destructive = true
         needsRebuild = dialect === 'sqlite'
         break
       case 'rename-column':
         statements.push(
-          `ALTER TABLE ${table} RENAME COLUMN ${quoteNonEmpty(change.oldName, '旧列名')} TO ${quoteNonEmpty(change.newName, '新列名')}`
+          `ALTER TABLE ${table} RENAME COLUMN ${quoteNonEmpty(change.oldName, '旧列名', dialect)} TO ${quoteNonEmpty(change.newName, '新列名', dialect)}`
         )
         break
       case 'alter-column':
         if (dialect === 'postgresql') {
           if (change.typeName !== undefined) {
-            statements.push(`ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名')} TYPE ${safeFragment(change.typeName, '类型名')}`)
+            statements.push(`ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名', dialect)} TYPE ${safeFragment(change.typeName, '类型名')}`)
           }
           if (change.nullable !== undefined) {
             statements.push(
-              `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名')} ${change.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`
+              `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名', dialect)} ${change.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`
             )
           }
           if (change.defaultValue !== undefined) {
             statements.push(
               change.defaultValue === null
-                ? `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名')} DROP DEFAULT`
-                : `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名')} SET DEFAULT ${safeFragment(change.defaultValue, '默认值')}`
+                ? `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名', dialect)} DROP DEFAULT`
+                : `ALTER TABLE ${table} ALTER COLUMN ${quoteNonEmpty(change.columnName, '列名', dialect)} SET DEFAULT ${safeFragment(change.defaultValue, '默认值')}`
             )
           }
+        } else if (dialect === 'mysql') {
+          /*
+           * MySQL 的 ALTER COLUMN 只改默认值，改类型/可空必须用 MODIFY COLUMN，
+           * 而 MODIFY 要求重复**完整**列定义。没有类型名就无法生成合法语句，
+           * 这里明确告警而不是生成一条半截 SQL。
+           */
+          if (change.typeName === undefined) {
+            warnings.push(`MySQL 修改列「${change.columnName}」需要同时提供类型名；本次未生成语句。`)
+            break
+          }
+          let definition = `${quoteNonEmpty(change.columnName, '列名', dialect)} ${safeFragment(change.typeName, '类型名')}`
+          if (change.nullable === false) definition += ' NOT NULL'
+          else if (change.nullable === true) definition += ' NULL'
+          if (change.defaultValue !== undefined) {
+            definition += change.defaultValue === null
+              ? ' DEFAULT NULL'
+              : ` DEFAULT ${safeFragment(change.defaultValue, '默认值')}`
+          }
+          statements.push(`ALTER TABLE ${table} MODIFY COLUMN ${definition}`)
         } else {
           statements.push(`-- SQLite 需要重建表才能安全修改列「${change.columnName}」`)
           if (change.typeName !== undefined) safeFragment(change.typeName, '类型名')
@@ -187,18 +206,24 @@ function previewAlterTable(
   return {
     statements,
     warnings,
-    requiresTransaction: needsRebuild || statements.length > 1,
+    // MySQL 的 DDL 会隐式提交，不能承诺"放在同一事务里"。
+    requiresTransaction: dialect !== 'mysql' && (needsRebuild || statements.length > 1),
     destructive
   }
 }
 
-function previewCreateIndex(target: TableTarget, index: IndexCreateSpec): DdlPreview {
+function previewCreateIndex(target: TableTarget, index: IndexCreateSpec, dialect: DdlDialect): DdlPreview {
   if (index.columns.length === 0) throw new Error('索引至少需要一列')
+  if (dialect === 'mysql' && index.predicate !== undefined) {
+    throw new Error('MySQL 不支持部分索引（CREATE INDEX ... WHERE），已拒绝生成语句')
+  }
   const columns = uniqueNames(index.columns, '索引列')
   const predicate = index.predicate === undefined ? '' : ` WHERE ${safeFragment(index.predicate, '索引条件')}`
+  // MySQL 的索引名不能带 schema 前缀，只有表名可以限定。
+  const indexName = dialect === 'mysql' ? quote(index.name, dialect) : qualified(target.schema, index.name, dialect)
   return {
     statements: [
-      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${qualified(target.schema, index.name)} ON ${qualified(target.schema, target.name)} (${columns.map(quote).join(', ')})${predicate}`
+      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${indexName} ON ${qualified(target.schema, target.name, dialect)} (${columns.map((column) => quote(column, dialect)).join(', ')})${predicate}`
     ],
     warnings: [],
     requiresTransaction: false,
@@ -216,14 +241,14 @@ function previewCreateForeignKey(
   }
   const columns = uniqueNames(foreignKey.columns, '外键列')
   const referencedColumns = uniqueNames(foreignKey.referencedColumns, '被引用列')
-  const constraint = foreignKey.name ? `CONSTRAINT ${quote(foreignKey.name)} ` : ''
+  const constraint = foreignKey.name ? `CONSTRAINT ${quote(foreignKey.name, dialect)} ` : ''
   const actions = [foreignKey.onUpdate, foreignKey.onDelete]
   for (const action of actions) {
     if (action !== undefined && !ACTIONS.has(action.toUpperCase())) throw new Error(`不支持的外键动作：${action}`)
   }
   const statement = [
-    `ALTER TABLE ${qualified(target.schema, target.name)} ADD ${constraint}FOREIGN KEY (${columns.map(quote).join(', ')})`,
-    `REFERENCES ${qualified(foreignKey.referencedSchema, foreignKey.referencedTable)} (${referencedColumns.map(quote).join(', ')})`,
+    `ALTER TABLE ${qualified(target.schema, target.name, dialect)} ADD ${constraint}FOREIGN KEY (${columns.map((column) => quote(column, dialect)).join(', ')})`,
+    `REFERENCES ${qualified(foreignKey.referencedSchema, foreignKey.referencedTable, dialect)} (${referencedColumns.map((column) => quote(column, dialect)).join(', ')})`,
     foreignKey.onUpdate ? `ON UPDATE ${foreignKey.onUpdate.toUpperCase()}` : '',
     foreignKey.onDelete ? `ON DELETE ${foreignKey.onDelete.toUpperCase()}` : ''
   ].filter(Boolean).join(' ')
@@ -241,7 +266,7 @@ function previewDropObject(
   dialect: DdlDialect
 ): DdlPreview {
   const keyword = objectType.toUpperCase()
-  const statement = `DROP ${keyword} ${qualified(target.schema, target.name)}`
+  const statement = `DROP ${keyword} ${qualified(target.schema, target.name, dialect)}`
   const warnings = objectType === 'table'
     ? [`删除表「${target.name}」会永久删除其结构和全部数据。`]
     : objectType === 'schema'
@@ -256,7 +281,7 @@ function columnDefinition(column: ColumnCreateSpec, dialect: DdlDialect, inlineA
   if (inlineAutoIncrement) {
     if (dialect === 'sqlite') {
       if (!/^INTEGER$/i.test(typeName)) throw new Error('SQLite 自增只能用于 INTEGER 主键')
-    } else {
+    } else if (dialect === 'postgresql') {
       const serialType = {
         SMALLINT: 'SMALLSERIAL',
         INT2: 'SMALLSERIAL',
@@ -270,27 +295,33 @@ function columnDefinition(column: ColumnCreateSpec, dialect: DdlDialect, inlineA
       else if (!/^((SMALL|BIG)?SERIAL)$/i.test(typeName)) {
         throw new Error('PostgreSQL 自增只能用于整数类型或 SERIAL 类型')
       }
+    } else if (!/^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)\b/i.test(typeName)) {
+      throw new Error('MySQL 自增只能用于整数类型（TINYINT / SMALLINT / MEDIUMINT / INT / BIGINT）')
     }
   }
-  let sql = `${quoteNonEmpty(column.name, '列名')} ${typeName}`
+  let sql = `${quoteNonEmpty(column.name, '列名', dialect)} ${typeName}`
   if (column.nullable === false) sql += ' NOT NULL'
   if (column.defaultValue !== undefined) sql += ` DEFAULT ${safeFragment(column.defaultValue, '默认值')}`
   if (column.primaryKeyOrdinal !== undefined && column.primaryKeyOrdinal < 1) throw new Error('主键序号必须从 1 开始')
-  if (inlineAutoIncrement && dialect === 'sqlite') sql += ' PRIMARY KEY AUTOINCREMENT'
+  if (inlineAutoIncrement) {
+    if (dialect === 'sqlite') sql += ' PRIMARY KEY AUTOINCREMENT'
+    else if (dialect === 'mysql') sql += ' AUTO_INCREMENT'
+  }
   return sql
 }
 
-function qualified(schema: string | undefined, name: string): string {
-  const object = quoteNonEmpty(name, '对象名')
-  return schema === undefined || schema === '' ? object : `${quote(schema)}.${object}`
+function qualified(schema: string | undefined, name: string, dialect: DdlDialect): string {
+  const object = quoteNonEmpty(name, '对象名', dialect)
+  return schema === undefined || schema === '' ? object : `${quote(schema, dialect)}.${object}`
 }
 
-function quoteNonEmpty(value: string, label: string): string {
+function quoteNonEmpty(value: string, label: string, dialect: DdlDialect): string {
   if (typeof value !== 'string' || value.trim() === '' || value.includes('\0')) throw new Error(`${label}不能为空或包含 NUL`)
-  return quote(value.trim())
+  return quote(value.trim(), dialect)
 }
 
-function quote(value: string): string {
+function quote(value: string, dialect: DdlDialect): string {
+  if (dialect === 'mysql') return `\`${value.replaceAll('`', '``')}\``
   return `"${value.replaceAll('"', '""')}"`
 }
 

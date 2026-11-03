@@ -176,14 +176,14 @@ export function diffSchema(
   target: SchemaSnapshot,
   dialect: CompareDialect
 ): StructureDiff {
-  if (dialect !== 'sqlite' && dialect !== 'postgresql') {
+  if (dialect !== 'sqlite' && dialect !== 'postgresql' && dialect !== 'mysql') {
     throw new Error(`不支持的比较方言：${String(dialect)}`)
   }
   const tableChanges = diffTables(source, target, dialect)
   const changes = [
     ...tableChanges,
-    ...diffNamedObjects('view', source.views, target.views, 'CREATE VIEW'),
-    ...diffRoutines(source.routines, target.routines)
+    ...diffNamedObjects('view', source.views, target.views, 'CREATE VIEW', dialect),
+    ...diffRoutines(source.routines, target.routines, dialect)
   ]
   return {
     changes,
@@ -340,9 +340,9 @@ function diffTables(
       // 新表必须连约束一起建：只发 CREATE TABLE 会把索引、外键、唯一、CHECK
       // 全部丢掉，而目标端"看起来建好了"，这是最难被发现的一类差异丢失。
       const empty: SnapshotTable = { ...from, columns: [], indexes: [], foreignKeys: [], uniqueConstraints: [], checks: [] }
-      changes.push(createChange('table', name, [createTableSql(from, dialect), ...constraintSql(qualified(from), from, empty)]))
+      changes.push(createChange('table', name, [createTableSql(from, dialect), ...constraintSql(qualified(from, dialect), from, empty, dialect)]))
     } else if (from === undefined && to !== undefined) {
-      changes.push(dropChange('table', name, `DROP TABLE ${qualified(to)}`))
+      changes.push(dropChange('table', name, `DROP TABLE ${qualified(to, dialect)}`))
     } else if (from !== undefined && to !== undefined) {
       const statements = alterTableSql(from, to, dialect)
       if (statements.length > 0) {
@@ -363,7 +363,8 @@ function diffNamedObjects(
   objectType: string,
   source: readonly SchemaObjectDefinition[],
   target: readonly SchemaObjectDefinition[],
-  createKeyword: string
+  createKeyword: string,
+  dialect: CompareDialect
 ): SchemaChange[] {
   const left = indexBy(source, objectKey)
   const right = indexBy(target, objectKey)
@@ -376,9 +377,9 @@ function diffNamedObjects(
       // 定义未知时无法生成创建语句：跳过并由 warnings 说明"没读到定义"，
       // 不能因为缺一段 DDL 就把整次比较变成异常。
       if (from.definition === null) continue
-      changes.push(createChange(objectType, name, [definitionSql(createKeyword, from)]))
+      changes.push(createChange(objectType, name, [definitionSql(createKeyword, from, dialect)]))
     } else if (from === undefined && to !== undefined) {
-      changes.push(dropChange(objectType, name, `DROP ${objectType.toUpperCase()} ${qualified(to)}`))
+      changes.push(dropChange(objectType, name, `DROP ${objectType.toUpperCase()} ${qualified(to, dialect)}`))
     } else if (
       from !== undefined && to !== undefined &&
       // 任一侧没读到定义时无法判断是否变化，宁可不报差异也不生成删除重建。
@@ -389,7 +390,7 @@ function diffNamedObjects(
         kind: 'alter',
         objectType,
         target: name,
-        statements: [`DROP ${objectType.toUpperCase()} ${qualified(to)}`, definitionSql(createKeyword, from)],
+        statements: [`DROP ${objectType.toUpperCase()} ${qualified(to, dialect)}`, definitionSql(createKeyword, from, dialect)],
         destructive: true
       })
     }
@@ -413,7 +414,8 @@ function diffNamedObjects(
  */
 function diffRoutines(
   source: readonly RoutineDefinition[],
-  target: readonly RoutineDefinition[]
+  target: readonly RoutineDefinition[],
+  dialect: CompareDialect
 ): SchemaChange[] {
   const keyOf = (r: RoutineDefinition): string =>
     `${r.kind}:${r.schema ?? ''}.${r.name}(${(r.signature ?? []).join(',')})`
@@ -432,7 +434,7 @@ function diffRoutines(
     const drop = (r: RoutineDefinition): string => {
       const signature = r.signature
       const args = signature === undefined ? '' : `(${signature.join(', ')})`
-      return `DROP ${r.kind.toUpperCase()} ${qualified(r)}${args}`
+      return `DROP ${r.kind.toUpperCase()} ${qualified(r, dialect)}${args}`
     }
     const create = (r: RoutineDefinition): string | null => {
       if (r.definition === null || r.definition.trim() === '') return null
@@ -473,46 +475,56 @@ function diffRoutines(
 }
 
 function alterTableSql(source: SnapshotTable, target: SnapshotTable, dialect: CompareDialect): string[] {
-  const table = qualified(source)
+  const table = qualified(source, dialect)
   const from = columnMap(source)
   const to = columnMap(target)
   const statements: string[] = []
   for (const name of [...from.keys()].sort()) {
     const left = mustGet(from, name)
     const right = to.get(name)
-    if (right === undefined) statements.push(`ALTER TABLE ${table} ADD COLUMN ${columnSql(left)}`)
+    if (right === undefined) statements.push(`ALTER TABLE ${table} ADD COLUMN ${columnSql(left, dialect)}`)
     else if (columnSignature(left) !== columnSignature(right)) {
       // SQLite 没有 ALTER COLUMN ... TYPE 语法，生成出来必然执行失败。
       // 这类变更只能手工重建表，因此这里不生成语句，由 diffWarnings 明确告知。
-      if (dialect !== 'sqlite') {
-        statements.push(`ALTER TABLE ${table} ALTER COLUMN ${quote(name)} TYPE ${safeType(left.typeName)}`)
+      if (dialect === 'mysql') {
+        // MySQL 用 MODIFY COLUMN，且必须重复完整列定义（类型/可空/默认值）。
+        statements.push(`ALTER TABLE ${table} MODIFY COLUMN ${columnSql(left, dialect)}`)
+      } else if (dialect !== 'sqlite') {
+        statements.push(`ALTER TABLE ${table} ALTER COLUMN ${quote(name, dialect)} TYPE ${safeType(left.typeName)}`)
       }
     }
   }
   for (const name of [...to.keys()].sort()) {
-    if (!from.has(name)) statements.push(`ALTER TABLE ${table} DROP COLUMN ${quote(name)}`)
+    if (!from.has(name)) statements.push(`ALTER TABLE ${table} DROP COLUMN ${quote(name, dialect)}`)
   }
-  statements.push(...constraintSql(table, source, target))
+  statements.push(...constraintSql(table, source, target, dialect))
   return statements
 }
 
-function constraintSql(table: string, source: SnapshotTable, target: SnapshotTable): string[] {
+function constraintSql(
+  table: string,
+  source: SnapshotTable,
+  target: SnapshotTable,
+  dialect: CompareDialect
+): string[] {
   const statements: string[] = []
   for (const index of missing(source.indexes ?? [], target.indexes ?? [], indexKey)) {
+    // MySQL 不支持部分索引（WHERE 条件），不能静默丢掉条件伪造一条全表索引。
+    if (dialect === 'mysql' && index.predicate) continue
     statements.push(
-      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${quote(index.name)} ON ${table} (${list(index.columns)})${index.predicate ? ` WHERE ${index.predicate}` : ''}`
+      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${quote(index.name, dialect)} ON ${table} (${list(index.columns, dialect)})${index.predicate ? ` WHERE ${index.predicate}` : ''}`
     )
   }
   for (const key of missing(source.foreignKeys ?? [], target.foreignKeys ?? [], foreignKeySignature)) {
     statements.push(
-      `ALTER TABLE ${table} ADD CONSTRAINT ${quote(key.name ?? 'fk')} FOREIGN KEY (${list(key.columns)}) REFERENCES ${qualified({ schema: key.referencedSchema ?? source.schema, name: key.referencedTable })} (${list(key.referencedColumns)})`
+      `ALTER TABLE ${table} ADD CONSTRAINT ${quote(key.name ?? 'fk', dialect)} FOREIGN KEY (${list(key.columns, dialect)}) REFERENCES ${qualified({ schema: key.referencedSchema ?? source.schema, name: key.referencedTable }, dialect)} (${list(key.referencedColumns, dialect)})`
     )
   }
   for (const unique of missing(source.uniqueConstraints ?? [], target.uniqueConstraints ?? [], uniqueSignature)) {
-    statements.push(`ALTER TABLE ${table} ADD CONSTRAINT ${quote(unique.name ?? 'uq')} UNIQUE (${list(unique.columns)})`)
+    statements.push(`ALTER TABLE ${table} ADD CONSTRAINT ${quote(unique.name ?? 'uq', dialect)} UNIQUE (${list(unique.columns, dialect)})`)
   }
   for (const check of missing(source.checks ?? [], target.checks ?? [], checkSignature)) {
-    statements.push(`ALTER TABLE ${table} ADD CONSTRAINT ${quote(check.name ?? 'ck')} CHECK (${check.expression})`)
+    statements.push(`ALTER TABLE ${table} ADD CONSTRAINT ${quote(check.name ?? 'ck', dialect)} CHECK (${check.expression})`)
   }
   return statements
 }
@@ -520,19 +532,39 @@ function constraintSql(table: string, source: SnapshotTable, target: SnapshotTab
 function createTableSql(table: SnapshotTable, dialect: CompareDialect): string {
   const columns = [...table.columns]
     .sort((a, b) => (a.primaryKeyOrdinal ?? 999) - (b.primaryKeyOrdinal ?? 999) || a.name.localeCompare(b.name))
-    .map((column) => columnSql(column))
+    .map((column) => columnSql(column, dialect))
   const primary = table.columns
     .filter((column) => column.primaryKeyOrdinal !== null)
     .sort((a, b) => (a.primaryKeyOrdinal ?? 0) - (b.primaryKeyOrdinal ?? 0))
-  if (primary.length > 0) columns.push(`PRIMARY KEY (${list(primary.map((column) => column.name))})`)
-  return `CREATE TABLE ${qualified(table)} (${columns.join(', ')})`
+  if (primary.length > 0) columns.push(`PRIMARY KEY (${list(primary.map((column) => column.name), dialect)})`)
+  return `CREATE TABLE ${qualified(table, dialect)} (${columns.join(', ')})`
 }
 
-function columnSql(column: ColumnDescription): string {
-  let sql = `${quote(column.name)} ${safeType(column.typeName)}`
+function columnSql(column: ColumnDescription, dialect: CompareDialect): string {
+  let sql = `${quote(column.name, dialect)} ${safeType(column.typeName)}`
+  if (dialect === 'mysql' && column.identity === 'by-default') sql += ' AUTO_INCREMENT'
   if (!column.nullable) sql += ' NOT NULL'
-  if (column.defaultValue !== null) sql += ` DEFAULT ${safeType(column.defaultValue)}`
+  if (column.defaultValue !== null) sql += ` DEFAULT ${columnDefault(column.defaultValue, dialect)}`
   return sql
+}
+
+/**
+ * 默认值的字面量写法。
+ *
+ * MySQL 的 information_schema.COLUMN_DEFAULT 对字符串默认值**不带引号**
+ * （`hello` 而不是 `'hello'`），直接拼进 DDL 会变成未定义标识符。
+ * 这里只对 MySQL 做补引号；SQLite/PG 的默认值原文本身已是可执行形态，保持原样。
+ */
+function columnDefault(value: string, dialect: CompareDialect): string {
+  const trimmed = value.trim()
+  if (dialect !== 'mysql') return safeType(trimmed)
+  if (
+    /^(NULL|TRUE|FALSE|CURRENT_TIMESTAMP(?:\(\d*\))?|CURRENT_DATE|CURRENT_TIME(?:\(\d*\))?|-?\d+(?:\.\d+)?)$/i.test(trimmed) ||
+    /^(?:'.*'|".*"|[bx]_?'.*'|\(_utf8mb4'.*'\))$/is.test(trimmed)
+  ) {
+    return trimmed
+  }
+  return `'${trimmed.replaceAll("'", "''")}'`
 }
 
 function insertSql(
@@ -541,7 +573,7 @@ function insertSql(
   dialect: CompareDialect
 ): string {
   const columns = Object.keys(row.values).sort()
-  return `INSERT INTO ${qualified(table)} (${columns.map(quote).join(', ')}) VALUES (${columns.map((column) => literal(row.values[column], dialect)).join(', ')})`
+  return `INSERT INTO ${qualified(table, dialect)} (${columns.map((column) => quote(column, dialect)).join(', ')}) VALUES (${columns.map((column) => literal(row.values[column], dialect)).join(', ')})`
 }
 
 function updateSql(
@@ -551,8 +583,8 @@ function updateSql(
   keyColumns: readonly string[],
   dialect: CompareDialect
 ): string {
-  const assignments = [...columns].sort().map((column) => `${quote(column)} = ${literal(row.values[column], dialect)}`)
-  return `UPDATE ${qualified(table)} SET ${assignments.join(', ')} WHERE ${whereSql(row.key, keyColumns, dialect)}`
+  const assignments = [...columns].sort().map((column) => `${quote(column, dialect)} = ${literal(row.values[column], dialect)}`)
+  return `UPDATE ${qualified(table, dialect)} SET ${assignments.join(', ')} WHERE ${whereSql(row.key, keyColumns, dialect)}`
 }
 
 function deleteSql(
@@ -561,7 +593,7 @@ function deleteSql(
   keyColumns: readonly string[],
   dialect: CompareDialect
 ): string {
-  return `DELETE FROM ${qualified(table)} WHERE ${whereSql(key, keyColumns, dialect)}`
+  return `DELETE FROM ${qualified(table, dialect)} WHERE ${whereSql(key, keyColumns, dialect)}`
 }
 
 function whereSql(
@@ -571,7 +603,7 @@ function whereSql(
 ): string {
   return columns.map((column) => {
     const value = key[column]
-    return value === null ? `${quote(column)} IS NULL` : `${quote(column)} = ${literal(value, dialect)}`
+    return value === null ? `${quote(column, dialect)} IS NULL` : `${quote(column, dialect)} = ${literal(value, dialect)}`
   }).join(' AND ')
 }
 
@@ -685,11 +717,11 @@ function objectLabel(object: SchemaObjectDefinition | undefined): string {
   return objectKey(object)
 }
 
-function qualified(object: { readonly schema?: string | null; readonly name: string }): string {
-  return object.schema ? `${quote(object.schema)}.${quote(object.name)}` : quote(object.name)
+function qualified(object: { readonly schema?: string | null; readonly name: string }, dialect: CompareDialect): string {
+  return object.schema ? `${quote(object.schema, dialect)}.${quote(object.name, dialect)}` : quote(object.name, dialect)
 }
 
-function definitionSql(keyword: string, object: SchemaObjectDefinition): string {
+function definitionSql(keyword: string, object: SchemaObjectDefinition, dialect: CompareDialect): string {
   if (object.definition === null || object.definition.trim() === '') {
     throw new Error(`缺少 ${object.name} 的定义，不能生成创建语句`)
   }
@@ -706,19 +738,26 @@ function definitionSql(keyword: string, object: SchemaObjectDefinition): string 
    * 没有才补。这比让每个驱动各自剥前缀更稳——剥前缀要小心视图名里出现 "AS"。
    */
   if (/^\s*CREATE\s/i.test(definition)) return definition
-  return `${keyword} ${qualified(object)} AS ${definition}`
+  return `${keyword} ${qualified(object, dialect)} AS ${definition}`
 }
 
 function normalizeSql(value: string | null): string {
   return (value ?? '').replace(/\s+/g, ' ').trim()
 }
 
-function list(columns: readonly string[]): string {
-  return columns.map(quote).join(', ')
+function list(columns: readonly string[], dialect: CompareDialect): string {
+  return columns.map((column) => quote(column, dialect)).join(', ')
 }
 
-function quote(value: string): string {
+/**
+ * 标识符引用必须按方言来。
+ *
+ * MySQL 默认把双引号当作字符串字面量（ANSI_QUOTES 才当标识符），
+ * 用 `"users"` 生成的同步 SQL 在 MySQL 上会把表名变成字符串，直接报错。
+ */
+function quote(value: string, dialect: CompareDialect): string {
   if (value.trim() === '' || value.includes('\0')) throw new Error('标识符不能为空')
+  if (dialect === 'mysql') return `\`${value.replaceAll('`', '``')}\``
   return `"${value.replaceAll('"', '""')}"`
 }
 

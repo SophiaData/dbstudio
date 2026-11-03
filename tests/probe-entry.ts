@@ -31,6 +31,7 @@ import { ConnectionStore, SecretStorageUnavailableError } from '../src/main/Conn
 
 export { ConnectionManager }
 export { ConnectionStore }
+export { diffSchema, compareDataRows } from '../src/core/compare'
 // 重新导出错误类型：测试要断言"cipher 不可用时抛的是这个特定错误"，
 // 换打包入口后若漏了它，#31 就会因 undefined 失败（正是这次踩到的）。
 export { SecretStorageUnavailableError }

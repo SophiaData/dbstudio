@@ -117,5 +117,42 @@ check('同一操作输出稳定', JSON.stringify(ddl.previewDdl({
   kind: 'create-index', target: { name: 't' }, index: { name: 'idx', unique: false, columns: ['a', 'b'] }
 }, 'sqlite')))
 
+const mysqlCreate = ddl.previewDdl({
+  kind: 'create-table',
+  target: { schema: 'app', name: 'users' },
+  spec: {
+    name: 'users',
+    columns: [
+      { name: 'id', typeName: 'INT', nullable: false, primaryKeyOrdinal: 1, autoIncrement: true },
+      { name: 'email', typeName: 'VARCHAR(64)', nullable: false, defaultValue: "'x'" }
+    ]
+  }
+}, 'mysql')
+check('MySQL create-table 用反引号限定', mysqlCreate.statements[0]?.includes('CREATE TABLE `app`.`users`'), mysqlCreate.statements[0])
+check('MySQL 自增生成 AUTO_INCREMENT 与表级主键',
+  mysqlCreate.statements[0]?.includes('`id` INT NOT NULL AUTO_INCREMENT') && mysqlCreate.statements[0]?.includes('PRIMARY KEY (`id`)'),
+  mysqlCreate.statements[0])
+check('MySQL DDL 不承诺事务', mysqlCreate.requiresTransaction === false)
+
+const mysqlAlter = ddl.previewDdl({
+  kind: 'alter-table',
+  target: { name: 'users' },
+  changes: [{ kind: 'alter-column', columnName: 'email', typeName: 'VARCHAR(128)', nullable: false }]
+}, 'mysql')
+check('MySQL alter-column 生成 MODIFY COLUMN', mysqlAlter.statements[0]?.includes('MODIFY COLUMN `email` VARCHAR(128) NOT NULL'), mysqlAlter.statements[0])
+
+const mysqlIndex = ddl.previewDdl({
+  kind: 'create-index',
+  target: { schema: 'app', name: 'users' },
+  index: { name: 'idx_email', unique: false, columns: ['email'] }
+}, 'mysql')
+check('MySQL 索引名不加 schema 前缀', mysqlIndex.statements[0]?.includes('CREATE INDEX `idx_email` ON `app`.`users`'), mysqlIndex.statements[0])
+expectThrow('MySQL 部分索引被拒绝', () => ddl.previewDdl({
+  kind: 'create-index', target: { name: 'users' }, index: { name: 'idx', unique: false, columns: ['a'], predicate: 'a > 0' }
+}, 'mysql'))
+expectThrow('MySQL 自增只允许整数类型', () => ddl.previewDdl({
+  kind: 'create-table', target: { name: 't' }, spec: { name: 't', columns: [{ name: 'id', typeName: 'VARCHAR(10)', primaryKeyOrdinal: 1, autoIncrement: true }] }
+}, 'mysql'))
+
 console.log(`\nDDL 预览纯逻辑契约：${pass} 通过，${fail} 失败`)
 if (fail > 0) process.exit(1)

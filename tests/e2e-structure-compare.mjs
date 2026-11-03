@@ -85,12 +85,15 @@ check('缺少的唯一索引生成 CREATE UNIQUE INDEX', first.statements.some((
 
 let threw = false
 try {
-  compare.diffSchema(source, target, 'mysql')
+  compare.diffSchema(source, target, 'oracle')
 } catch {
   threw = true
 }
 check('未知方言拒绝生成 SQL', threw)
 check('DROP TABLE 带 schema 限定', first.statements.includes('DROP TABLE "public"."logs"'))
+
+const mysqlDrop = compare.diffSchema(snapshot([]), target, 'mysql')
+check('MySQL 生成的 SQL 使用反引号', mysqlDrop.statements.includes('DROP TABLE `public`.`logs`'), mysqlDrop.statements.join(' | '))
 
 const fkSource = snapshot([table('orders', [column('id', 'INTEGER', { primaryKeyOrdinal: 1 }), column('user_id', 'INTEGER')], {
   foreignKeys: [{ name: 'orders_user', columns: ['user_id'], referencedSchema: null, referencedTable: 'users', referencedColumns: ['id'], onUpdate: null, onDelete: null }]
