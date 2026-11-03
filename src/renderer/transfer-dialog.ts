@@ -416,6 +416,11 @@ function quoteSqlString(value: string, dialect: SqlParameterDialect): string {
     const escaped = value.replace(/\\/g, '\\\\').replace(/'/g, "''")
     return `E'${escaped}'`
   }
+  if (dialect === 'mysql') {
+    // MySQL 默认启用反斜杠转义，规则与 PG 的 E'' 相同，只是不需要 E 前缀。
+    const escaped = value.replace(/\\/g, '\\\\').replace(/'/g, "''")
+    return `'${escaped}'`
+  }
   return `'${value.replace(/'/g, "''")}'`
 }
 

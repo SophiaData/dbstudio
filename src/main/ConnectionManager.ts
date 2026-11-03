@@ -835,7 +835,7 @@ export class ConnectionManager {
     }
     // 只浏览数据源（Redis / Kafka）没有表结构。放它进来会得到一张空快照，
     // 再被拿去和目标库比较，就会生成"删除目标端全部表"的 DROP 计划。
-    if (conn.config.dialectId !== 'sqlite' && conn.config.dialectId !== 'postgresql') {
+    if (conn.config.dialectId !== 'sqlite' && conn.config.dialectId !== 'postgresql' && conn.config.dialectId !== 'mysql') {
       throw new Error(`${conn.info.name} 没有表结构，不能参与结构比较（只支持 SQL 数据源）`)
     }
     await walk(NodeId.connection(connectionId), null, 0)
@@ -886,7 +886,7 @@ export class ConnectionManager {
     const dialect = target.conn.config.dialectId
     const sourceDialect = source.conn.config.dialectId
     for (const [label, id] of [['源', sourceDialect], ['目标', dialect]] as const) {
-      if (id !== 'sqlite' && id !== 'postgresql') throw new Error(`数据比较暂不支持方言：${label} ${id}`)
+      if (id !== 'sqlite' && id !== 'postgresql' && id !== 'mysql') throw new Error(`数据比较暂不支持方言：${label} ${id}`)
     }
     // 跨方言比较必须拒绝：两边对同一列的值映射不同（PostgreSQL 把 int8/numeric
     // 当文本返回，SQLite 当 number），按键对齐后每行都会被判成"源端独有+目标端独有"，
@@ -917,14 +917,37 @@ export class ConnectionManager {
       .map((c) => c.name)
       .filter((name) => targetDesc.columns.some((t) => t.name === name))
     if (sharedColumns.length === 0) throw new Error('两张表没有同名列，无法比较数据')
-    const sourceRows = await this.#readRowsForCompare(request.sourceTableNodeId, sharedColumns, keyColumns, maxRows)
-    const targetRows = await this.#readRowsForCompare(request.targetTableNodeId, sharedColumns, keyColumns, maxRows)
+    /*
+     * 二进制列不参与数据比较（BLOB / BYTEA / BINARY 等）：
+     * 把二进制内容按文本比较既不可靠，也会把整块数据搬进内存。
+     * 这与文档里的语义一致——这里显式剔除并告警，而不是读到该列时才抛错。
+     */
+    const isBinaryType = (typeName: string): boolean =>
+      /(^|\W)(blob|tinyblob|mediumblob|longblob|bytea|binary|varbinary|image)(\W|$)/i.test(typeName)
+    const binaryColumns = sharedColumns.filter((name) => {
+      const sourceColumn = sourceDesc.columns.find((c) => c.name === name)
+      const targetColumn = targetDesc.columns.find((c) => c.name === name)
+      return isBinaryType(sourceColumn?.typeName ?? '') || isBinaryType(targetColumn?.typeName ?? '')
+    })
+    const keyBinary = keyColumns.filter((name) => binaryColumns.includes(name))
+    if (keyBinary.length > 0) {
+      throw new Error(`比较键不能是二进制列：${keyBinary.join(', ')}`)
+    }
+    const comparableColumns = sharedColumns.filter((name) => !binaryColumns.includes(name))
+    if (comparableColumns.length === 0) {
+      throw new Error('两张表没有可比的非二进制列，无法比较数据')
+    }
+    const sourceRows = await this.#readRowsForCompare(request.sourceTableNodeId, comparableColumns, keyColumns, maxRows)
+    const targetRows = await this.#readRowsForCompare(request.targetTableNodeId, comparableColumns, keyColumns, maxRows)
     const name = tableNameFromAdapterId(target.adapterId, dialect)
     const result = compareDataRows(sourceRows, targetRows, { columns: keyColumns }, dialect as CompareDialect, name)
     // 只比列交集：目标端缺的列不会被比较，必须说出来，否则用户会以为那一列也一致。
     const sourceOnly = sourceDesc.columns.map((c) => c.name).filter((n) => !targetDesc.columns.some((t) => t.name === n))
     const targetOnly = targetDesc.columns.map((c) => c.name).filter((n) => !sourceDesc.columns.some((t) => t.name === n))
     const warnings = [...result.plan.warnings]
+    if (binaryColumns.length > 0) {
+      warnings.push(`二进制列不参与数据比较：${binaryColumns.join(', ')}。`)
+    }
     if (sourceOnly.length > 0) warnings.push(`源表独有列未参与比较：${sourceOnly.join(', ')}（需要先同步结构）。`)
     if (targetOnly.length > 0) warnings.push(`目标表独有列未参与比较：${targetOnly.join(', ')}（需要先同步结构）。`)
     return { keyColumns, ...result, plan: { ...result.plan, warnings } }
@@ -1891,7 +1914,7 @@ function tableNameFromAdapterId(
   const payload = adapterId.slice('table:'.length)
   if (payload === '') throw new Error(`无法识别的表 id: ${adapterId}`)
   if (dialectId === 'sqlite') return { schema: null, name: payload }
-  if (dialectId !== 'postgresql') throw new Error(`数据比较暂不支持方言：${dialectId}`)
+  if (dialectId !== 'postgresql' && dialectId !== 'mysql') throw new Error(`数据比较暂不支持方言：${dialectId}`)
   let head = ''
   for (let i = 0; i < payload.length; i += 1) {
     const ch = payload.charAt(i)

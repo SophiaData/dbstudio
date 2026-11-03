@@ -4,6 +4,27 @@
 
 ---
 
+## 未发布 — MySQL 能力对齐
+
+### 新增
+
+- **MySQL / MariaDB 能力补齐**：
+  - 参数绑定（`?` 占位符，含注释、字符串与反引号标识符的扫描）；
+  - CHECK 约束与触发器读取（MySQL 8.0.16+ / MariaDB 10.2+，旧版本保持"未知"而非"没有"）；
+  - 视图定义与存储过程/函数读取，接入结构比较；
+  - 结构比较与数据比较（生成反引号限定的同步 SQL；数据比较跳过二进制列并在结果中列出）；
+  - DDL 结构编辑：建表 / 删表 / 建视图 / 删视图 / 重命名表，含 MySQL 类型白名单与 `AUTO_INCREMENT` 规则；
+  - SSL/TLS（disable / require / verify-ca / verify-full）与 SSH 隧道（与 PostgreSQL 共用同一套主机指纹确认）。
+- **SQL INSERT 导出支持 MySQL**：反引号限定与反斜杠转义。
+- **数据比较跳过二进制列**：不再因为表里有 BLOB 列而整次比较失败，被跳过的列会写进告警。
+
+### 修复
+
+- MySQL 有未提交事务时执行 DDL 会被拒绝，避免 MySQL 的隐式提交把用户改动一起落盘。
+- `information_schema.ROUTINES` 的 `AS schema` 别名与保留字冲突，导致例程列表静默为空。
+
+---
+
 ## 0.7.0（2026-11-02）— 第三个 SQL 数据库：MySQL / MariaDB
 
 ### 新增

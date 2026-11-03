@@ -55,3 +55,22 @@ test('Unicode identifiers and parameter names keep their lexical boundaries', ()
   assert.deepEqual(names('SELECT 名字$99, $内容$ $88 $内容$, $1', 'postgresql'), ['$1'])
   assert.deepEqual(bind('SELECT :名字', [{ name: '名字', value: 'bound' }], 'sqlite').values, ['bound'])
 })
+
+test('MySQL binds ? placeholders and ignores strings, identifiers, comments and user variables', () => {
+  const sql = "SELECT ?, '?', \"?\", `?`, ?, # ?\n-- ?\n/* ? */ @x"
+  assert.deepEqual(names(sql, 'mysql'), ['?1', '?2'])
+  assert.deepEqual(bind(sql, [{ name: '?1', value: 1 }, { name: '?2', value: 2 }], 'mysql'), {
+    sql,
+    values: [1, 2]
+  })
+})
+
+test('MySQL backslash escapes inside strings do not create placeholders', () => {
+  assert.deepEqual(names("SELECT 'it\\'s ?', ?", 'mysql'), ['?1'])
+})
+
+test('MySQL rejects named and numbered placeholders instead of guessing', () => {
+  for (const sql of ['SELECT :x', 'SELECT ?2']) {
+    assert.throws(() => bind(sql, [], 'mysql'), /MySQL|参数|占位/)
+  }
+})

@@ -1,6 +1,6 @@
 import type { SqlParameter, SqlParameterValue } from './resultset'
 
-export type SqlParameterDialect = 'sqlite' | 'postgresql'
+export type SqlParameterDialect = 'sqlite' | 'postgresql' | 'mysql'
 
 export interface SqlPlaceholder {
   readonly name: string
@@ -49,6 +49,11 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
       while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i += 1
       continue
     }
+    // MySQL 独有的 # 行注释。它只在 MySQL 里是注释，其它方言里可能是普通字符。
+    if (dialect === 'mysql' && ch === '#') {
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i += 1
+      continue
+    }
     if (ch === '/' && sql[i + 1] === '*') {
       let depth = 1
       i += 2
@@ -60,9 +65,13 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
       if (depth > 0) return unsafe('SQL 包含未闭合的块注释，无法安全识别参数。')
       continue
     }
-    if (ch === "'" || ch === '"' || (dialect === 'sqlite' && (ch === '`' || ch === '['))) {
+    if (ch === "'" || ch === '"' || ((dialect === 'sqlite' || dialect === 'mysql') && ch === '`') || (dialect === 'sqlite' && ch === '[')) {
       const quote = ch === '[' ? ']' : ch
-      const escapes = dialect === 'postgresql' && ch === "'" && /[eE]/.test(sql[i - 1] ?? '') && !isNameChar(sql[i - 2])
+      // MySQL 的字符串默认启用反斜杠转义（除非服务器开了 NO_BACKSLASH_ESCAPES）；
+      // 反引号标识符则靠翻倍转义。这里按默认行为扫描，避免把 `?` 或引号误判。
+      const escapes = dialect === 'postgresql'
+        ? ch === "'" && /[eE]/.test(sql[i - 1] ?? '') && !isNameChar(sql[i - 2])
+        : dialect === 'mysql' && (ch === "'" || ch === '"')
       i += 1
       let closed = false
       while (i < sql.length) {
@@ -97,9 +106,10 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
           i += match.length
           continue
         }
-      } else if (isNameChar(sql[i + 1])) {
+      } else if (dialect === 'sqlite' && isNameChar(sql[i + 1])) {
         return unsafe('SQLite 参数请使用 ? 或 :name，不支持 $ 参数。')
       }
+      // MySQL 里 $ 是合法的标识符字符（例如 JSON 路径），不能当成参数前缀。
     }
     if (ch === ':' && sql[i + 1] === ':') { i += 2; continue }
     if (dialect === 'sqlite' && ch === ':' && /\d/.test(sql[i + 1] ?? '')) {
@@ -107,6 +117,7 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
     }
     if (ch === ':' && isNameStart(sql[i + 1])) {
       if (dialect === 'postgresql') return unsafe('PostgreSQL 只支持 $1、$2 形式的参数，请显式填写对应值。')
+      if (dialect === 'mysql') return unsafe('MySQL 只支持 ? 占位符，不支持 :name 命名参数。')
       let end = i + 2
       while (isNameChar(sql[end])) end += 1
       placeholders.push({ name: sql.slice(i + 1, end), kind: 'named', start: i, end })
@@ -116,8 +127,10 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
     if (dialect === 'sqlite' && ch === '@' && isNameChar(sql[i + 1])) {
       return unsafe('SQLite 参数请使用 ? 或 :name，不支持 @ 参数。')
     }
-    if (ch === '?' && dialect === 'sqlite') {
-      if (/\d/.test(sql[i + 1] ?? '')) return unsafe('SQLite 数字编号占位符 ?N 暂不支持，请使用 ? 或 :name 参数。')
+    if (ch === '?' && (dialect === 'sqlite' || dialect === 'mysql')) {
+      if (/\d/.test(sql[i + 1] ?? '')) {
+        return unsafe(`${dialect === 'mysql' ? 'MySQL' : 'SQLite'} 不支持数字编号占位符 ?N，请使用 ?。`)
+      }
       anonymousIndex += 1
       placeholders.push({ name: `?${anonymousIndex}`, kind: 'positional', start: i, end: i + 1 })
     }
@@ -188,7 +201,7 @@ export function bindSqlParameters(
       throw new SqlParameterError(`缺少参数 ${placeholder.name}。`)
     }
     used.add(key)
-    if (dialect === 'sqlite') {
+    if (dialect === 'sqlite' || dialect === 'mysql') {
       values.push(value as SqlParameterValue)
     }
   }

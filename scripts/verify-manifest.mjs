@@ -169,7 +169,7 @@ export const STEPS = [
   },
   {
     id: 'test:mysql-contract',
-    title: 'MySQL 驱动契约（真实 MySQL，只读 + 元数据 + 执行）',
+    title: 'MySQL 驱动契约（真实 MySQL：查询/写入/比较/DDL/TLS）',
     group: 'external',
     env: ['MYSQL_HOST']
   },

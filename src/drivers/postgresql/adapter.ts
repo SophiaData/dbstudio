@@ -75,7 +75,7 @@ import {
   type SshCredentials,
   type SshTunnel,
   type SshTunnelConfig
-} from './ssh-tunnel'
+} from '../ssh-tunnel'
 import {
   SCHEMAS_FOLDER_ID,
   columnObjectId,
