@@ -232,7 +232,7 @@ offset 行），见下文「一个已知代价」。这些数字是**基线**：
 |---|---|
 | `node` | 类型检查、构建、夹具；元数据、结果集、编辑、持久化、增删改、DDL 与结构化 DDL 预览、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC、CSV 导入解析/预览契约与导入任务事务（SQLite；PG 分支可选）、导入驱动安全/RPC 超时竞态/PG 事务状态同步（模拟 pg Client，非真 PG）、导入终态结果文案分类（纯函数）、ER 关系与布局契约；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |
 | `gui` | 布局、后台模式、查询和元数据交互、SQL 编辑器、SQL 参数面板与 SQLite 取消状态、SQLite 执行计划与断线恢复、SSL/SSH 表单、SQL 库、多标签上下文、导出完整性、CSV 导入、事务与网格生命周期、真实窗口关闭/退出、连接断开/删除/更新保护、SQL 事务联动、工作台结果形态卡片、多语句脚本顺序执行与错误中断、SQL 草稿按连接恢复、ER 图关系/选表/布局隔离/SVG 导出 |
-| `external` | 真实 PostgreSQL、PostgreSQL JSON 执行计划 RPC/GUI、查询取消、SSL/TLS 和 SSH 隧道；其中执行计划 GUI 需要显示器（Linux 使用 xvfb）；实际数量与运行环境记录在验收报告中 |
+| `external` | 真实 PostgreSQL、PostgreSQL JSON 执行计划 RPC/GUI、查询取消、SSL/TLS 和 SSH 隧道；真实 MySQL（连接、元数据、参数、比较、DDL、写入、导出、CSV 导入、TLS，可选 SSH）；其中执行计划 GUI 需要显示器（Linux 使用 xvfb）；实际数量与运行环境记录在验收报告中 |
 
 `node` 组的 `test:import-validation` 覆盖 CSV 解析与纯逻辑预览契约；`test:import-task` 始终覆盖 ImportManager 契约和真实 SQLite，设置 `DBSTUDIO_PG_URL` 后才追加 PostgreSQL 成功/回滚分支，未设置时会明确打印 `SKIP`。`test:import-result-messages` 是**纯函数**回归（不启 Electron、不连数据库），锁的是导入终态文案的措辞安全：提交结果未知、宿主被终止、回滚失败三类都不得谎称"已回滚"。`test:gui-import` 属于 `gui` 组，不会被 `verify:node` 执行。
 
