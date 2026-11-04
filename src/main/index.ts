@@ -22,10 +22,21 @@ import { ConnectionStore, type SecretCipher } from './ConnectionStore'
 import { chooseImportFile } from './import-file-dialog'
 import { SqlLibraryStore } from './SqlLibraryStore'
 import { registerElectronIpc } from './transport/electron-ipc-adapter'
+import {
+  createHttpServer,
+  createHttpServerComposition,
+  type HttpServer
+} from './server'
+import {
+  createHttpServerPrincipalResolver,
+  readHttpServerStartupConfig,
+  type HttpServerPrincipalResolver
+} from './server/http-server-config'
 
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
 let sqlLibrary: SqlLibraryStore | null = null
+let httpServer: HttpServer | null = null
 let windowCleanup: Promise<void> = Promise.resolve()
 
 /**
@@ -92,6 +103,33 @@ function createSafeStorageCipher(): SecretCipher | null {
     // 某些平台上 isEncryptionAvailable 本身也可能抛（初始化失败）。
     console.warn('[main] 初始化 safeStorage 失败，密码将不会被保存:', err)
     return null
+  }
+}
+
+export async function startConfiguredHttpServer(
+  resolvePrincipal?: HttpServerPrincipalResolver
+): Promise<void> {
+  const config = readHttpServerStartupConfig(process.env)
+  if (!config) return
+
+  const composition = createHttpServerComposition({
+    dialects: BUILTIN_DIALECT_METADATA,
+    baseDir: app.getPath('userData'),
+    cipher: createSafeStorageCipher(),
+    onLog: (level, msg) => console[level === 'error' ? 'error' : 'log'](msg)
+  })
+  const server = createHttpServer({
+    composition,
+    listen: { host: config.host, port: config.port },
+    resolvePrincipal: createHttpServerPrincipalResolver(config, resolvePrincipal)
+  })
+  try {
+    const address = await server.listen()
+    httpServer = server
+    console.log(`[main] HTTP server 已监听 ${address.address}:${address.port}`)
+  } catch (error) {
+    await server.close().catch(() => undefined)
+    throw error
   }
 }
 
@@ -418,7 +456,7 @@ function chooseImportFileForSender(sender?: WebContents): Promise<string | null>
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (hiddenTestMode && process.platform === 'darwin') {
     // accessory 应用没有 Dock 图标，也不会抢走当前应用的焦点。
     app.setActivationPolicy('accessory')
@@ -429,6 +467,7 @@ app.whenReady().then(() => {
     getSqlLibrary,
     chooseImportFile: chooseImportFileForSender
   })
+  await startConfiguredHttpServer()
   createWindow()
 
   app.on('activate', () => {
@@ -436,6 +475,9 @@ app.whenReady().then(() => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
   })
+}).catch((error) => {
+  console.error('[main] 启动 HTTP server 失败:', error)
+  app.quit()
 })
 
 // macOS 惯例：关闭所有窗口不退出应用；但驱动宿主进程必须随窗口一起清理，
@@ -514,8 +556,10 @@ app.on('before-quit', (event) => {
   void (async () => {
     const win = mainWindow
     if (win && !win.isDestroyed() && !(await askRendererToGuard(win))) return
-    await Promise.all([windowCleanup, manager?.disposeAll()])
+    const closingHttpServer = httpServer
+    await Promise.all([windowCleanup, manager?.disposeAll(), closingHttpServer?.close()])
     manager = null
+    if (httpServer === closingHttpServer) httpServer = null
     quitConfirmed = true
     app.quit()
   })().catch((error) => console.error('[main] 退出确认失败:', error))
