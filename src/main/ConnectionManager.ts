@@ -279,8 +279,13 @@ export class ConnectionManager {
    * 实现见 `./application/query-application-service`：连接解析、会话身份校验
    * 与游标作用域封装都在那里，本方法只保留公开契约。
    */
-  async runQuery(nodeId: string, sql: string, options?: QueryOptions): Promise<QueryResult> {
-    return this.#services.queries.runQuery(nodeId, sql, options)
+  async runQuery(
+    nodeId: string,
+    sql: string,
+    options?: QueryOptions,
+    signal?: AbortSignal
+  ): Promise<QueryResult> {
+    return this.#services.queries.runQuery(nodeId, sql, options, signal)
   }
 
   /**

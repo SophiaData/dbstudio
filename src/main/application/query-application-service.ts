@@ -82,9 +82,14 @@ export class QueryApplicationService {
    * 游标处理：把 adapter 的原生游标 id 包上连接归属后再交给 UI（规则见
    * cursor-registry），同时登记进账本，让「这个连接还有游标没关」在主进程侧可见。
    */
-  async runQuery(nodeId: string, sql: string, options?: QueryOptions): Promise<QueryResult> {
+  async runQuery(
+    nodeId: string,
+    sql: string,
+    options?: QueryOptions,
+    signal?: AbortSignal
+  ): Promise<QueryResult> {
     const { conn } = this.#ctx.resolver.resolveConnection(nodeId)
-    const result = await conn.host.query(sql, options)
+    const result = await conn.host.query(sql, options, signal)
     this.#assertSameSession(conn, `查询所属的会话已断开: ${conn.id}`)
     return this.#scopeCursor(conn, result)
   }

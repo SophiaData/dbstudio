@@ -314,7 +314,7 @@ export interface DriverAdapter {
    * 后续取页走 `fetchResultPage`，这样渲染进程虚拟滚动到哪一段就要哪一段，
    * 不需要在进程间维持一个「滑动的全量窗口」。
    */
-  query(sql: string, options?: QueryOptions): Promise<QueryResult>
+  query(sql: string, options?: QueryOptions, signal?: AbortSignal): Promise<QueryResult>
 
   /**
    * 执行一条 SQL 语句（查询、DML 或 DDL）。
