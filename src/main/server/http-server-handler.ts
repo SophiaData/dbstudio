@@ -14,6 +14,7 @@ import type { BackendPrincipal, BackendRequestContext } from '../../backend/tran
 import type { BackendResponse } from '../../backend/transport/transport'
 import { encodeBackendResponse } from '../../backend/transport/wire-codec'
 import type { HttpServerComposition } from './http-server-composition'
+import { OwnerGovernance, OwnerQuotaError, type OwnerLease } from './owner-governance'
 
 export const DEFAULT_HTTP_MAX_BODY_BYTES = 1 * 1024 * 1024
 export const DEFAULT_HTTP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -30,6 +31,8 @@ export interface HttpServerHandlerOptions {
   readonly maxResponseBytes?: number
   readonly maxConcurrentRequests?: number
   readonly maxRequestIdLength?: number
+  /** owner 级请求配额与审计；未提供时保持现有全局并发行为。 */
+  readonly governance?: OwnerGovernance
 }
 
 export type HttpServerHandler = (
@@ -294,12 +297,14 @@ export function createHttpServerHandler(
         throw new HttpGuardError(429, 'conflict', 'HTTP backend 并发请求已达上限', true)
       }
       activeRequests += 1
+      let ownerRequestLease: OwnerLease | undefined
 
       try {
         let principal: BackendPrincipal
         try {
           principal = validatePrincipal(await options.resolvePrincipal?.(request))
         } catch (error) {
+          options.governance?.recordAuthenticationFailure(headerId)
           if (error instanceof HttpGuardError) throw error
           const payload = toBackendErrorPayload(error, { callId: headerId })
           throw new HttpGuardError(
@@ -308,6 +313,15 @@ export function createHttpServerHandler(
             payload.message,
             payload.retryable
           )
+        }
+
+        try {
+          ownerRequestLease = options.governance?.acquireRequest(principal.id, headerId)
+        } catch (error) {
+          if (error instanceof OwnerQuotaError) {
+            throw new HttpGuardError(429, 'conflict', error.message, true)
+          }
+          throw error
         }
 
         const controller = new AbortController()
@@ -360,6 +374,7 @@ export function createHttpServerHandler(
           response.removeListener('close', onResponseClose)
         }
       } finally {
+        ownerRequestLease?.release()
         activeRequests -= 1
       }
     } catch (error) {

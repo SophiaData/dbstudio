@@ -16,6 +16,16 @@ export type {
   HttpServerOwnerScope
 } from './http-server-composition'
 export {
+  OwnerGovernance,
+  OwnerQuotaError
+} from './owner-governance'
+export type {
+  OwnerAuditEvent,
+  OwnerGovernanceOptions,
+  OwnerLease,
+  OwnerQuota
+} from './owner-governance'
+export {
   createHttpServerHandler,
   DEFAULT_HTTP_MAX_BODY_BYTES,
   DEFAULT_HTTP_MAX_RESPONSE_BYTES,

@@ -31,7 +31,7 @@ HTTP client 使用 `RemoteBackendApi`，remote projection 会排除 `chooseImpor
 - 结构化成功/失败 envelope；
 - client 侧 request id、取消和超时。
 
-当前 HTTP transport 仍是 transport prototype，但 server composition 的第一切片已经落地：`createHttpServerComposition` 接收认证后的 principal，通过 request context 选择 owner-bound application scope；每个 owner 使用独立的 ConnectionStore、SqlLibraryStore、ConnectionManager、cursor 和任务状态，server 端 cipher 与 driver-host factory 也由组合根注入。`createHttpServerHandler` 提供 Node HTTP 入口的第一层防护：只接受 JSON POST、限制 body/response 大小、限制并发、校验 request id，并把客户端断连映射到 request context 的 `AbortSignal`；`createHttpServer` 在此基础上提供默认 loopback 绑定、真实 localhost listener、优雅关闭和 composition 生命周期管理。主进程入口通过 `HttpServerPrincipalResolver` 注入认证 resolver；未注入时只允许 loopback 固定 owner 本地模式，远程 host 必须由调用方提供 resolver，当前不绑定 JWT 或任何外部认证服务。文件内容走独立的 artifact routes：owner scope 内的本地 store 提供短时效 upload/download ticket、大小与 sha256 校验、一次性 ticket 和二进制流传输，artifact id 不承载路径语义；bearer ticket 通过 `X-DBStudio-Artifact-Ticket: Bearer <ticket>` 专用请求头传输，upload/download URL 不包含 ticket query，旧 query 形式不兼容并返回 401。这样 ticket 不进入访问日志、Referer 或缓存键。wire decode 另有深度与节点数上限。生产限流策略、runtime 参数校验、断连后的业务取消、持久化 job store 和 artifact 与 import/export job 编排仍由后续 server slice 完成。
+当前 HTTP transport 仍是 transport prototype，但 server composition 的第一切片已经落地：`createHttpServerComposition` 接收认证后的 principal，通过 request context 选择 owner-bound application scope；每个 owner 使用独立的 ConnectionStore、SqlLibraryStore、ConnectionManager、cursor 和任务状态，server 端 cipher 与 driver-host factory 也由组合根注入。`createHttpServerHandler` 提供 Node HTTP 入口的第一层防护：只接受 JSON POST、限制 body/response 大小、限制并发、校验 request id，并把客户端断连映射到 request context 的 `AbortSignal`；`createHttpServer` 在此基础上提供默认 loopback 绑定、真实 localhost listener、优雅关闭和 composition 生命周期管理。主进程入口通过 `HttpServerPrincipalResolver` 注入认证 resolver；未注入时只允许 loopback 固定 owner 本地模式，远程 host 必须由调用方提供 resolver，当前不绑定 JWT 或任何外部认证服务。`OwnerGovernance` 作为可替换的 owner 资源边界，提供请求、连接和存储租约配额、owner scope 生命周期与结构化审计事件；连接/存储业务必须显式申请租约，治理层不实现具体 provider 或 Artifact 存储。文件内容走独立的 artifact routes：owner scope 内的本地 store 提供短时效 upload/download ticket、大小与 sha256 校验、一次性 ticket 和二进制流传输，artifact id 不承载路径语义；bearer ticket 通过 `X-DBStudio-Artifact-Ticket: Bearer <ticket>` 专用请求头传输，upload/download URL 不包含 ticket query，旧 query 形式不兼容并返回 401。这样 ticket 不进入访问日志、Referer 或缓存键。wire decode 另有深度与节点数上限。生产限流策略、runtime 参数校验、断连后的业务取消、持久化 job store 和 artifact 与 import/export job 编排仍由后续 server slice 完成。
 
 ## 远程安全验证边界
 
@@ -40,8 +40,9 @@ HTTP server 组合根的安全检查按以下顺序执行：
 1. `createHttpServerHandler` 只接受 JSON `POST`，在读取 body 前检查 content length、认证 principal 和并发额度。
 2. body、response、request id 都有上限；wire decode 另外限制嵌套深度与节点数量，超限返回结构化错误并停止进入 application API。
 3. `BackendRequestContext.signal` 在 request body 读取期间、socket 断连和 response 关闭时保持可观察；认证层只负责产生 principal，owner scope 由组合根选择。
-4. 每个 owner 的持久化文件位于 owner id 的 SHA-256 子目录；连接、游标、SQL library、任务状态与 artifact store 不跨 scope 共享。
-5. remote manifest 与 runtime API projection 同时排除 Electron 文件选择器和服务端本机路径能力。文件传输走 owner-bound artifact ticket；upload ticket 只能写一次，download ticket 只能读一次，artifact id 不接受路径语义。
+4. `OwnerGovernance` 为认证后的 owner 发放请求、连接和存储租约；超过配额返回受控错误，租约释放幂等，owner dispose 时清理治理状态并写入审计事件。远程 scope 创建 `ConnectionManager` 时显式注入连接租约工厂：成功的 add/connect 持有租约，disconnect/remove、宿主异常退出和 owner dispose 释放租约；失败重试重新申请，testConnection 使用一次性租约。未注入租约工厂的桌面组合保持既有行为。
+5. 每个 owner 的持久化文件位于 owner id 的 SHA-256 子目录；连接、游标、SQL library、任务状态与 artifact store 不跨 scope 共享。
+6. remote manifest 与 runtime API projection 同时排除 Electron 文件选择器和服务端本机路径能力。文件传输走 owner-bound artifact ticket；upload ticket 只能写一次，download ticket 只能读一次，artifact id 不接受路径语义。
 
 这组约束对应的自动验证入口是 `test:http-server-composition`、`test:http-server-handler`、`test:artifact-contract`、`test:http-transport`、`test:architecture` 与 `check:bundle-boundaries`。生产部署仍需通过注入的 resolver 接入真实认证，并配置 TLS、反向代理 body limit、持久化 job/artifact store、审计和速率限制策略。
 
@@ -75,6 +76,7 @@ HTTP wire codec 使用 `$dbstudio` 标记包装二进制和特殊值；业务对
 - `pnpm run test:http-server-composition`：principal、owner scope、remote manifest 和 owner 存储隔离。
 - `pnpm run test:http-server-handler`：HTTP body/response 限制、并发额度、request id 与断连 signal。
 - `pnpm run test:http-server`：真实 localhost listener、JSON 往返、认证拒绝与优雅关闭。
+- `node tests/e2e-http-owner-governance.mjs`：owner 请求/连接/存储租约、生命周期和审计事件。
 - `pnpm run test:http-artifacts`：artifact ticket、二进制上传/下载、摘要校验、删除与 owner 隔离。
 - `pnpm run test:artifact-contract`：opaque artifact id、purpose 与 sha256 校验。
 - `pnpm run test:api-surface`：48 个 desktop method/channel 的 golden snapshot。
