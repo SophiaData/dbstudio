@@ -624,6 +624,12 @@ export class ResultGrid implements TransactionParticipant {
     const api = this.#requireApi()
     // 记住 nodeId：排序要重查，而重查必须知道在哪个连接上跑。
     this.#source = { kind: 'sql', sql, nodeId, options }
+    const parsedNode = NodeId.parse(nodeId)
+    if (parsedNode !== null && this.#layoutScope === null) {
+      // 自由 SQL 没有表节点可供 openTable 推导连接；仍需保存连接归属，
+      // 这样排序/筛选重查时才能加载该连接方言的引用规则。
+      this.#layoutScope = { dialect: '', connectionId: parsedNode.connectionId }
+    }
     this.#desc = null
     this.#attachTransactionController(nodeId)
     this.#sort = { col: -1, dir: null }

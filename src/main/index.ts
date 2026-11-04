@@ -25,13 +25,12 @@ import { registerElectronIpc } from './transport/electron-ipc-adapter'
 import {
   createHttpServer,
   createHttpServerComposition,
-  type HttpServer
-} from './server'
-import {
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig,
-  type HttpServerPrincipalResolver
-} from './server/http-server-config'
+  type HttpServer,
+  type HttpServerPrincipalResolver,
+  type OwnerGovernance
+} from './server'
 
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
@@ -106,8 +105,13 @@ function createSafeStorageCipher(): SecretCipher | null {
   }
 }
 
+export interface HttpServerStartupDependencies {
+  readonly resolvePrincipal?: HttpServerPrincipalResolver
+  readonly governance?: OwnerGovernance
+}
+
 export async function startConfiguredHttpServer(
-  resolvePrincipal?: HttpServerPrincipalResolver
+  dependencies: HttpServerStartupDependencies = {}
 ): Promise<void> {
   const config = readHttpServerStartupConfig(process.env)
   if (!config) return
@@ -116,12 +120,14 @@ export async function startConfiguredHttpServer(
     dialects: BUILTIN_DIALECT_METADATA,
     baseDir: app.getPath('userData'),
     cipher: createSafeStorageCipher(),
-    onLog: (level, msg) => console[level === 'error' ? 'error' : 'log'](msg)
+    onLog: (level, msg) => console[level === 'error' ? 'error' : 'log'](msg),
+    governance: dependencies.governance
   })
   const server = createHttpServer({
     composition,
     listen: { host: config.host, port: config.port },
-    resolvePrincipal: createHttpServerPrincipalResolver(config, resolvePrincipal)
+    resolvePrincipal: createHttpServerPrincipalResolver(config, dependencies.resolvePrincipal),
+    governance: dependencies.governance
   })
   try {
     const address = await server.listen()

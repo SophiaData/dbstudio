@@ -109,8 +109,8 @@ try {
       backendCalls.push({ method: 'describeTable', nodeId })
       throw { code: 'not-found', message: '表不存在', details: { nodeId } }
     },
-    runQuery: async (nodeId, sql) => {
-      backendCalls.push({ method: 'runQuery', nodeId, sql })
+    runQuery: async (nodeId, sql, signal) => {
+      backendCalls.push({ method: 'runQuery', nodeId, sql, signal })
       return new Uint8Array([0, 1, 2, 255])
     },
     removeConnection: async (connectionId) => {
@@ -234,6 +234,16 @@ try {
   console.log('\n[2] dispatcher：manifest 路由与结构化错误')
 
   const dispatch = createBackendDispatcher({ api: fakeApi })
+
+  await check('runQuery 收到 request context AbortSignal', async () => {
+    const controller = new AbortController()
+    const response = await dispatch(
+      { id: 'query-signal', method: 'runQuery', args: ['connection:c1', 'select 1'] },
+      { requestId: 'query-signal', signal: controller.signal, receivedAt: Date.now() }
+    )
+    assert.equal(response.ok, true)
+    assert.equal(backendCalls.at(-1).signal, controller.signal)
+  })
 
   await check('已知方法按 manifest 路由并回带请求 id', async () => {
     const response = await dispatch({ id: 'd-1', method: 'listConnections', args: [] })

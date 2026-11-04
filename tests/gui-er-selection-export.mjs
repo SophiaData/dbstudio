@@ -152,6 +152,13 @@ await installDownloadCapture(win)
 await app.evaluate(({ ipcMain }) => {
   const origList = ipcMain._invokeHandlers.get('dbstudio:listChildren')
   const origDescribe = ipcMain._invokeHandlers.get('dbstudio:describeTable')
+  const unwrap = (result) => {
+    if (result && typeof result === 'object' && 'ok' in result) {
+      if (result.ok) return result.value
+      throw new Error(result.error?.message ?? 'IPC handler failed')
+    }
+    return result
+  }
 
   /** 被调用过的 describeTable 的表 id。 */
   globalThis.__erDescribeCalls = []
@@ -162,7 +169,7 @@ await app.evaluate(({ ipcMain }) => {
   ipcMain.handle('dbstudio:listChildren', async (event, nodeId) => {
     const mock = globalThis.__erMock
     if (!mock) return origList(event, nodeId)
-    const connections = await origList(event, null)
+    const connections = unwrap(await origList(event, null))
     if (nodeId === null) return connections
     const connection = connections.find((item) => item.name === mock.connectionName)
     if (!connection) return origList(event, nodeId)

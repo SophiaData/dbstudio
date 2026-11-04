@@ -37,8 +37,13 @@ export function createApplicationApi(
       getManager().captureSchemaSnapshot(connectionId, schema),
     compareTableData: async (request) => getManager().compareTableData(request),
 
-    runQuery: async (nodeId, sql, queryOptions) =>
-      getManager().runQuery(nodeId, sql, queryOptions),
+    runQuery: async (
+      nodeId: string,
+      sql: string,
+      queryOptions?: Parameters<ConnectionManager['runQuery']>[2],
+      signal?: AbortSignal
+    ) =>
+      getManager().runQuery(nodeId, sql, queryOptions, signal),
     executeStatement: async (nodeId, sql, queryOptions) =>
       getManager().executeStatement(nodeId, sql, queryOptions),
     explain: async (nodeId, sql) => getManager().explain(nodeId, sql),

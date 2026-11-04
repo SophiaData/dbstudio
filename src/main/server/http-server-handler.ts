@@ -14,11 +14,26 @@ import type { BackendPrincipal, BackendRequestContext } from '../../backend/tran
 import type { BackendResponse } from '../../backend/transport/transport'
 import { encodeBackendResponse } from '../../backend/transport/wire-codec'
 import type { HttpServerComposition } from './http-server-composition'
+import { OwnerGovernance, OwnerQuotaError, type OwnerLease } from './owner-governance'
 
 export const DEFAULT_HTTP_MAX_BODY_BYTES = 1 * 1024 * 1024
 export const DEFAULT_HTTP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 export const DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS = 64
 export const DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH = 200
+
+export interface HttpRequestAuditEvent {
+  readonly requestId: string
+  readonly ownerId?: string
+  readonly method?: string
+  readonly statusCode: number
+  readonly durationMs: number
+  readonly outcome: 'completed' | 'rejected' | 'failed'
+  readonly errorCode?: BackendErrorPayload['code']
+}
+
+export interface HttpRequestAuditSink {
+  record(event: HttpRequestAuditEvent): void
+}
 
 export interface HttpServerHandlerOptions {
   readonly composition: Pick<HttpServerComposition, 'dispatch'>
@@ -30,6 +45,12 @@ export interface HttpServerHandlerOptions {
   readonly maxResponseBytes?: number
   readonly maxConcurrentRequests?: number
   readonly maxRequestIdLength?: number
+  /** owner 级请求配额与审计；未提供时保持现有全局并发行为。 */
+  readonly governance?: OwnerGovernance
+  /** 只接收不含请求体、凭据和响应内容的结构化审计事件。 */
+  readonly auditSink?: HttpRequestAuditSink
+  /** 与审计事件共享安全字段，供指标系统计数/分组。 */
+  readonly metricsSink?: HttpRequestAuditSink
 }
 
 export type HttpServerHandler = (
@@ -273,7 +294,12 @@ export function createHttpServerHandler(
   let activeRequests = 0
 
   return async (request, response): Promise<void> => {
+    const startedAt = Date.now()
     let headerId = fallbackRequestId()
+    let ownerId: string | undefined
+    let method: string | undefined
+    let outcome: HttpRequestAuditEvent['outcome'] = 'rejected'
+    let errorCode: BackendErrorPayload['code'] | undefined
     try {
       headerId = requestIdFromHeader(request, maxRequestIdLength) ?? headerId
       if (request.method !== 'POST') {
@@ -294,12 +320,15 @@ export function createHttpServerHandler(
         throw new HttpGuardError(429, 'conflict', 'HTTP backend 并发请求已达上限', true)
       }
       activeRequests += 1
+      let ownerRequestLease: OwnerLease | undefined
 
       try {
         let principal: BackendPrincipal
         try {
           principal = validatePrincipal(await options.resolvePrincipal?.(request))
+          ownerId = principal.id
         } catch (error) {
+          options.governance?.recordAuthenticationFailure(headerId)
           if (error instanceof HttpGuardError) throw error
           const payload = toBackendErrorPayload(error, { callId: headerId })
           throw new HttpGuardError(
@@ -308,6 +337,15 @@ export function createHttpServerHandler(
             payload.message,
             payload.retryable
           )
+        }
+
+        try {
+          ownerRequestLease = options.governance?.acquireRequest(principal.id, headerId)
+        } catch (error) {
+          if (error instanceof OwnerQuotaError) {
+            throw new HttpGuardError(429, 'conflict', error.message, true)
+          }
+          throw error
         }
 
         const controller = new AbortController()
@@ -330,6 +368,10 @@ export function createHttpServerHandler(
         try {
           const body = await readBody(request, maxBodyBytes, controller)
           const parsed = parseBody(body)
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+            const candidateMethod = (parsed as { method?: unknown }).method
+            if (typeof candidateMethod === 'string') method = candidateMethod
+          }
           const bodyId = requestIdFromBody(parsed, maxRequestIdLength)
           if (headerId !== bodyId && headerValue(request, 'x-dbstudio-request-id')) {
             throw new HttpGuardError(400, 'invalid-argument', 'request id 与请求体 id 不一致')
@@ -342,8 +384,12 @@ export function createHttpServerHandler(
             receivedAt: Date.now()
           }
           const backendResponse = await options.composition.dispatch(parsed, context)
+          outcome = backendResponse.ok ? 'completed' : 'failed'
+          errorCode = backendResponse.ok ? undefined : backendResponse.error.code
           const bodyText = JSON.stringify(encodeBackendResponse(backendResponse))
           if (Buffer.byteLength(bodyText) > maxResponseBytes) {
+            outcome = 'failed'
+            errorCode = 'internal'
             writeJson(
               response,
               500,
@@ -360,21 +406,43 @@ export function createHttpServerHandler(
           response.removeListener('close', onResponseClose)
         }
       } finally {
+        ownerRequestLease?.release()
         activeRequests -= 1
       }
     } catch (error) {
       if (!request.readableEnded) drainRequest(request)
       if (error instanceof HttpGuardError) {
+        outcome = 'rejected'
+        errorCode = error.code
         writeGuardError(response, headerId, error)
         return
       }
       const payload = toBackendErrorPayload(error, { callId: headerId })
+      outcome = 'failed'
+      errorCode = payload.code
       writeJson(response, statusForResponse({ id: headerId, ok: false, error: payload }), errorResponse(
         headerId,
         payload.code,
         payload.message,
         { retryable: payload.retryable }
       ))
+    } finally {
+      const event: HttpRequestAuditEvent = {
+        requestId: headerId,
+        ...(ownerId === undefined ? {} : { ownerId }),
+        ...(method === undefined ? {} : { method }),
+        statusCode: response.statusCode || 500,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outcome,
+        ...(errorCode === undefined ? {} : { errorCode })
+      }
+      for (const sink of [options.auditSink, options.metricsSink]) {
+        try {
+          sink?.record(event)
+        } catch {
+          // 可观测性 sink 不能改变 HTTP 响应，也不能泄露 sink 内部错误。
+        }
+      }
     }
   }
 }

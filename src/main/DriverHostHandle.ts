@@ -112,6 +112,7 @@ interface Pending {
   readonly reject: (e: Error) => void
   readonly timer: NodeJS.Timeout
   readonly method: string
+  readonly abortCleanup?: () => void
 }
 
 export interface DriverHostOptions {
@@ -474,6 +475,7 @@ export class DriverHostHandle {
     if (!pending) return
     this.#pending.delete(res.id)
     clearTimeout(pending.timer)
+    pending.abortCleanup?.()
     if (res.ok) pending.resolve(res.result)
     else pending.reject(new DriverRpcError(res.error))
   }
@@ -512,7 +514,16 @@ export class DriverHostHandle {
    * 选择**用哪个超时。默认参数会被无意识地继承，结果就是某个新加的用户 SQL
    * 方法悄悄用了 15s；显式传参时这个选择至少会在 code review 里被看到。
    */
-  #requestWithTimeout<T>(method: RpcMethod, params: unknown, timeoutMs: number): Promise<T> {
+  #requestWithTimeout<T>(
+    method: RpcMethod,
+    params: unknown,
+    timeoutMs: number,
+    abort?: {
+      readonly signal?: AbortSignal
+      readonly onAbort: () => void
+      readonly setAbortCleanup: (cleanup: () => void) => void
+    }
+  ): Promise<T> {
     if (this.#closed || (this.#closing && method !== 'disconnect')) {
       return Promise.reject(new Error(`驱动宿主已关闭，无法调用 ${method}`))
     }
@@ -543,11 +554,28 @@ export class DriverHostHandle {
         }
         rej(new Error(`驱动宿主调用 ${method} 超时（${effectiveTimeoutMs}ms）`))
       }, effectiveTimeoutMs)
+      let onAbort: (() => void) | undefined
+      const abortCleanup = (): void => {
+        if (onAbort) abort?.signal?.removeEventListener('abort', onAbort)
+      }
+      if (abort?.signal) {
+        onAbort = (): void => {
+          if (!this.#pending.has(id)) return
+          this.#pending.delete(id)
+          clearTimeout(timer)
+          abortCleanup()
+          abort.onAbort()
+          rej(new DOMException('查询已取消', 'AbortError'))
+        }
+        abort.signal.addEventListener('abort', onAbort, { once: true })
+        abort.setAbortCleanup(abortCleanup)
+      }
       this.#pending.set(id, {
         resolve: res as (v: unknown) => void,
         reject: rej,
         timer,
-        method
+        method,
+        abortCleanup
       })
       try {
         this.#child.stdin.write(`${JSON.stringify(frame, (_key, value: unknown) =>
@@ -561,6 +589,29 @@ export class DriverHostHandle {
         rej(e instanceof Error ? e : new Error(String(e)))
       }
     })
+  }
+
+  #requestWithAbort<T>(
+    method: RpcMethod,
+    params: unknown,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    cancelSignalId: string | undefined
+  ): Promise<T> {
+    if (signal?.aborted) {
+      void this.cancelQuery(cancelSignalId).catch(() => undefined)
+      return Promise.reject(new DOMException('查询已取消', 'AbortError'))
+    }
+    let abortCleanup: (() => void) | undefined
+    const request = this.#requestWithTimeout<T>(method, params, timeoutMs, {
+      signal,
+      onAbort: () => {
+        void this.cancelQuery(cancelSignalId).catch(() => undefined)
+      },
+      setAbortCleanup: (cleanup) => { abortCleanup = cleanup }
+    })
+    if (!signal) return request
+    return request.finally(() => abortCleanup?.())
   }
 
   /** 构造事务边界超时错误：类型/文案都要让上层能区分「结果未知」。 */
@@ -623,12 +674,14 @@ export class DriverHostHandle {
 
   // ---- 结果集：全部走 60s 长超时（理由见 RESULT_SET_TIMEOUT_MS） ----
 
-  /** 执行 SQL，返回第一页与游标。 */
-  query(sql: string, options?: QueryOptions): Promise<QueryResult> {
-    return this.#requestWithTimeout<QueryResult>(
+  /** 执行 SQL，返回第一页与游标；signal 取消时同时请求驱动取消查询。 */
+  query(sql: string, options?: QueryOptions, signal?: AbortSignal): Promise<QueryResult> {
+    return this.#requestWithAbort<QueryResult>(
       'query',
       { sql, options },
-      RESULT_SET_TIMEOUT_MS
+      RESULT_SET_TIMEOUT_MS,
+      signal,
+      options?.signalId
     )
   }
 

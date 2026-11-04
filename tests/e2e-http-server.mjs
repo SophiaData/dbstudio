@@ -110,6 +110,38 @@ try {
     await assert.rejects(server.listen(), /HTTP server 已关闭/)
   })
 
+  await check('close grace 超时后强制关闭挂起连接', async () => {
+    let release
+    let started
+    const requestStarted = new Promise((resolveStarted) => { started = resolveStarted })
+    const pending = new Promise((resolvePending) => { release = resolvePending })
+    const server = createHttpServer({
+      composition: {
+        dispatch: async (request, context) => {
+          if (request.id === 'grace-close') {
+            started()
+            await pending
+          }
+          return { id: request.id, ok: true, value: context.signal.aborted ? 'aborted' : 'done' }
+        },
+        dispose: async () => undefined
+      },
+      listen: { port: 0 },
+      closeGraceMs: 25,
+      resolvePrincipal: () => ({ id: 'owner-a' })
+    })
+    const address = await server.listen()
+    const request = fetchRpc(`http://127.0.0.1:${address.port}/rpc`, 'grace-close').catch(() => undefined)
+    await requestStarted
+    await Promise.race([
+      server.close(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('close grace 未生效')), 1000))
+    ])
+    release()
+    await request
+    assert.equal(server.address, null)
+  })
+
   await check('未提供 principal 时真实 listener 返回 401', async () => {
     const server = createHttpServer({
       composition,

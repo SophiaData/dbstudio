@@ -37,6 +37,7 @@ import type { SecretMap } from '../../core/driver'
 import { DriverHostHandle } from '../DriverHostHandle'
 import {
   describeThrown,
+  type ConnectionLease,
   type ConnectionLogger,
   type DriverHostFactory,
   type LiveConnection,
@@ -84,6 +85,8 @@ export interface ConnectionSessionContext {
   readonly imports: SessionTaskGroup
   readonly onLog: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** 远程组合根提供 owner connection lease；未提供时为桌面单租户模式。 */
+  readonly reserveConnection?: (connectionId: string) => ConnectionLease
 }
 
 interface ConnectingEntry {
@@ -98,6 +101,7 @@ export class ConnectionSessionService {
   readonly #closing = new Map<string, Promise<void>>()
   readonly #sessionTokens = new Map<string, object>()
   readonly #sessionSecrets = new Map<string, SecretMap>()
+  readonly #connectionLeases = new Map<string, ConnectionLease>()
   #disposed = false
 
   readonly #ctx: ConnectionSessionContext
@@ -187,6 +191,8 @@ export class ConnectionSessionService {
 
     const token = {}
     this.#sessionTokens.set(connectionId, token)
+    const lease = this.#ctx.reserveConnection?.(connectionId)
+    if (lease) this.#connectionLeases.set(connectionId, lease)
     const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
       dialectId: saved.config.dialectId,
       onLog: (level, msg) => this.#ctx.onLog(level, msg),
@@ -196,6 +202,7 @@ export class ConnectionSessionService {
           this.#connections.delete(connectionId)
           this.#ctx.cursors.clearConnection(connectionId)
           this.#sessionSecrets.delete(connectionId)
+          this.#releaseConnectionLease(connectionId)
           this.#ctx.onLog(
             'error',
             `[manager] 连接 ${connectionId}（${saved.config.name}）的驱动宿主退出: ${error.message}`
@@ -205,7 +212,7 @@ export class ConnectionSessionService {
         }
       }
     })
-    const promise = this.#connectHost(saved, host, token).finally(() => {
+    const promise = this.#connectHost(saved, host, token, lease).finally(() => {
       if (this.#connecting.get(connectionId)?.host === host) {
         this.#connecting.delete(connectionId)
       }
@@ -217,7 +224,8 @@ export class ConnectionSessionService {
   async #connectHost(
     saved: SavedConnection,
     host: DriverHostHandle,
-    token: object
+    token: object,
+    lease?: ConnectionLease
   ): Promise<ConnectionSummary> {
     const secret =
       this.#sessionSecrets.get(saved.id) ?? this.#ctx.getSecret(saved.id)
@@ -232,12 +240,14 @@ export class ConnectionSessionService {
       ) {
         host.kill()
         await host.close()
+        this.#releaseConnectionLease(saved.id)
         return this.#toSummary(saved, undefined)
       }
       const live: LiveConnection = { ...saved, capabilities, host }
       this.#connections.set(saved.id, live)
       return this.#toSummary(saved, live)
     } catch (err) {
+      this.#releaseConnectionLease(saved.id)
       host.kill()
       await host.close()
       this.#ctx.onLog(
@@ -297,6 +307,7 @@ export class ConnectionSessionService {
       // 顺序反过来会被一条慢查询卡住整个断连流程。
       await this.#ctx.transfers.waitByConnection(connectionId)
     })().finally(() => {
+      this.#releaseConnectionLease(connectionId)
       if (this.#closing.get(connectionId) === closing) this.#closing.delete(connectionId)
     })
     this.#closing.set(connectionId, closing)
@@ -316,6 +327,13 @@ export class ConnectionSessionService {
     await Promise.all(this.#closing.values())
     this.#sessionTokens.clear()
     this.#sessionSecrets.clear()
+  }
+
+  #releaseConnectionLease(connectionId: string): void {
+    const lease = this.#connectionLeases.get(connectionId)
+    if (!lease) return
+    this.#connectionLeases.delete(connectionId)
+    lease.release()
   }
 
   #toSummary(

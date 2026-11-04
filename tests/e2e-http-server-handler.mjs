@@ -77,6 +77,8 @@ try {
   assert.ok(existsSync(bundle), `未找到 ${bundle}`)
   const { createHttpServerHandler } = await import(pathToFileURL(bundle).href)
   const contexts = []
+  const auditEvents = []
+  const metricEvents = []
   const composition = {
     dispatch: async (request, context) => {
       contexts.push({ request, context })
@@ -97,7 +99,9 @@ try {
       return typeof owner === 'string' ? { id: owner } : null
     },
     maxBodyBytes: 256,
-    maxResponseBytes: 256
+    maxResponseBytes: 256,
+    auditSink: { record: (event) => auditEvents.push(event) },
+    metricsSink: { record: (event) => metricEvents.push(event) }
   })
   const active = await start(handler)
 
@@ -120,6 +124,22 @@ try {
       })
       assert.equal(contexts.at(-1).context.principal.id, 'owner-a')
       assert.equal(contexts.at(-1).context.requestId, 'valid-1')
+      assert.equal(auditEvents.at(-1).ownerId, 'owner-a')
+      assert.equal(auditEvents.at(-1).method, 'listDialects')
+      assert.equal(auditEvents.at(-1).outcome, 'completed')
+      assert.equal(metricEvents.at(-1).requestId, 'valid-1')
+      assert.equal('value' in auditEvents.at(-1), false)
+    })
+
+    await check('审计与指标事件不携带请求体或敏感字段', async () => {
+      const response = await fetch(active.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-owner-id': 'owner-a' },
+        body: JSON.stringify({ id: 'safe-2', method: 'runQuery', args: [{ password: 'should-not-log' }] })
+      })
+      assert.equal(response.status, 200)
+      const serialized = JSON.stringify({ audit: auditEvents.at(-1), metrics: metricEvents.at(-1) })
+      assert.doesNotMatch(serialized, /should-not-log|password|secret-1/)
     })
 
     await check('缺少 principal 时在读取 body 前返回 401', async () => {

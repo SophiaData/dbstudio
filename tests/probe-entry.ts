@@ -46,6 +46,13 @@ export { SecretStorageUnavailableError }
  * 必须能观察到 rollback RPC 是否真的在 close 之前发出。
  */
 export { DriverHostHandle } from '../src/main/DriverHostHandle'
+export {
+  DRIVER_API_VERSION,
+  HANDSHAKE_PROTOCOL_VERSION,
+  METADATA_SCHEMA_VERSION,
+  SDK_CONTRACT_VERSION,
+  TRANSFER_SCHEMA_VERSION
+} from '../src/core/driver'
 
 /**
  * 用**真实的**内置驱动注册表构造一个 ConnectionManager。

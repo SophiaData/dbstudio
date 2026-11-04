@@ -132,6 +132,7 @@ test('previewImport IPC 通道已接入主进程和 preload 白名单（静态�
   assert.match(preload, /ipcRenderer\.invoke\(IPC\.previewImport, request\)/)
   // 方法名 → channel 的绑定在可执行 manifest 里；transport 按该清单注册。
   assert.match(manifest, /entry\('previewImport',\s*IPC\.previewImport\)/)
-  assert.match(adapter, /previewImport:\s*async \(request\)/)
   assert.match(adapter, /BACKEND_METHOD_MANIFEST/)
+  assert.match(adapter, /for \(const \{ method, channel \} of BACKEND_METHOD_MANIFEST\)/)
+  assert.match(adapter, /handler\(\.\.\.args\)/)
 })

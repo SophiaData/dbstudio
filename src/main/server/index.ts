@@ -1,11 +1,30 @@
 export {
   createHttpServerComposition
 } from './http-server-composition'
+export {
+  createHttpServerPrincipalResolver,
+  readHttpServerStartupConfig
+} from './http-server-config'
+export type {
+  HttpServerPrincipalResolver,
+  HttpServerStartupConfig,
+  HttpServerStartupEnv
+} from './http-server-config'
 export type {
   HttpServerComposition,
   HttpServerCompositionOptions,
   HttpServerOwnerScope
 } from './http-server-composition'
+export {
+  OwnerGovernance,
+  OwnerQuotaError
+} from './owner-governance'
+export type {
+  OwnerAuditEvent,
+  OwnerGovernanceOptions,
+  OwnerLease,
+  OwnerQuota
+} from './owner-governance'
 export {
   createHttpServerHandler,
   DEFAULT_HTTP_MAX_BODY_BYTES,

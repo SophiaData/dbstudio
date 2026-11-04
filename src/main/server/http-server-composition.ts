@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { BackendPrincipal, BackendRequestContext } from '../../backend/transport/transport'
 import type { RemoteBackendApi } from '../../backend/contract/backend'
+import type { RemoteOutboundPolicy } from '../../backend/contract/remote'
 import { REMOTE_BACKEND_METHOD_MANIFEST } from '../../backend/contract/method-manifest'
 import { BackendError } from '../../backend/contract/errors'
 import {
@@ -29,6 +30,7 @@ import {
 } from '../application/create-application-api'
 import type { ConnectionLogger, DriverHostFactory } from '../application/types'
 import { LocalArtifactStore } from './artifact-store'
+import type { OwnerGovernance } from './owner-governance'
 
 export interface HttpServerCompositionOptions {
   readonly dialects: readonly DialectInfo[]
@@ -38,6 +40,8 @@ export interface HttpServerCompositionOptions {
   readonly cipher: SecretCipher | null | ((ownerId: string) => SecretCipher | null)
   readonly onLog?: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** 远程连接出站目标策略；未提供时远程连接管理仍不启用。 */
+  readonly remoteOutboundPolicy?: RemoteOutboundPolicy
   /** 外部 wire 请求的解码深度与节点数上限。 */
   readonly decodeLimits?: WireDecodeLimits
   /** 每个 owner 的 artifact 单文件大小上限。 */
@@ -46,6 +50,8 @@ export interface HttpServerCompositionOptions {
   readonly artifactTtlMs?: number
   /** artifact 过期清理的定时周期。 */
   readonly artifactSweepIntervalMs?: number
+  /** owner 生命周期治理；不绑定具体认证或存储实现。 */
+  readonly governance?: OwnerGovernance
 }
 
 export interface HttpServerOwnerScope {
@@ -125,6 +131,7 @@ export function createHttpServerComposition(
     const existing = scopes.get(ownerId)
     if (existing) return existing
     if (disposed) throw new Error('HTTP server composition 已关闭')
+    options.governance?.ensureOwner(ownerId)
 
     const ownerDir = ownerStorageDir(options.baseDir, ownerId)
     const store = new ConnectionStore({
@@ -138,7 +145,11 @@ export function createHttpServerComposition(
     })
     const manager = new ConnectionManager(options.dialects, store, {
       onLog: options.onLog,
-      createDriverHost: options.createDriverHost
+      createDriverHost: options.createDriverHost,
+      remoteOutboundPolicy: options.remoteOutboundPolicy,
+      reserveConnection: options.governance
+        ? () => options.governance!.reserveConnection(ownerId)
+        : undefined
     })
     const artifactStore = new LocalArtifactStore({
       baseDir: ownerDir,
@@ -163,6 +174,7 @@ export function createHttpServerComposition(
         if (scopes.get(ownerId) !== scope) return
         scopes.delete(ownerId)
         artifactStore.dispose()
+        options.governance?.disposeOwner(ownerId)
         await manager.disposeAll()
       }
     }
@@ -191,9 +203,11 @@ export function createHttpServerComposition(
       await Promise.all(
         active.map(async (scope) => {
           scope.artifactStore.dispose()
+          options.governance?.disposeOwner(scope.ownerId)
           await scope.manager.disposeAll()
         })
       )
+      options.governance?.dispose()
     }
   }
 }
