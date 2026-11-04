@@ -25,6 +25,7 @@ HTTP client 使用 `RemoteBackendApi`，remote projection 会排除 `chooseImpor
 
 当前 HTTP 代码提供：
 
+- renderer `BackendClient` 的 desktop IPC / HTTP 选择器；HTTP 模式暴露连接状态，并在可重试传输失败时执行一次注入式 reconnect + retry；认证头由 provider 适配层维护，未绑定 JWT/mTLS 厂商；
 - transport-neutral wire codec；
 - `Uint8Array`、`undefined` 和 `bigint` 的 JSON 可逆编码；
 - manifest 路由与 dispatcher；
