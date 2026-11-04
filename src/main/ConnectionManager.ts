@@ -43,7 +43,7 @@ import {
   createApplicationServices,
   type ApplicationServices
 } from './application/create-application-services'
-import type { ConnectionLogger, DriverHostFactory } from './application/types'
+import type { ConnectionLeaseFactory, ConnectionLogger, DriverHostFactory } from './application/types'
 import type {
   ImportPreview,
   ImportPreviewRequest,
@@ -83,6 +83,8 @@ export interface ConnectionManagerOptions {
   readonly createDriverHost?: DriverHostFactory
   /** 显式提供才启用远程连接 DTO 与出站目标校验；默认桌面模式不改变。 */
   readonly remoteOutboundPolicy?: RemoteOutboundPolicy
+  /** 显式提供才启用 owner 连接租约；默认桌面模式不受治理配额影响。 */
+  readonly reserveConnection?: ConnectionLeaseFactory
 }
 
 export class ConnectionManager {
@@ -102,7 +104,8 @@ export class ConnectionManager {
     this.#services = createApplicationServices(dialects, store, {
       onLog: options.onLog,
       createDriverHost: options.createDriverHost,
-      remoteOutboundPolicy: options.remoteOutboundPolicy
+      remoteOutboundPolicy: options.remoteOutboundPolicy,
+      reserveConnection: options.reserveConnection
     })
   }
 

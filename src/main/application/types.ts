@@ -18,6 +18,13 @@ import type { DriverHostHandle, DriverHostOptions } from '../DriverHostHandle'
 /** 驱动宿主构造器；server composition 可注入独立的脚本解析策略。 */
 export type DriverHostFactory = (options: DriverHostOptions) => DriverHostHandle
 
+/** owner 级连接资源租约；释放必须幂等。 */
+export interface ConnectionLease {
+  release(): void
+}
+
+export type ConnectionLeaseFactory = (connectionId: string) => ConnectionLease
+
 /** 有活动会话（宿主进程活着）的连接。 */
 export interface LiveConnection {
   readonly id: string

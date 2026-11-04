@@ -98,6 +98,8 @@ export interface ConnectionApplicationContext {
   readonly resolver: ConnectionResolver
   readonly onLog: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** owner 组合根提供时，testConnection 使用一次性连接租约。 */
+  readonly reserveConnection?: (connectionId: string) => { release(): void }
   /** 远程组合根显式注入后才启用连接目标校验；桌面端未配置时保持历史语义。 */
   readonly remoteOutboundPolicy?: RemoteOutboundPolicy
 }
@@ -250,6 +252,7 @@ export class ConnectionApplicationService {
     secret?: SecretInput
   ): Promise<TestConnectionResult> {
     this.#validateRemoteConfig(config)
+    const lease = this.#ctx.reserveConnection?.('__test__')
     const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
       dialectId: config.dialectId
     })
@@ -257,8 +260,9 @@ export class ConnectionApplicationService {
       await host.handshake
       return await host.testConnection(config, secret)
     } finally {
-      // 测试连接不留会话，务必回收。
+      // 测试连接不留会话，务必回收宿主与临时 owner lease。
       await host.close()
+      lease?.release()
     }
   }
 

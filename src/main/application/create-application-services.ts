@@ -50,7 +50,7 @@ import { MetadataApplicationService } from './metadata-application-service'
 import { MutationApplicationService } from './mutation-application-service'
 import { QueryApplicationService } from './query-application-service'
 import { TransferApplicationService } from './transfer-application-service'
-import type { ConnectionLogger, DriverHostFactory } from './types'
+import type { ConnectionLeaseFactory, ConnectionLogger, DriverHostFactory } from './types'
 
 /**
  * 组合根产出的服务包。
@@ -96,6 +96,8 @@ export interface ApplicationServicesOptions {
   readonly createDriverHost?: DriverHostFactory
   /** 显式提供才启用远程连接配置与出站目标校验。 */
   readonly remoteOutboundPolicy?: RemoteOutboundPolicy
+  /** owner 组合根显式提供才启用连接租约。 */
+  readonly reserveConnection?: ConnectionLeaseFactory
 }
 
 export function createApplicationServices(
@@ -114,6 +116,8 @@ export function createApplicationServices(
       : onLogOrOptions.createDriverHost
   const remoteOutboundPolicy =
     typeof onLogOrOptions === 'function' ? undefined : onLogOrOptions.remoteOutboundPolicy
+  const reserveConnection =
+    typeof onLogOrOptions === 'function' ? undefined : onLogOrOptions.reserveConnection
   // 1) 目录：载入持久化配置，提供方言、id 序列与摘要投影。
   const catalog: ConnectionCatalog = new ConnectionCatalog(dialects, store, onLog)
 
@@ -143,7 +147,8 @@ export function createApplicationServices(
     transfers: transfers.manager,
     imports: imports.manager,
     onLog,
-    createDriverHost
+    createDriverHost,
+    reserveConnection
   })
 
   // 4) 解析器：会话 / 目录 / 游标账本之上的一层统一入口。
@@ -183,7 +188,8 @@ export function createApplicationServices(
     resolver,
     onLog,
     createDriverHost,
-    remoteOutboundPolicy
+    remoteOutboundPolicy,
+    reserveConnection
   })
 
   // 8) 元数据用例：根层来自目录的公开投影，其余走会话。
