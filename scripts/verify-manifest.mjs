@@ -68,6 +68,7 @@ export const STEPS = [
   { id: 'test:http-artifacts', title: 'HTTP artifact 上传、下载与 owner 隔离', group: 'node' },
   { id: 'test:artifact-contract', title: '远程文件 artifact handle 与 ticket 契约', group: 'node' },
   { id: 'test:remote-contract', title: '远程连接 DTO 与出站目标 allowlist', group: 'node' },
+  { id: 'test:remote-connection-flow', title: '远程连接 add/test/update 安全流程', group: 'node' },
   { id: 'test:api-surface', title: '公开 API surface golden snapshot', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },

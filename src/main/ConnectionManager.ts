@@ -23,6 +23,7 @@ import {
   type SchemaSnapshot
 } from '../core/compare'
 import type { ConnectionConfig } from '../core/dialect'
+import type { RemoteOutboundPolicy } from '../backend/contract/remote'
 import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
 import type { ConnectionSummary } from '../core/api'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
@@ -80,6 +81,8 @@ import type {
 export interface ConnectionManagerOptions {
   readonly onLog?: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** 显式提供才启用远程连接 DTO 与出站目标校验；默认桌面模式不改变。 */
+  readonly remoteOutboundPolicy?: RemoteOutboundPolicy
 }
 
 export class ConnectionManager {
@@ -98,7 +101,8 @@ export class ConnectionManager {
   ) {
     this.#services = createApplicationServices(dialects, store, {
       onLog: options.onLog,
-      createDriverHost: options.createDriverHost
+      createDriverHost: options.createDriverHost,
+      remoteOutboundPolicy: options.remoteOutboundPolicy
     })
   }
 

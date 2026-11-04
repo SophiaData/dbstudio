@@ -37,6 +37,7 @@
  */
 
 import type { DialectInfo } from '../../core/driver'
+import type { RemoteOutboundPolicy } from '../../backend/contract/remote'
 import { CompareApplicationService } from './compare-application-service'
 import { ConnectionActivityGuard } from './connection-activity-guard'
 import { ConnectionApplicationService } from './connection-application-service'
@@ -93,6 +94,8 @@ export const consoleConnectionLogger: ConnectionLogger = (level, message) => {
 export interface ApplicationServicesOptions {
   readonly onLog?: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** 显式提供才启用远程连接配置与出站目标校验。 */
+  readonly remoteOutboundPolicy?: RemoteOutboundPolicy
 }
 
 export function createApplicationServices(
@@ -109,6 +112,8 @@ export function createApplicationServices(
     typeof onLogOrOptions === 'function'
       ? driverHostFactory
       : onLogOrOptions.createDriverHost
+  const remoteOutboundPolicy =
+    typeof onLogOrOptions === 'function' ? undefined : onLogOrOptions.remoteOutboundPolicy
   // 1) 目录：载入持久化配置，提供方言、id 序列与摘要投影。
   const catalog: ConnectionCatalog = new ConnectionCatalog(dialects, store, onLog)
 
@@ -177,7 +182,8 @@ export function createApplicationServices(
     imports,
     resolver,
     onLog,
-    createDriverHost
+    createDriverHost,
+    remoteOutboundPolicy
   })
 
   // 8) 元数据用例：根层来自目录的公开投影，其余走会话。

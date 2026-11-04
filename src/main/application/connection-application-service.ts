@@ -56,6 +56,10 @@
 
 import type { ConnectionSummary } from '../../core/api'
 import type { ConnectionConfig } from '../../core/dialect'
+import {
+  validateRemoteConnectionConfig,
+  type RemoteOutboundPolicy
+} from '../../backend/contract/remote'
 import type { DialectInfo, SecretInput, TestConnectionResult } from '../../core/driver'
 import { isEmptySecret, mergeSecrets, normalizeSecret } from '../../core/driver'
 import { DriverHostHandle } from '../DriverHostHandle'
@@ -94,6 +98,8 @@ export interface ConnectionApplicationContext {
   readonly resolver: ConnectionResolver
   readonly onLog: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
+  /** 远程组合根显式注入后才启用连接目标校验；桌面端未配置时保持历史语义。 */
+  readonly remoteOutboundPolicy?: RemoteOutboundPolicy
 }
 
 export class ConnectionApplicationService {
@@ -144,6 +150,7 @@ export class ConnectionApplicationService {
    * 那"先存后连"就没意义了。
    */
   async add(config: ConnectionConfig, secret?: SecretInput): Promise<ConnectionSummary> {
+    this.#validateRemoteConfig(config)
     const { catalog, sessions } = this.#ctx
     if (sessions.disposed) throw new Error('连接管理器已关闭')
     const info = catalog.findDialect(config.dialectId)
@@ -242,6 +249,7 @@ export class ConnectionApplicationService {
     config: ConnectionConfig,
     secret?: SecretInput
   ): Promise<TestConnectionResult> {
+    this.#validateRemoteConfig(config)
     const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
       dialectId: config.dialectId
     })
@@ -290,6 +298,7 @@ export class ConnectionApplicationService {
       name: config.name ?? saved.config.name,
       options: { ...saved.config.options, ...(config.options ?? {}) }
     }
+    this.#validateRemoteConfig(mergedConfig)
 
     // 方言若改了，要重新查 DialectInfo（previewTable/secretStored 依赖它）。
     const info = catalog.findDialect(mergedConfig.dialectId)
@@ -353,6 +362,16 @@ export class ConnectionApplicationService {
     return {
       connections: this.#ctx.sessions.size,
       openCursors: this.#ctx.cursors.count()
+    }
+  }
+
+  #validateRemoteConfig(config: ConnectionConfig): void {
+    const policy = this.#ctx.remoteOutboundPolicy
+    if (!policy) return
+    const result = validateRemoteConnectionConfig(config, policy)
+    if (!result.ok) {
+      const details = result.issues.map((issue) => `${issue.field || 'config'}: ${issue.message}`).join('; ')
+      throw new Error(`远程连接配置被拒绝: ${details}`)
     }
   }
 
