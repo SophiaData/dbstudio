@@ -98,10 +98,26 @@ export const BACKEND_METHOD_MANIFEST = [
 /**
  * Remote capability projection. Keep this derived from the desktop manifest so
  * adding an application method cannot silently create a second hand-written
- * route list; shell-only methods are excluded explicitly here.
+ * route list; shell-only and server-local path methods are excluded explicitly.
  */
+const REMOTE_EXCLUDED_METHODS: ReadonlySet<string> = new Set([
+  'chooseImportFile',
+  'addConnection',
+  'testConnection',
+  'updateConnection',
+  'startTransfer',
+  'getTransferProgress',
+  'cancelTransfer',
+  'waitTransfer',
+  'previewImport',
+  'startImport',
+  'getImportProgress',
+  'cancelImport',
+  'waitImport'
+])
+
 export const REMOTE_BACKEND_METHOD_MANIFEST = BACKEND_METHOD_MANIFEST.filter(
-  (item) => item.method !== 'chooseImportFile'
+  (item) => !REMOTE_EXCLUDED_METHODS.has(item.method)
 )
 
 /** 清单里出现的方法名集合（由实际元素推导，而不是手写第二份列表）。 */

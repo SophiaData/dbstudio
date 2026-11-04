@@ -38,6 +38,7 @@ import { DriverHostHandle } from '../DriverHostHandle'
 import {
   describeThrown,
   type ConnectionLogger,
+  type DriverHostFactory,
   type LiveConnection,
   type SavedConnection
 } from './types'
@@ -82,6 +83,7 @@ export interface ConnectionSessionContext {
   readonly transfers: SessionTaskGroup
   readonly imports: SessionTaskGroup
   readonly onLog: ConnectionLogger
+  readonly createDriverHost?: DriverHostFactory
 }
 
 interface ConnectingEntry {
@@ -185,7 +187,7 @@ export class ConnectionSessionService {
 
     const token = {}
     this.#sessionTokens.set(connectionId, token)
-    const host = new DriverHostHandle({
+    const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
       dialectId: saved.config.dialectId,
       onLog: (level, msg) => this.#ctx.onLog(level, msg),
       onExit: (error) => {

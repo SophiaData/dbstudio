@@ -13,7 +13,10 @@
 import type { ConnectionConfig } from '../../core/dialect'
 import type { DialectInfo } from '../../core/driver'
 import type { DriverCapabilities } from '../../core/model'
-import type { DriverHostHandle } from '../DriverHostHandle'
+import type { DriverHostHandle, DriverHostOptions } from '../DriverHostHandle'
+
+/** 驱动宿主构造器；server composition 可注入独立的脚本解析策略。 */
+export type DriverHostFactory = (options: DriverHostOptions) => DriverHostHandle
 
 /** 有活动会话（宿主进程活着）的连接。 */
 export interface LiveConnection {

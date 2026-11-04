@@ -42,6 +42,7 @@ import {
   createApplicationServices,
   type ApplicationServices
 } from './application/create-application-services'
+import type { ConnectionLogger, DriverHostFactory } from './application/types'
 import type {
   ImportPreview,
   ImportPreviewRequest,
@@ -76,6 +77,11 @@ import type {
  * 已移到 `./application/cursor-registry`。本类只负责把游标和活动会话关联。
  */
 
+export interface ConnectionManagerOptions {
+  readonly onLog?: ConnectionLogger
+  readonly createDriverHost?: DriverHostFactory
+}
+
 export class ConnectionManager {
   /**
    * 组合根创建并接线的全部用例服务。
@@ -85,8 +91,15 @@ export class ConnectionManager {
    */
   readonly #services: ApplicationServices
 
-  constructor(dialects: readonly DialectInfo[], store: ConnectionStore) {
-    this.#services = createApplicationServices(dialects, store)
+  constructor(
+    dialects: readonly DialectInfo[],
+    store: ConnectionStore,
+    options: ConnectionManagerOptions = {}
+  ) {
+    this.#services = createApplicationServices(dialects, store, {
+      onLog: options.onLog,
+      createDriverHost: options.createDriverHost
+    })
   }
 
   listDialects(): DialectInfo[] {

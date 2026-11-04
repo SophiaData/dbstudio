@@ -69,6 +69,7 @@ import type { TransferApplicationService } from './transfer-application-service'
 import {
   describeThrown,
   type ConnectionLogger,
+  type DriverHostFactory,
   type LiveConnection,
   type SavedConnection
 } from './types'
@@ -92,6 +93,7 @@ export interface ConnectionApplicationContext {
   readonly imports: ImportApplicationService
   readonly resolver: ConnectionResolver
   readonly onLog: ConnectionLogger
+  readonly createDriverHost?: DriverHostFactory
 }
 
 export class ConnectionApplicationService {
@@ -240,7 +242,9 @@ export class ConnectionApplicationService {
     config: ConnectionConfig,
     secret?: SecretInput
   ): Promise<TestConnectionResult> {
-    const host = new DriverHostHandle({ dialectId: config.dialectId })
+    const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
+      dialectId: config.dialectId
+    })
     try {
       await host.handshake
       return await host.testConnection(config, secret)

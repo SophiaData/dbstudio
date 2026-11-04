@@ -226,10 +226,49 @@ export function encodeWireValue(value: unknown): unknown {
   return value
 }
 
-/** `encodeWireValue` 的逆操作。 */
-export function decodeWireValue(value: unknown): unknown {
+/** 外部 wire 值解码的资源上限，防止恶意嵌套或节点数量拖垮进程。 */
+export interface WireDecodeLimits {
+  readonly maxDepth?: number
+  readonly maxNodes?: number
+}
+
+export const DEFAULT_WIRE_DECODE_LIMITS: Required<WireDecodeLimits> = {
+  maxDepth: 64,
+  maxNodes: 100_000
+}
+
+interface DecodeState {
+  nodes: number
+}
+
+function normalizedDecodeLimits(limits: WireDecodeLimits): Required<WireDecodeLimits> {
+  const maxDepth = limits.maxDepth ?? DEFAULT_WIRE_DECODE_LIMITS.maxDepth
+  const maxNodes = limits.maxNodes ?? DEFAULT_WIRE_DECODE_LIMITS.maxNodes
+  if (!Number.isInteger(maxDepth) || maxDepth < 1) {
+    throw new WireCodecError('wire decode maxDepth 必须是正整数')
+  }
+  if (!Number.isInteger(maxNodes) || maxNodes < 1) {
+    throw new WireCodecError('wire decode maxNodes 必须是正整数')
+  }
+  return { maxDepth, maxNodes }
+}
+
+function decodeWireValueInternal(
+  value: unknown,
+  depth: number,
+  state: DecodeState,
+  limits: Required<WireDecodeLimits>
+): unknown {
+  state.nodes += 1
+  if (state.nodes > limits.maxNodes) {
+    throw new WireCodecError(`wire 值节点数超过上限（${limits.maxNodes}）`)
+  }
+  if (depth > limits.maxDepth) {
+    throw new WireCodecError(`wire 值嵌套深度超过上限（${limits.maxDepth}）`)
+  }
+
   if (Array.isArray(value)) {
-    return value.map((item) => decodeWireValue(item))
+    return value.map((item) => decodeWireValueInternal(item, depth + 1, state, limits))
   }
   if (!isPlainObject(value)) return value
 
@@ -250,7 +289,11 @@ export function decodeWireValue(value: unknown): unknown {
     if (keys.length === 2 && tag === 'object' && isPlainObject(value['data'])) {
       const restored: Record<string, unknown> = {}
       for (const [key, nested] of Object.entries(value['data'])) {
-        assignOwn(restored, key, decodeWireValue(nested))
+        assignOwn(
+          restored,
+          key,
+          decodeWireValueInternal(nested, depth + 1, state, limits)
+        )
       }
       return restored
     }
@@ -261,9 +304,17 @@ export function decodeWireValue(value: unknown): unknown {
 
   const decoded: Record<string, unknown> = {}
   for (const [key, nested] of Object.entries(value)) {
-    assignOwn(decoded, key, decodeWireValue(nested))
+    assignOwn(decoded, key, decodeWireValueInternal(nested, depth + 1, state, limits))
   }
   return decoded
+}
+
+/** `encodeWireValue` 的逆操作；默认带深度与节点数上限。 */
+export function decodeWireValue(
+  value: unknown,
+  limits: WireDecodeLimits = DEFAULT_WIRE_DECODE_LIMITS
+): unknown {
+  return decodeWireValueInternal(value, 0, { nodes: 0 }, normalizedDecodeLimits(limits))
 }
 
 // ---- 请求 / 响应 ----
@@ -278,7 +329,10 @@ export function encodeBackendRequest(call: BackendCall): WireBackendRequest {
 }
 
 /** 校验并解码 wire 请求。 */
-export function decodeBackendRequest(payload: unknown): DecodedBackendCall {
+export function decodeBackendRequest(
+  payload: unknown,
+  limits: WireDecodeLimits = DEFAULT_WIRE_DECODE_LIMITS
+): DecodedBackendCall {
   if (!isPlainObject(payload)) {
     throw new WireCodecError('请求必须是普通对象')
   }
@@ -295,7 +349,7 @@ export function decodeBackendRequest(payload: unknown): DecodedBackendCall {
   return {
     id,
     method,
-    args: decodeWireValue(args) as readonly unknown[]
+    args: decodeWireValue(args, limits) as readonly unknown[]
   }
 }
 
@@ -316,7 +370,10 @@ export function encodeBackendResponse(response: BackendResponse): WireBackendRes
 }
 
 /** 校验并解码 wire 响应。失败载荷会先做结构校验。 */
-export function decodeBackendResponse(payload: unknown): BackendResponse {
+export function decodeBackendResponse(
+  payload: unknown,
+  limits: WireDecodeLimits = DEFAULT_WIRE_DECODE_LIMITS
+): BackendResponse {
   if (!isPlainObject(payload)) {
     throw new WireCodecError('响应必须是普通对象')
   }
@@ -335,11 +392,11 @@ export function decodeBackendResponse(payload: unknown): BackendResponse {
     return {
       id,
       ok: true,
-      value: decodeWireValue(payload['value']) as BackendTransportValue<BackendMethod>
+      value: decodeWireValue(payload['value'], limits) as BackendTransportValue<BackendMethod>
     }
   }
 
-  const error = decodeWireValue(payload['error'])
+  const error = decodeWireValue(payload['error'], limits)
   if (!isBackendErrorPayload(error)) {
     throw new WireCodecError('失败响应的 error 不是合法 BackendErrorPayload')
   }
@@ -354,8 +411,11 @@ export function stringifyBackendRequest(call: BackendCall): string {
 }
 
 /** `decodeBackendRequest(JSON.parse(text))`；JSON 语法错误包成 `WireCodecError`。 */
-export function parseBackendRequest(text: string): DecodedBackendCall {
-  return decodeBackendRequest(parseJson(text, '请求'))
+export function parseBackendRequest(
+  text: string,
+  limits: WireDecodeLimits = DEFAULT_WIRE_DECODE_LIMITS
+): DecodedBackendCall {
+  return decodeBackendRequest(parseJson(text, '请求'), limits)
 }
 
 /** `JSON.stringify(encodeBackendResponse(response))`。 */
@@ -364,8 +424,11 @@ export function stringifyBackendResponse(response: BackendResponse): string {
 }
 
 /** `decodeBackendResponse(JSON.parse(text))`；JSON 语法错误包成 `WireCodecError`。 */
-export function parseBackendResponse(text: string): BackendResponse {
-  return decodeBackendResponse(parseJson(text, '响应'))
+export function parseBackendResponse(
+  text: string,
+  limits: WireDecodeLimits = DEFAULT_WIRE_DECODE_LIMITS
+): BackendResponse {
+  return decodeBackendResponse(parseJson(text, '响应'), limits)
 }
 
 function parseJson(text: string, label: string): unknown {

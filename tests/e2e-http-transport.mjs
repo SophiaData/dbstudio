@@ -224,6 +224,13 @@ try {
     assert.throws(() => decodeBackendResponse({ id: '1', ok: true }), WireCodecError)
   })
 
+  await check('wire decode 拒绝过深或过宽的外部值', () => {
+    let nested = 0
+    for (let index = 0; index < 70; index += 1) nested = [nested]
+    assert.throws(() => decodeWireValue(nested), /嵌套深度超过上限/)
+    assert.throws(() => decodeWireValue(Array.from({ length: 101 }, () => 0), { maxNodes: 100 }), /节点数超过上限/)
+  })
+
   console.log('\n[2] dispatcher：manifest 路由与结构化错误')
 
   const dispatch = createBackendDispatcher({ api: fakeApi })
@@ -360,8 +367,12 @@ try {
   await check('manifest 之外的属性不存在，invoke 也拒绝', async () => {
     assert.equal(client.dropDatabase, undefined)
     assert.equal(client.chooseImportFile, undefined)
+    assert.equal(client.startTransfer, undefined)
+    assert.equal(client.previewImport, undefined)
     assert.equal('dropDatabase' in client, false)
     assert.equal('chooseImportFile' in client, false)
+    assert.equal('startTransfer' in client, false)
+    assert.equal('previewImport' in client, false)
     assert.equal('listConnections' in client, true)
     await assert.rejects(
       () => client.invoke('dropDatabase', []),

@@ -16,10 +16,10 @@
  *
  * ===== 能力面 =====
  *
- * 默认只允许 `BACKEND_METHOD_MANIFEST` 里的方法。方法名来自请求体，
- * 因此**必须**先查白名单再取 `api[method]`；否则一个任意字符串就能摸到
- * 对象的内部属性（原型链 / 构造器）。`methods` 选项用于测试或按需收窄，
- * 但它只会**减少**能力面，不会扩大。
+ * 默认只允许 `BACKEND_METHOD_MANIFEST` 里的方法；HTTP server 可以注入独立的
+ * remote manifest。方法名来自请求体，因此**必须**先查白名单再取 `api[method]`；
+ * 否则一个任意字符串就能摸到对象的内部属性（原型链 / 构造器）。`methods`
+ * 选项用于测试或按需收窄，但它只会**减少**能力面，不会扩大 manifest。
  *
  * ===== 失败 =====
  *
@@ -29,36 +29,62 @@
  * 而不是依赖状态码或字符串匹配。
  */
 
-import type { BackendApi, BackendMethod } from '../contract/backend'
+import type {
+  BackendApi,
+  BackendMethod,
+  RemoteBackendApi
+} from '../contract/backend'
 import type { BackendErrorPayload } from '../contract/errors'
 import { toBackendErrorPayload } from '../contract/errors'
-import { BACKEND_METHOD_MANIFEST } from '../contract/method-manifest'
-import type { BackendResponse } from './transport'
+import {
+  BACKEND_METHOD_MANIFEST,
+  type BackendMethodManifestEntry
+} from '../contract/method-manifest'
+import type {
+  BackendRequestContext,
+  BackendResponse
+} from './transport'
 import {
   decodeBackendRequest,
   encodeBackendResponse,
-  WireCodecError
+  WireCodecError,
+  type WireDecodeLimits
 } from './wire-codec'
 
 /** dispatcher 配置。 */
+export type BackendDispatcherApi = BackendApi | RemoteBackendApi
+export type BackendApiResolver = (
+  context: BackendRequestContext
+) => BackendDispatcherApi
+
 export interface BackendDispatcherOptions {
-  /** 真正的后端实现（主进程 application services / 测试替身）。 */
-  readonly api: BackendApi
+  /** 静态后端实现，或按请求身份选择 owner scope 的解析器。 */
+  readonly api: BackendDispatcherApi | BackendApiResolver
   /**
-   * 允许的方法名集合。缺省用 `BACKEND_METHOD_MANIFEST`。
-   *
-   * 传入的集合不能扩大能力面：每个方法仍需在 manifest 中，否则视为配置错误。
+   * 能力面清单。缺省使用 desktop manifest；HTTP server 应显式传入
+   * `REMOTE_BACKEND_METHOD_MANIFEST`，防止误暴露 shell/path capability。
+   */
+  readonly manifest?: readonly Pick<BackendMethodManifestEntry, 'method'>[]
+  /**
+   * 允许的方法名集合。缺省使用 manifest 中的全部方法。
+   * 传入的集合只能继续收窄能力面，不能扩大 manifest。
    */
   readonly methods?: ReadonlySet<string> | readonly string[]
+  /** 外部请求的 wire 解码资源上限。 */
+  readonly decodeLimits?: WireDecodeLimits
 }
 
 /**
- * 一次分派：输入未知 wire 请求，输出带 id 的响应信封。
+ * 一次分派：输入 wire 请求与可选 request context，输出带 id 的响应信封。
  *
- * 返回 `BackendResponse` 而不是裸 `BackendEnvelope`，是为了让响应能直接
- * 走 `encodeBackendResponse` / `JSON.stringify`，并与请求 id 配对。
+ * context 未提供时由 dispatcher 创建一个没有 principal 的本地上下文，保持
+ * 现有 `dispatch(request)` 调用兼容；需要认证和 owner isolation 的 server
+ * 必须显式传入 context。
  */
-export type BackendDispatcher = (request: unknown) => Promise<BackendResponse>
+export type BackendDispatcher = (
+  request: unknown,
+  context?: BackendRequestContext
+) => Promise<BackendResponse>
 
 /** 请求没有任何可用 id 时，响应仍要有一个可解码的占位 id。 */
 const INVALID_REQUEST_ID = 'invalid-request'
@@ -100,30 +126,40 @@ function invalidRequest(id: string, error: unknown): BackendResponse {
 export function createBackendDispatcher(
   options: BackendDispatcherOptions
 ): BackendDispatcher {
-  const api = options.api
+  const manifest = options.manifest ?? BACKEND_METHOD_MANIFEST
   const requested =
     options.methods === undefined
-      ? BACKEND_METHOD_MANIFEST.map((entry) => entry.method)
+      ? manifest.map((entry) => entry.method)
       : Array.from(options.methods)
 
   // 只允许 manifest 中的方法；`methods` 只能收窄，不能新增。
-  const manifestMethods = new Set<string>(
-    BACKEND_METHOD_MANIFEST.map((entry) => entry.method)
-  )
+  const manifestMethods = new Set<string>(manifest.map((entry) => entry.method))
   const allowed = new Set<string>(
     requested.filter((method) => manifestMethods.has(method))
   )
+  const resolveApi: BackendApiResolver =
+    typeof options.api === 'function'
+      ? (options.api as BackendApiResolver)
+      : () => options.api as BackendDispatcherApi
 
-  return async (request: unknown): Promise<BackendResponse> => {
+  return async (
+    request: unknown,
+    suppliedContext?: BackendRequestContext
+  ): Promise<BackendResponse> => {
     const fallbackId = requestIdOf(request)
 
     let decoded
     try {
-      decoded = decodeBackendRequest(request)
+      decoded = decodeBackendRequest(request, options.decodeLimits)
     } catch (error) {
       return invalidRequest(fallbackId, error)
     }
 
+    const context: BackendRequestContext = suppliedContext ?? {
+      requestId: decoded.id,
+      signal: new AbortController().signal,
+      receivedAt: Date.now()
+    }
     const method = decoded.method
     if (!allowed.has(method)) {
       return {
@@ -134,6 +170,20 @@ export function createBackendDispatcher(
           message: `不支持的后端方法：${method}`,
           method: manifestMethods.has(method) ? (method as BackendMethod) : undefined
         }
+      }
+    }
+
+    let api: BackendDispatcherApi
+    try {
+      api = resolveApi(context)
+    } catch (error) {
+      return {
+        id: decoded.id,
+        ok: false,
+        error: toBackendErrorPayload(error, {
+          method: method as BackendMethod,
+          callId: decoded.id
+        })
       }
     }
 
@@ -184,8 +234,11 @@ export function createBackendDispatcher(
  */
 export function createJsonBackendDispatcher(
   dispatch: BackendDispatcher
-): (body: string) => Promise<string> {
-  return async (body: string): Promise<string> => {
+): (body: string, context?: BackendRequestContext) => Promise<string> {
+  return async (
+    body: string,
+    context?: BackendRequestContext
+  ): Promise<string> => {
     let request: unknown
     try {
       request = JSON.parse(body)
@@ -197,7 +250,7 @@ export function createJsonBackendDispatcher(
       return JSON.stringify({ id: INVALID_REQUEST_ID, ok: false, error })
     }
 
-    const response = await dispatch(request)
+    const response = await dispatch(request, context)
     return JSON.stringify(encodeBackendResponse(response))
   }
 }

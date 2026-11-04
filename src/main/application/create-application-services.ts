@@ -49,7 +49,7 @@ import { MetadataApplicationService } from './metadata-application-service'
 import { MutationApplicationService } from './mutation-application-service'
 import { QueryApplicationService } from './query-application-service'
 import { TransferApplicationService } from './transfer-application-service'
-import type { ConnectionLogger } from './types'
+import type { ConnectionLogger, DriverHostFactory } from './types'
 
 /**
  * 组合根产出的服务包。
@@ -90,11 +90,25 @@ export const consoleConnectionLogger: ConnectionLogger = (level, message) => {
  * @param store    连接配置存储；构造期只要求 `listConnections()` 可用
  * @param onLog    日志出口；默认与拆分前完全一致
  */
+export interface ApplicationServicesOptions {
+  readonly onLog?: ConnectionLogger
+  readonly createDriverHost?: DriverHostFactory
+}
+
 export function createApplicationServices(
   dialects: readonly DialectInfo[],
   store: ConnectionCatalogStore,
-  onLog: ConnectionLogger = consoleConnectionLogger
+  onLogOrOptions: ConnectionLogger | ApplicationServicesOptions = consoleConnectionLogger,
+  driverHostFactory?: DriverHostFactory
 ): ApplicationServices {
+  const onLog =
+    typeof onLogOrOptions === 'function'
+      ? onLogOrOptions
+      : onLogOrOptions.onLog ?? consoleConnectionLogger
+  const createDriverHost =
+    typeof onLogOrOptions === 'function'
+      ? driverHostFactory
+      : onLogOrOptions.createDriverHost
   // 1) 目录：载入持久化配置，提供方言、id 序列与摘要投影。
   const catalog: ConnectionCatalog = new ConnectionCatalog(dialects, store, onLog)
 
@@ -123,7 +137,8 @@ export function createApplicationServices(
     cursors,
     transfers: transfers.manager,
     imports: imports.manager,
-    onLog
+    onLog,
+    createDriverHost
   })
 
   // 4) 解析器：会话 / 目录 / 游标账本之上的一层统一入口。
@@ -161,7 +176,8 @@ export function createApplicationServices(
     transfers,
     imports,
     resolver,
-    onLog
+    onLog,
+    createDriverHost
   })
 
   // 8) 元数据用例：根层来自目录的公开投影，其余走会话。

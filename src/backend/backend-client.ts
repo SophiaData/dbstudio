@@ -17,6 +17,25 @@ import type { DbStudioApi } from '../core/api'
 import type { BackendApi } from './contract/backend'
 
 export type {
+  ArtifactApi,
+  ArtifactDownloadTicket,
+  ArtifactId,
+  ArtifactMetadata,
+  ArtifactPurpose,
+  ArtifactReference,
+  ArtifactStatus,
+  ArtifactUploadTicket,
+  CreateArtifactUploadRequest,
+  RemoteExportArtifactOutput,
+  RemoteImportArtifactInput
+} from './contract/artifact'
+export {
+  isArtifactId,
+  isArtifactReference,
+  isSha256
+} from './contract/artifact'
+
+export type {
   BackendApi,
   BackendArgs,
   BackendMethod,
@@ -51,6 +70,8 @@ export type {
   BackendCall,
   BackendCallOptions,
   BackendFailureResponse,
+  BackendPrincipal,
+  BackendRequestContext,
   BackendResponse,
   BackendSuccessResponse,
   BackendTransportValue,
@@ -74,12 +95,15 @@ export {
   createJsonBackendDispatcher
 } from './transport/dispatcher'
 export type {
+  BackendApiResolver,
   BackendDispatcher,
+  BackendDispatcherApi,
   BackendDispatcherOptions
 } from './transport/dispatcher'
 export {
   base64ToBytes,
   bytesToBase64,
+  DEFAULT_WIRE_DECODE_LIMITS,
   decodeBackendRequest,
   decodeBackendResponse,
   decodeWireValue,
@@ -97,7 +121,8 @@ export type {
   WireBackendFailureResponse,
   WireBackendRequest,
   WireBackendResponse,
-  WireBackendSuccessResponse
+  WireBackendSuccessResponse,
+  WireDecodeLimits
 } from './transport/wire-codec'
 export {
   BACKEND_METHOD_MANIFEST,

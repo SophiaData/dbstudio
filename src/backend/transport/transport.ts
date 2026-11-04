@@ -35,6 +35,32 @@ export type TransportChannel = 'electron' | 'tauri' | 'http'
 export type BackendBinaryPayload = Uint8Array
 
 /**
+ * 请求方的最小身份信息。
+ *
+ * transport 只负责携带身份，不解释认证协议。HTTP server 可以把 JWT、mTLS
+ * 或反向代理认证结果投影成这个稳定形状，application scope 再用 `id`
+ * 做资源 owner 选择。
+ */
+export interface BackendPrincipal {
+  readonly id: string
+  readonly roles?: readonly string[]
+}
+
+/**
+ * 一次后端请求的运行时上下文。
+ *
+ * 这组信息不会进入业务方法参数，避免为 Electron/HTTP/Tauri 分别复制一套
+ * API 签名；dispatcher 和 server composition 通过它完成请求关联、身份隔离
+ * 和断连取消。
+ */
+export interface BackendRequestContext {
+  readonly requestId: string
+  readonly principal?: BackendPrincipal
+  readonly signal: AbortSignal
+  readonly receivedAt: number
+}
+
+/**
  * transport 可以承载的返回值。
  *
  * 大多数方法返回 JSON 可序列化的值；二进制结果（未来的导出/下载）允许

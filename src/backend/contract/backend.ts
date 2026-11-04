@@ -5,8 +5,9 @@
  *
  * `DbStudioApi` 描述的是「preload 通过 contextBridge 暴露了什么」，
  * 它天然带着 Electron 时代的形状。渲染层真正需要的其实是更高一层的语义：
- * 「这个应用能做哪些事」。两者目前完全重合，但未来不是——例如 HTTP
- * transport 没有 `chooseImportFile`（那是本机对话框），却可能有批量上传接口。
+ * 「这个应用能做哪些事」。两者目前完全重合，但 remote transport 的能力面更窄：
+ * 它没有 `chooseImportFile`，也不能直接接收服务端本机路径；未来文件能力会由
+ * upload ticket / artifact contract 单独提供。
  *
  * 所以这里先把 `DbStudioApi` **原样**收编成 `BackendApi`：
  *
@@ -19,6 +20,21 @@
  */
 
 import type { DbStudioApi } from '../../core/api'
+
+export type {
+  RemoteConnectionConfig,
+  RemoteConnectionOptions,
+  RemoteOptionValue,
+  RemoteOutboundPolicy,
+  RemoteOutboundTarget,
+  RemoteValidationIssue,
+  RemoteValidationResult
+} from './remote'
+export {
+  isRemoteConnectionConfig,
+  isRemoteOutboundTargetAllowed,
+  validateRemoteConnectionConfig
+} from './remote'
 
 /**
  * 应用后端契约。
@@ -37,9 +53,37 @@ export type DesktopBackendApi = BackendApi
  *
  * HTTP/Tauri server 没有当前桌面的原生文件选择器，也不应接收服务端本机
  * 路径作为远程文件能力；远程导入/导出将在 upload/download artifact 契约
- * 中单独定义。因此它从 application API 中显式排除 shell-only 方法。
+ * 中单独定义。因此它从 application API 中显式排除 shell-only 与服务端路径型方法。
  */
-export type RemoteBackendApi = Omit<BackendApi, 'chooseImportFile'>
+/**
+ * 仍依赖服务端本机文件路径的 desktop-only 方法。
+ *
+ * HTTP/Tauri remote capability 后续会通过 upload ticket / artifact handle
+ * 提供文件能力，因此不能把 sourcePath / destinationPath 语义直接暴露到
+ * 远程方法面。任务生命周期也暂时跟随这组方法一起隐藏，避免远程客户端
+ * 获得无法安全创建、却可以探测本机任务状态的半套能力。
+ */
+type DesktopPathFileMethod =
+  | 'startTransfer'
+  | 'getTransferProgress'
+  | 'cancelTransfer'
+  | 'waitTransfer'
+  | 'previewImport'
+  | 'startImport'
+  | 'getImportProgress'
+  | 'cancelImport'
+  | 'waitImport'
+
+/**
+ * 连接配置和凭据只允许由受信任的桌面端管理；远程客户端不能让服务端
+ * 读取本机文件、探测任意网络目标或更新已有连接配置。
+ */
+type RemoteConnectionManagementMethod = 'addConnection' | 'testConnection' | 'updateConnection'
+
+export type RemoteBackendApi = Omit<
+  BackendApi,
+  'chooseImportFile' | DesktopPathFileMethod | RemoteConnectionManagementMethod
+>
 
 /** 后端方法名。transport 用它做路由与白名单校验。 */
 export type BackendMethod = keyof BackendApi

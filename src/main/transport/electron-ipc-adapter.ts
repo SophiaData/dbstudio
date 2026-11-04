@@ -43,6 +43,7 @@ import type { BackendMethod } from '../../backend/contract/backend'
 import type { DbStudioApi } from '../../core/api'
 import type { ConnectionManager } from '../ConnectionManager'
 import type { SqlLibraryStore } from '../SqlLibraryStore'
+import { createApplicationApi } from '../application/create-application-api'
 
 /**
  * 主进程侧的 API 面。
@@ -113,87 +114,7 @@ export function registerElectronIpc(options: ElectronIpcAdapterOptions): void {
   const { getManager, getSqlLibrary, chooseImportFile: chooseImportFileShell } = options
 
   const api: MainApi = {
-    listDialects: async () => getManager().listDialects(),
-    listConnections: async () => getManager().list(),
-    addConnection: async (config, secret) => getManager().add(config, secret),
-    connectConnection: async (connectionId) => getManager().connectConnection(connectionId),
-    disconnectConnection: async (connectionId) =>
-      getManager().disconnectConnection(connectionId),
-    removeConnection: async (connectionId) => getManager().remove(connectionId),
-    testConnection: async (config, secret) => getManager().testConnection(config, secret),
-    listChildren: async (nodeId) => getManager().listChildren(nodeId),
-    describeTable: async (tableNodeId) => getManager().describeTable(tableNodeId),
-    captureSchemaSnapshot: async (connectionId, schema) =>
-      getManager().captureSchemaSnapshot(connectionId, schema),
-    compareTableData: async (request) => getManager().compareTableData(request),
-
-    // 结果集四个通道。它们的耗时量级与元数据方法完全不同：
-    // 上面几个是毫秒级元数据查询，这几个跑的是用户 SQL（可能几十秒）。
-    // 超时策略在 DriverHostHandle 里分开（见 RESULT_SET_TIMEOUT_MS）。
-    runQuery: async (nodeId, sql, queryOptions) =>
-      getManager().runQuery(nodeId, sql, queryOptions),
-    executeStatement: async (nodeId, sql, queryOptions) =>
-      getManager().executeStatement(nodeId, sql, queryOptions),
-    explain: async (nodeId, sql) => getManager().explain(nodeId, sql),
-    fetchResultPage: async (cursorId, offset, limit) =>
-      getManager().fetchResultPage(cursorId, offset, limit),
-    closeCursor: async (cursorId) => getManager().closeCursor(cursorId),
-    previewTable: async (nodeId, limit) => getManager().previewTable(nodeId, limit),
-    tableSelectSql: async (nodeId) => getManager().tableSelectSql(nodeId),
-
-    // 在线编辑与事务。applyEdits **不自动提交**：提交时机由 UI 决定。
-    applyEdits: async (tableNodeId, updates) =>
-      getManager().applyEdits(tableNodeId, updates),
-    commitTransaction: async (nodeId) => getManager().commitTransaction(nodeId),
-    rollbackTransaction: async (nodeId) => getManager().rollbackTransaction(nodeId),
-    transactionState: async (nodeId) => getManager().transactionState(nodeId),
-
-    // 增删与完整取值。共享 60s：写入可能慢，countRows 在大表上是全表扫描。
-    insertRow: async (tableNodeId, values) => getManager().insertRow(tableNodeId, values),
-    deleteRows: async (tableNodeId, keys) => getManager().deleteRows(tableNodeId, keys),
-    countRows: async (tableNodeId) => getManager().countRows(tableNodeId),
-    fetchCellValue: async (cursorId, rowIndex, columnIndex) =>
-      getManager().fetchCellValue(cursorId, rowIndex, columnIndex),
-
-    // DDL 与编辑连接。DDL 可能因锁等待而慢，沿用 60s。
-    createTable: async (connectionId, spec) => getManager().createTable(connectionId, spec),
-    dropTable: async (nodeId) => getManager().dropTable(nodeId),
-    createView: async (connectionId, viewName, selectSql) =>
-      getManager().createView(connectionId, viewName, selectSql),
-    dropView: async (nodeId) => getManager().dropView(nodeId),
-    renameTable: async (nodeId, newName) => getManager().renameTable(nodeId, newName),
-
-    // 取消按节点找到所属连接，交给宿主进程的 adapter
-    // （PG 真取消，SQLite 返回 false）。
-    cancelQuery: async (nodeId, signalId) => getManager().cancelQuery(nodeId, signalId),
-    updateConnection: async (connectionId, config, secret) =>
-      getManager().updateConnection(connectionId, config, secret),
-
-    listSqlLibrary: async () => getSqlLibrary().snapshot(),
-    recordSqlHistory: async (input) => {
-      const history = getSqlLibrary()
-      const manager = getManager()
-      // 历史要保存连接名快照：连接被删除后仍能读懂这条记录。
-      const connection = manager.list().find((item) => item.id === input.connectionId)
-      return history.record(input, connection?.name ?? '（已删除的连接）')
-    },
-    saveSql: async (id, name, sql) => getSqlLibrary().save(id, name, sql),
-    removeSavedSql: async (id) => getSqlLibrary().removeSaved(id),
-    clearSqlHistory: async () => getSqlLibrary().clearHistory(),
-
-    // 流式导出：任务在后台跑，渲染进程只拿进度。
-    startTransfer: async (request) => getManager().startTransfer(request),
-    getTransferProgress: async (taskId) => getManager().getTransferProgress(taskId) ?? null,
-    cancelTransfer: async (taskId) => getManager().cancelTransfer(taskId),
-    waitTransfer: async (taskId) => getManager().waitTransfer(taskId),
-
-    // CSV 导入：CSV 内容只在主进程与驱动宿主之间流转。
-    previewImport: async (request) => getManager().previewImport(request),
-    startImport: async (request) => getManager().startImport(request),
-    getImportProgress: async (taskId) => getManager().getImportProgress(taskId) ?? null,
-    cancelImport: async (taskId) => getManager().cancelImport(taskId),
-    waitImport: async (taskId) => getManager().waitImport(taskId),
-
+    ...createApplicationApi({ getManager, getSqlLibrary }),
     // 对外契约仍然是零参；sender 只用于绑定对话框父窗口。
     chooseImportFile: async (sender) => chooseImportFileShell(sender)
   }
