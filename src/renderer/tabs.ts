@@ -26,7 +26,8 @@
  * 超过即中止并提示改用 SQL 导出——**明确告知限制，而不是让用户以为能导 100 万行**。
  */
 
-import { NodeId, type DbStudioApi } from '../core/api'
+import { NodeId } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import type { ObjectRef, TableDescription } from '../core/model'
 import type { QueryOptions, QueryResult, ResultColumn, ResultPage, StatementResult } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
@@ -126,7 +127,7 @@ export interface ResultTabsCallbacks {
  * 的内部工具条里——网格内部工具条归 grid.ts 管，我们不动它）。
  */
 export class ResultTabs {
-  readonly #api: DbStudioApi
+  readonly #api: BackendClient
   readonly #cb: ResultTabsCallbacks
 
   /** 标签栏（横向可滚动）。 */
@@ -148,7 +149,7 @@ export class ResultTabs {
     stackEl: HTMLElement,
     emptyEl: HTMLElement,
     exportAllBtn: HTMLButtonElement,
-    api: DbStudioApi,
+    api: BackendClient,
     cb: ResultTabsCallbacks
   ) {
     this.#barEl = barEl

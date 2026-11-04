@@ -31,7 +31,7 @@ export function registerBuiltinDrivers(registry: DriverRegistry): void {
   // 只浏览的非 SQL 数据源：测试连接 + 树浏览，SQL 方法一律 unsupported_method。
   registry.register(createRedisAdapter, REDIS_INFO)
   registry.register(createKafkaAdapter, KAFKA_INFO)
-  // 第三个 SQL 方言：MySQL / MariaDB（当前为只读 + 元数据阶段）。
+  // 第三个 SQL 方言：MySQL / MariaDB。
   registry.register(createMysqlAdapter, MYSQL_INFO)
 }
 

@@ -710,17 +710,268 @@ export type RpcErrorCode =
   | 'internal'
 
 /**
+ * RPC 远端失败的本地 Error 表示。
+ *
+ * 不能只拼成 `${code}: ${message}`：那样穿过 main transport 后，错误码
+ * 会退化成 `internal`，调用方无法区分参数错误、能力不支持和连接故障。
+ */
+export class DriverRpcError extends Error {
+  readonly code: RpcErrorCode
+
+  constructor(error: RpcError) {
+    super(error.message)
+    this.name = 'DriverRpcError'
+    this.code = error.code
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 版本化握手契约
+//
+// 这几个常量是**主进程、SDK、驱动宿主三方唯一的事实来源**。
+// 以前 SDK 在 `sdk/src/version.ts` 里自己定义了一份，宿主则只发一个
+// 自由格式的 `adapterVersion` 字符串——两边永远不会因为版本对不上而报错，
+// 只会在调用某个方法时才以「字段是 undefined」的形式爆出来。
+// 现在宿主在握手帧里显式声明版本，两侧客户端在**使用宿主之前**校验。
+// ---------------------------------------------------------------------------
+
+/**
+ * 握手协议版本。
+ *
+ * 它与驱动 API 版本分开，是因为两者的变更节奏不同：
+ *   - 传输帧形状（字段名、事件/响应区分方式）变了 → 提升它；
+ *   - 只是新增 RPC 方法或 adapter 接口字段 → 提升 `DRIVER_API_VERSION`。
+ *
+ * 这是**精确匹配**的版本：宿主与客户端必须完全一致。协议层不做
+ * 「新版本兼容旧版本」的猜测——猜测失败的表现是静默错读帧。
+ */
+export const HANDSHAKE_PROTOCOL_VERSION = 1 as const
+
+/**
+ * 驱动适配器接口 / RPC 方法集版本。
+ *
+ * 宿主与客户端必须完全一致。新增可选字段不提升版本；
+ * 删除方法、改变既有参数/返回值的含义时才提升。
+ */
+export const DRIVER_API_VERSION = 1 as const
+
+/** 元数据结构（ObjectRef / TableDescription 等）的版本。 */
+export const METADATA_SCHEMA_VERSION = 1 as const
+
+/** 传输契约（TransferSource / ImportBatch 等）的版本。 */
+export const TRANSFER_SCHEMA_VERSION = 1 as const
+
+/**
+ * 以上契约的整体版本，供调用方做「整体兼容性」的快速判断。
+ *
+ * 它不替代细分版本：某个 schema 单独演进时，细分版本会先变，
+ * 这个整体版本用于对外声明「这一代契约」。
+ */
+export const SDK_CONTRACT_VERSION = 1 as const
+
+/**
  * 握手信息：宿主进程启动后主动发第一帧，
  * 让主进程确认「这个进程是谁、支持什么」，避免盲发请求。
+ *
+ * ===== 为什么版本字段是「可选」的 =====
+ *
+ * 老宿主（以及测试里的 fake 宿主）不会带这些字段。把它们声明成必填会让
+ * 类型层与旧实现直接冲突，而运行时的旧宿主依然存在。可选 + 校验时按
+ * 「legacy 兼容」处理，是既能演进又不破坏既有部署的折中：
+ *   - 新宿主：发送全部版本字段，客户端严格校验；
+ *   - 老宿主：字段缺失，客户端接受但记录 warning，行为与改造前一致。
+ *
+ * 客户端**不能**因为字段缺失就拒绝——那会把升级顺序变成强耦合。
  */
 export interface RpcHandshake {
   readonly kind: 'handshake'
   readonly dialectId: string
+  /** 适配器实现版本（自由格式，供人排查；兼容性判断请用下面的数字版本）。 */
   readonly adapterVersion: string
+  /** 握手协议版本，见 `HANDSHAKE_PROTOCOL_VERSION`。 */
+  readonly protocolVersion?: number
+  /** 驱动 API 版本，见 `DRIVER_API_VERSION`。 */
+  readonly driverApiVersion?: number
+  /** 元数据 schema 版本，见 `METADATA_SCHEMA_VERSION`。 */
+  readonly metadataSchemaVersion?: number
+  /** 传输 schema 版本，见 `TRANSFER_SCHEMA_VERSION`。 */
+  readonly transferSchemaVersion?: number
+  /** 整体契约版本，见 `SDK_CONTRACT_VERSION`。 */
+  readonly sdkContractVersion?: number
   readonly pid: number
   /** 宿主进程实际运行的 Node 版本，用于排查「内置模块不可用」类问题。 */
   readonly nodeVersion: string
   readonly platform: string
+}
+
+/** 客户端对握手帧的期望值。未提供的字段不参与校验。 */
+export interface HandshakeExpectation {
+  readonly dialectId?: string
+  readonly protocolVersion?: number
+  readonly driverApiVersion?: number
+  readonly metadataSchemaVersion?: number
+  readonly transferSchemaVersion?: number
+  readonly sdkContractVersion?: number
+}
+
+/** 握手校验失败的机器可判定原因。 */
+export type HandshakeErrorCode =
+  | 'malformed_handshake'
+  | 'dialect_mismatch'
+  | 'protocol_version_mismatch'
+  | 'driver_api_version_mismatch'
+  | 'metadata_schema_version_mismatch'
+  | 'transfer_schema_version_mismatch'
+  | 'sdk_contract_version_mismatch'
+
+/**
+ * 握手不兼容错误。
+ *
+ * 带上 `code` 是为了让上层（应用 UI、SDK 调用方）能区分「连错方言」与
+ * 「装了一个不兼容的宿主」——两者的处置方式完全不同，而仅靠 message
+ * 做字符串匹配在本地化之后必然失效。
+ */
+export class HandshakeValidationError extends Error {
+  constructor(
+    readonly code: HandshakeErrorCode,
+    message: string,
+    readonly expected: HandshakeExpectation = {},
+    readonly handshake?: Partial<RpcHandshake>
+  ) {
+    super(message)
+    this.name = 'HandshakeValidationError'
+  }
+}
+
+/** 跨 bundle 边界也能识别握手错误（不依赖 `instanceof`）。 */
+export function isHandshakeValidationError(error: unknown): error is HandshakeValidationError {
+  if (error instanceof HandshakeValidationError) return true
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    (error as { name?: unknown }).name === 'HandshakeValidationError'
+  )
+}
+
+export interface ValidatedHandshake {
+  readonly handshake: RpcHandshake
+  /** 宿主没有声明任何数字版本字段（老宿主）。 */
+  readonly legacy: boolean
+  /** 非致命提示，例如「宿主未声明版本字段，按 legacy 接受」。 */
+  readonly warnings: readonly string[]
+}
+
+const HANDSHAKE_VERSION_FIELDS = [
+  ['protocolVersion', 'protocol_version_mismatch', '握手协议版本', HANDSHAKE_PROTOCOL_VERSION],
+  ['driverApiVersion', 'driver_api_version_mismatch', '驱动 API 版本', DRIVER_API_VERSION],
+  ['metadataSchemaVersion', 'metadata_schema_version_mismatch', '元数据 schema 版本', METADATA_SCHEMA_VERSION],
+  ['transferSchemaVersion', 'transfer_schema_version_mismatch', '传输 schema 版本', TRANSFER_SCHEMA_VERSION],
+  ['sdkContractVersion', 'sdk_contract_version_mismatch', 'SDK 契约版本', SDK_CONTRACT_VERSION]
+] as const
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+/**
+ * 校验一帧握手，返回可用的 `RpcHandshake`，不兼容时抛
+ * `HandshakeValidationError`。
+ *
+ * 校验顺序刻意让**最容易排查的错**先报：
+ *   1. 帧形状（不是对象 / kind 不对 / 缺 dialectId）
+ *   2. 方言不匹配（最常见的配置错误：启动参数与连接配置不一致）
+ *   3. 版本不匹配（部署错误：SDK 与宿主来自不同发布批次）
+ *
+ * 版本字段缺失时按 legacy 接受并返回 warning。这是为了兼容老宿主；
+ * 新宿主必须发送全部字段（见 `src/driver-host/index.ts` 的 `#handshake`）。
+ */
+export function validateHandshake(
+  frame: unknown,
+  expectation: HandshakeExpectation = {}
+): ValidatedHandshake {
+  if (typeof frame !== 'object' || frame === null) {
+    throw new HandshakeValidationError(
+      'malformed_handshake',
+      `驱动宿主握手失败：期望对象帧，收到 ${frame === null ? 'null' : typeof frame}`,
+      expectation
+    )
+  }
+  const candidate = frame as Partial<RpcHandshake>
+  if (candidate.kind !== 'handshake') {
+    throw new HandshakeValidationError(
+      'malformed_handshake',
+      `驱动宿主握手失败：kind 不是 "handshake"（收到 ${String(candidate.kind)}）`,
+      expectation,
+      candidate
+    )
+  }
+  if (typeof candidate.dialectId !== 'string' || candidate.dialectId.length === 0) {
+    throw new HandshakeValidationError(
+      'malformed_handshake',
+      '驱动宿主握手失败：缺少非空的 dialectId',
+      expectation,
+      candidate
+    )
+  }
+  if (typeof candidate.adapterVersion !== 'string' || candidate.adapterVersion.length === 0) {
+    throw new HandshakeValidationError(
+      'malformed_handshake',
+      `驱动宿主握手失败：缺少 adapterVersion（dialect=${candidate.dialectId}）`,
+      expectation,
+      candidate
+    )
+  }
+  if (expectation.dialectId !== undefined && candidate.dialectId !== expectation.dialectId) {
+    throw new HandshakeValidationError(
+      'dialect_mismatch',
+      `驱动宿主握手失败：方言不匹配（期望 "${expectation.dialectId}"，宿主报告 "${candidate.dialectId}"）。` +
+        `请检查启动参数 --dialect 与连接配置是否一致。`,
+      expectation,
+      candidate
+    )
+  }
+
+  const warnings: string[] = []
+  let sawVersion = false
+
+  for (const [field, code, label, fallback] of HANDSHAKE_VERSION_FIELDS) {
+    const actual = candidate[field]
+    const expected = expectation[field] ?? fallback
+    if (actual === undefined) {
+      if (expectation[field] !== undefined) {
+        warnings.push(`宿主未声明 ${field}（${label}），按 legacy 兼容模式接受`)
+      }
+      continue
+    }
+    sawVersion = true
+    if (!isPositiveInteger(actual)) {
+      throw new HandshakeValidationError(
+        code,
+        `驱动宿主握手失败：${field}（${label}）不是正整数（收到 ${String(actual)}）`,
+        expectation,
+        candidate
+      )
+    }
+    if (actual !== expected) {
+      throw new HandshakeValidationError(
+        code,
+        `驱动宿主握手失败：${label}不兼容（宿主=${actual}，客户端支持=${expected}，dialect=${candidate.dialectId}）。` +
+          `SDK 与驱动宿主必须来自同一发布批次，请重新安装/重新构建后重试。`,
+        expectation,
+        candidate
+      )
+    }
+  }
+
+  if (!sawVersion) {
+    warnings.push(
+      `宿主 ${candidate.dialectId} 未声明任何版本字段（legacy 握手），` +
+        '将跳过版本校验；请升级驱动宿主以获得可诊断的兼容性检查'
+    )
+  }
+
+  return { handshake: candidate as RpcHandshake, legacy: !sawVersion, warnings }
 }
 
 /** 宿主 → 主进程的事件帧（非请求响应）。 */

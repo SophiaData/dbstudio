@@ -23,7 +23,8 @@
  * 所以这里只借它的**思想**（O(可视) 而不是 O(总行数)），不用它的**手段**。
  */
 
-import { NodeId, type DbStudioApi } from '../core/api'
+import { NodeId } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import {
   clearLayoutPrefs,
   loadLayoutPrefs,
@@ -66,11 +67,11 @@ export interface GridCallbacks {
 }
 
 /**
- * `window.dbstudio` 上本阶段依赖、但由 P0-B 并行实现的两个方法。
+ * Backend Facade 上本阶段依赖、但由 P0-B 并行实现的两个方法。
  *
  * 为什么单独声明而不是改 `core/api.ts`：那个文件不归我改（写入范围只有
  * grid.ts / style.css），而且它们属于**同一份契约**——等 P0-B 合并后，
- * `DbStudioApi` 会自然带上这两个方法，此处的本地扩展就与它重合。
+ * `BackendClient` 会自然带上这两个方法，此处的本地扩展就与它重合。
  * 用可选方法（`?`）是关键：编译期允许缺失，运行期必须判空并优雅降级，
  * 这样在接口就绪之前网格依然可用，不会白屏。
  */
@@ -80,7 +81,7 @@ type FutureCellApi = {
   /** 统计某张表的精确行数（全表扫描，必须显式触发）。 */
   countRows?: (tableNodeId: string) => Promise<number>
 }
-type GridApi = DbStudioApi & FutureCellApi
+type GridApi = BackendClient & FutureCellApi
 
 /** 当前排序状态。`dir === null` 表示未排序（列下标 -1）。 */
 interface SortState {
@@ -285,7 +286,7 @@ export class ResultGrid implements TransactionParticipant {
     })
   }
 
-  attachApi(api: DbStudioApi): void {
+  attachApi(api: BackendClient): void {
     this.#api = api as GridApi
   }
 
@@ -844,7 +845,7 @@ export class ResultGrid implements TransactionParticipant {
     btn.disabled = !this.#cancelSupported
     btn.title = this.#cancelSupported
       ? '取消当前正在执行的查询'
-      : '当前驱动不支持取消查询：SQLite 的 node:sqlite 是同步 API，没有中断能力'
+      : '当前驱动不支持取消查询：SQLite 驱动是同步 API，没有中断能力'
   }
 
   /**

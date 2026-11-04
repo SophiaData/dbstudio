@@ -75,6 +75,6 @@ A：不会。导入失败会回滚本次导入。已有的数据不受影响。
 
 A：定位到具体行。常见原因是该行某个字段无法按选定类型解析，或者必填列为空。改好数据或调整列映射后重试。
 
-**Q：能从 MySQL 导入吗？**
+**Q：能从 MySQL / MariaDB 导入吗？**
 
-A：当前不支持 MySQL（见 [数据库支持矩阵](../support/database-matrix.md)）。可以把 MySQL 数据导出成 CSV，再用这里导入到 SQLite / PostgreSQL。
+A：可以。MySQL / MariaDB 的 CSV 批量导入和导出链路已覆盖；CHECK 约束版本、DDL 隐式提交等边界见[数据库支持矩阵](../support/database-matrix.md)。完整 GUI 导入向导仍需要真库 GUI 回归。

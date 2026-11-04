@@ -17,6 +17,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import type { ConnectionConfig } from '../core/dialect'
+import {
+  DRIVER_API_VERSION,
+  DriverRpcError,
+  HANDSHAKE_PROTOCOL_VERSION,
+  isRpcResponse,
+  METADATA_SCHEMA_VERSION,
+  SDK_CONTRACT_VERSION,
+  TRANSFER_SCHEMA_VERSION,
+  validateHandshake
+} from '../core/driver'
 import type {
   DialectInfo,
   DriverAdapter,
@@ -29,7 +39,6 @@ import type {
   SecretInput,
   TestConnectionResult
 } from '../core/driver'
-import { isRpcResponse } from '../core/driver'
 import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
@@ -107,6 +116,14 @@ interface Pending {
 
 export interface DriverHostOptions {
   readonly dialectId: string
+  /**
+   * 宿主脚本路径覆盖，**仅用于测试**。
+   *
+   * 生产调用方不传，走 `resolveDriverHostScript()` 的打包/开发态探测。
+   * 抽成选项是为了让「宿主报告了错误方言/错误版本」这类协议层行为
+   * 可以用一个 fake 宿主真实验证，而不必污染真实的 `out/driver-host`。
+   */
+  readonly hostScript?: string
   readonly onLog?: (level: 'info' | 'warn' | 'error', message: string) => void
   readonly onExit?: (error: Error) => void
   /**
@@ -252,7 +269,7 @@ export class DriverHostHandle {
     this.#rpcTimeoutMs = positiveOr(options.timeouts?.requestMs, RPC_TIMEOUT_MS)
     this.#resultSetTimeoutMs = positiveOr(options.timeouts?.resultSetMs, RESULT_SET_TIMEOUT_MS)
 
-    const script = resolveDriverHostScript()
+    const script = options.hostScript ?? resolveDriverHostScript()
     this.#script = script
     this.#child = spawn(process.execPath, [script, '--dialect', options.dialectId], {
       // ELECTRON_RUN_AS_NODE=1：让 Electron 二进制以纯 Node 身份运行子进程，
@@ -280,6 +297,11 @@ export class DriverHostHandle {
         }
       }
     })
+
+    // 调用方可能不 await 这个 Promise（例如只关心后续 RPC）。挂一个空 catch
+    // 防止进程退出/握手失败时产生 unhandledRejection 把主进程打挂；
+    // 真正 await 它的调用方仍然会收到拒绝。
+    void this.handshake.catch(() => undefined)
 
     this.#child.stdout.setEncoding('utf8')
     this.#child.stdout.on('data', (chunk: string) => this.#onStdout(chunk))
@@ -350,12 +372,16 @@ export class DriverHostHandle {
     this.#child.kill('SIGKILL')
   }
 
-  #diagnosticError(reason: string): Error {
+  #diagnosticSummary(): string {
     const stderr = this.#stderrTail.trim() || '(empty)'
-    return new Error(
-      `${reason}; dialect=${this.#dialectId} pid=${this.#child.pid ?? 'unknown'} ` +
-        `script=${this.#script} stdoutBytes=${this.#stdoutBytes} stderr=${stderr}`
+    return (
+      `dialect=${this.#dialectId} pid=${this.#child.pid ?? 'unknown'} ` +
+      `script=${this.#script} stdoutBytes=${this.#stdoutBytes} stderr=${stderr}`
     )
+  }
+
+  #diagnosticError(reason: string): Error {
+    return new Error(`${reason}; ${this.#diagnosticSummary()}`)
   }
 
   #appendStderr(chunk: string): void {
@@ -398,11 +424,48 @@ export class DriverHostHandle {
     }
     const event = frame as RpcEvent
     if (event?.kind === 'handshake') {
-      if (this.#lifecycle === 'awaiting_handshake') this.#lifecycle = 'ready'
-      this.#handshakeSettler?.resolve(event)
-      this.#handshakeSettler = null
+      this.#acceptHandshake(event)
     } else if (event?.kind === 'log') {
       this.#onLog(event.level, `[driver-host] ${event.message}`)
+    }
+  }
+
+  /**
+   * 校验握手后再允许使用宿主。
+   *
+   * ===== 为什么必须在 resolve handshake Promise 之前校验 =====
+   *
+   * `ConnectionManager` 拿到 `handshake` 就会发 `connect`。如果这里先 resolve
+   * 再校验，等于把「方言/版本不匹配」的宿主放进了可用状态：后续每个 RPC 都会
+   * 以字段缺失或行为差异的形式失败，错误点离真正原因很远。
+   *
+   * 不匹配时的处置是**终止宿主并拒绝握手**，而不是继续让它跑：
+   * 一个协议版本不对的进程，其后续行为无法预测，保留它只会制造噪音。
+   */
+  #acceptHandshake(frame: unknown): void {
+    try {
+      const validated = validateHandshake(frame, {
+        dialectId: this.#dialectId,
+        protocolVersion: HANDSHAKE_PROTOCOL_VERSION,
+        driverApiVersion: DRIVER_API_VERSION,
+        metadataSchemaVersion: METADATA_SCHEMA_VERSION,
+        transferSchemaVersion: TRANSFER_SCHEMA_VERSION,
+        sdkContractVersion: SDK_CONTRACT_VERSION
+      })
+      for (const warning of validated.warnings) {
+        this.#onLog('warn', `[driver-host:${this.#dialectId}] ${warning}`)
+      }
+      if (this.#lifecycle === 'awaiting_handshake') this.#lifecycle = 'ready'
+      this.#handshakeSettler?.resolve(validated.handshake)
+      this.#handshakeSettler = null
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      // 保留原始错误的 name/code（HandshakeValidationError），只追加进程诊断，
+      // 这样调用方既能按 code 分支，又能从 message 里拿到 pid/script/stderr。
+      failure.message = `${failure.message}; ${this.#diagnosticSummary()}`
+      this.#handshakeSettler?.reject(failure)
+      this.#handshakeSettler = null
+      this.#terminate(failure)
     }
   }
 
@@ -412,7 +475,7 @@ export class DriverHostHandle {
     this.#pending.delete(res.id)
     clearTimeout(pending.timer)
     if (res.ok) pending.resolve(res.result)
-    else pending.reject(new Error(`${res.error.code}: ${res.error.message}`))
+    else pending.reject(new DriverRpcError(res.error))
   }
 
   #failAllPending(err: Error): void {

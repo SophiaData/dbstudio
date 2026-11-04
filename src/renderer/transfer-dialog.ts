@@ -55,7 +55,7 @@
  * 而不是做一个假的「浏览」按钮点了没反应。
  */
 
-import type { DbStudioApi } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import { inspectSqlParameters, type SqlParameterDialect } from '../core/sql-parameters'
 import type { SqlParameter, SqlParameterValue } from '../core/resultset'
 import type {
@@ -979,7 +979,7 @@ export interface TransferWizardCallbacks {
 
 /** 打开向导时给出的初始来源。 */
 export interface TransferWizardOptions {
-  readonly api: DbStudioApi
+  readonly api: BackendClient
   /**
    * 可选的导出范围。
    *

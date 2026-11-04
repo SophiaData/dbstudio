@@ -60,12 +60,22 @@ export type {
   TestConnectionResult,
   SecretMap,
   SecretInput,
-  SecretKey
+  SecretKey,
+  RpcHandshake,
+  HandshakeExpectation,
+  HandshakeErrorCode,
+  ValidatedHandshake
 } from './contracts/driver.js'
 
-export { quoteIdentifierWith } from './contracts/driver.js'
+export {
+  quoteIdentifierWith,
+  validateHandshake,
+  isHandshakeValidationError,
+  HandshakeValidationError
+} from './contracts/driver.js'
 // ---- 版本化能力声明（P6.1）----
 export {
+  HANDSHAKE_PROTOCOL_VERSION,
   DRIVER_API_VERSION,
   METADATA_SCHEMA_VERSION,
   TRANSFER_SCHEMA_VERSION,

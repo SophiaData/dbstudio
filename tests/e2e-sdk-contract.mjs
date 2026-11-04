@@ -31,7 +31,14 @@ const check = (name, cond, detail = '') => {
 }
 
 const mod = await import(pathToFileURL(sdkEntry).href)
-const { DriverHost, DRIVER_API_VERSION, METADATA_SCHEMA_VERSION, TRANSFER_SCHEMA_VERSION, SDK_CONTRACT_VERSION } = mod
+const {
+  DriverHost,
+  DRIVER_API_VERSION,
+  HANDSHAKE_PROTOCOL_VERSION,
+  METADATA_SCHEMA_VERSION,
+  TRANSFER_SCHEMA_VERSION,
+  SDK_CONTRACT_VERSION
+} = mod
 
 const work = mkdtempSync(join(tmpdir(), 'dbstudio-sdk-contract-'))
 const file = join(work, 'contract.db')
@@ -52,8 +59,18 @@ try {
   check('METADATA_SCHEMA_VERSION 是正整数', Number.isInteger(METADATA_SCHEMA_VERSION) && METADATA_SCHEMA_VERSION >= 1)
   check('TRANSFER_SCHEMA_VERSION 是正整数', Number.isInteger(TRANSFER_SCHEMA_VERSION) && TRANSFER_SCHEMA_VERSION >= 1)
   check('SDK_CONTRACT_VERSION 是正整数', Number.isInteger(SDK_CONTRACT_VERSION) && SDK_CONTRACT_VERSION >= 1)
+  check('HANDSHAKE_PROTOCOL_VERSION 是正整数', Number.isInteger(HANDSHAKE_PROTOCOL_VERSION) && HANDSHAKE_PROTOCOL_VERSION >= 1)
 
   console.log('\n[2] 握手 + 连接')
+  // SDK 现在会在第一次业务 RPC 前等待并校验握手帧；显式 await 一次，
+  // 既验证宿主真的声明了版本，也避免 connect 把这层失败吞成泛化错误。
+  const hs = await host.handshake
+  check('握手方言正确', hs.dialectId === 'sqlite', hs.dialectId)
+  check('握手声明 protocolVersion', hs.protocolVersion === HANDSHAKE_PROTOCOL_VERSION, String(hs.protocolVersion))
+  check('握手声明 driverApiVersion', hs.driverApiVersion === DRIVER_API_VERSION, String(hs.driverApiVersion))
+  check('握手声明 metadataSchemaVersion', hs.metadataSchemaVersion === METADATA_SCHEMA_VERSION, String(hs.metadataSchemaVersion))
+  check('握手声明 transferSchemaVersion', hs.transferSchemaVersion === TRANSFER_SCHEMA_VERSION, String(hs.transferSchemaVersion))
+  check('握手声明 sdkContractVersion', hs.sdkContractVersion === SDK_CONTRACT_VERSION, String(hs.sdkContractVersion))
   const caps = await host.connect({ dialectId: 'sqlite', name: 'contract', options: { file } })
   check('connect 返回能力集合', Boolean(caps) && typeof caps === 'object')
   check('能力含 supportsServerPagination', typeof caps.supportsServerPagination === 'boolean')
