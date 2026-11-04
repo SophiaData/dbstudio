@@ -4,7 +4,7 @@
  * 任务跟踪、取消与事务终态继续使用现有导入生命周期。
  */
 
-import type { DbStudioApi } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import type { ColumnDescription } from '../core/model'
 import type { ImportPreview, ImportProgress, ImportRequest, ImportResult } from '../core/transfer'
 import {
@@ -604,7 +604,7 @@ export interface ImportWizardCallbacks {
 
 /** 打开向导时给出的上下文。 */
 export interface ImportWizardOptions {
-  readonly api: DbStudioApi
+  readonly api: BackendClient
   /** 目标表节点 id（`connection:c1|table:users`）。 */
   readonly targetNodeId: string
   /** 目标表名（显示在向导顶部）。 */

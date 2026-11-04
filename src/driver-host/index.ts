@@ -46,7 +46,17 @@ import type {
   SecretValue,
   TestConnectionResult
 } from '../core/driver'
-import { isRpcResponse, normalizeSecret, RPC_METHODS, SECRET_KEYS } from '../core/driver'
+import {
+  DRIVER_API_VERSION,
+  HANDSHAKE_PROTOCOL_VERSION,
+  isRpcResponse,
+  METADATA_SCHEMA_VERSION,
+  normalizeSecret,
+  RPC_METHODS,
+  SDK_CONTRACT_VERSION,
+  SECRET_KEYS,
+  TRANSFER_SCHEMA_VERSION
+} from '../core/driver'
 import type {
   ColumnCreateSpec,
   DriverCapabilities,
@@ -698,6 +708,13 @@ class DriverHost {
       kind: 'handshake',
       dialectId: this.#adapter.dialect.id,
       adapterVersion: ADAPTER_VERSION,
+      // 数字版本字段是握手校验的依据，必须与 sdk/src/version.ts（即 core
+      // 的同一份常量）保持一致。客户端会拒绝任何不精确匹配的宿主。
+      protocolVersion: HANDSHAKE_PROTOCOL_VERSION,
+      driverApiVersion: DRIVER_API_VERSION,
+      metadataSchemaVersion: METADATA_SCHEMA_VERSION,
+      transferSchemaVersion: TRANSFER_SCHEMA_VERSION,
+      sdkContractVersion: SDK_CONTRACT_VERSION,
       pid: process.pid,
       nodeVersion: process.versions.node,
       platform: process.platform

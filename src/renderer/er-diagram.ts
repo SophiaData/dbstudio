@@ -5,7 +5,7 @@
  * 空数组时显示“无外键关系”，两种状态不能混淆。
  */
 
-import type { DbStudioApi } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import type { ObjectRef, TableDescription, ColumnDescription } from '../core/model'
 import {
   computeErRelations,
@@ -66,7 +66,7 @@ export function filterErTables(
 
 export async function renderErDiagram(
   container: HTMLElement,
-  api: DbStudioApi,
+  api: BackendClient,
   connectionRef: ObjectRef,
   cb: ErDiagramCallbacks,
   onBack?: () => void
@@ -211,7 +211,7 @@ export async function renderErDiagram(
   }
 }
 
-async function collectTables(api: DbStudioApi, root: ObjectRef): Promise<CollectedTable[]> {
+async function collectTables(api: BackendClient, root: ObjectRef): Promise<CollectedTable[]> {
   const out: CollectedTable[] = []
   const walk = async (node: ObjectRef, depth: number, schema: string | null): Promise<void> => {
     if (depth > 8) return

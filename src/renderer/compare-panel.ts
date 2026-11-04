@@ -5,8 +5,9 @@
  * 由用户在 SQL 编辑器里自己审阅后执行。删除类语句会被单独标红并计数。
  */
 
-import type { ConnectionSummary, DbStudioApi } from '../core/api'
+import type { ConnectionSummary } from '../core/api'
 import { NodeId } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import {
   describeCoverage,
   diffSchema,
@@ -18,7 +19,7 @@ import {
 } from '../core/compare'
 
 export interface ComparePanelOptions {
-  readonly api: DbStudioApi
+  readonly api: BackendClient
   readonly onStatus: (message: string, isError?: boolean) => void
 }
 

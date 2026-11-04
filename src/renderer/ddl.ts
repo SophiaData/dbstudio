@@ -31,7 +31,7 @@
  * 若日后它再迁移，只需改这一处 import。
  */
 
-import type { DbStudioApi } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import type { ColumnCreateSpec, TableCreateSpec } from '../core/model'
 
 // ============================================================================
@@ -41,12 +41,12 @@ import type { ColumnCreateSpec, TableCreateSpec } from '../core/model'
 /**
  * 我们需要的 DDL 能力。
  *
- * 为什么单独声明一个窄接口，而不是直接用 `DbStudioApi`：
+ * 为什么单独声明一个窄接口，而不是直接用 `BackendClient`：
  * DDL 的五个方法（createTable / dropTable / createView / dropView / renameTable）
- * 由另一条任务线（task-27）往 `DbStudioApi` 上补。若这里直接写
+ * 由另一条任务线（task-27）往 `BackendClient` 上补。若这里直接写
  * `api.createTable(...)`，在 core 还没落地时会整体编译失败——连带 `tree.ts`
  * 一起红掉，阻塞别人。窄接口让本文件**只要求「有这个能力」**，
- * core 补齐后 `DbStudioApi` 自然满足它，无需改本文件。
+ * core 补齐后 `BackendClient` 自然满足它，无需改本文件。
  *
  * `error` 用 unknown：DDL 失败可能是主进程抛的 IPC 错误对象，形状不定，
  * 我们只负责把它变成人话，见 `errorText`。
@@ -67,7 +67,7 @@ export interface DdlApi {
 }
 
 /**
- * 把 `window.dbstudio`（或调用方传入的 API）安全地转成 `DdlApi`。
+ * 把调用方传入的 Backend Facade 安全地转成 `DdlApi`。
  *
  * 为什么不在编译期强转：core 还没声明这些方法，强转只是骗过编译器；
  * 运行时若方法不存在，应当**明确报错**（而不是调用 undefined 抛 TypeError）。
@@ -303,7 +303,7 @@ function buildTypeName(row: ColumnRowState): string {
 /**
  * 建表对话框。
  *
- * @param api 具备 DDL 能力的 API（调用方用 `asDdlApi(window.dbstudio)` 得到）
+ * @param api 具备 DDL 能力的 API（调用方用 `asDdlApi(backend)` 得到）
  * @param connectionId 目标连接 id（裸 id，不含 `connection:` 前缀）
  * @param onDone 成功后回调，通常用于刷新「表」分组
  */

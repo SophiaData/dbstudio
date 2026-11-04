@@ -43,7 +43,7 @@ import {
   PRESET_COLORS,
   type KVStore
 } from './conn-organize'
-import type { DbStudioApi } from '../core/api'
+import { resolveBackendClient, type BackendClient } from '../backend/backend-client'
 import type { SecretMap } from '../core/driver'
 import {
   asDdlApi,
@@ -74,11 +74,11 @@ interface DdlMenuTarget {
  * 这是刻意的边界（见文件头「渲染进程不知道数据库长什么样」）。
  * 为了在不改 main.ts 的前提下补上节点级操作，这里把 API 取成**可选**：
  *   1. 优先用 main.ts 传进来的回调（若日后接线，行为可控）；
- *   2. 否则退回 `window.dbstudio`（preload 白名单已暴露，见 preload/index.ts#L137）。
+ *   2. 否则从 Backend Facade 解析当前 shell 的后端。
  * 两条路都没有时菜单项直接禁用，绝不静默失效。
  */
-function optionalApi(): DbStudioApi | undefined {
-  return (globalThis as unknown as { dbstudio?: DbStudioApi }).dbstudio
+function optionalApi(): BackendClient | undefined {
+  return resolveBackendClient() ?? undefined
 }
 
 /** 与 CSS 里 `.tree-row { height }` 必须一致，否则滚动位置会错位。 */

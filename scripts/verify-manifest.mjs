@@ -38,7 +38,9 @@
 export const STEPS = [
   // ---- 准备 ----
   { id: 'typecheck', title: 'TypeScript 类型检查', group: 'node' },
+  { id: 'test:architecture', title: '架构护栏：跨层 import 与 renderer 后端直连', group: 'node' },
   { id: 'build', title: '构建宿主 + main/preload/renderer', group: 'node' },
+  { id: 'check:bundle-boundaries', title: '构建产物边界：驱动实现与 Node 运行时隔离', group: 'node' },
   { id: 'fixture', title: '生成测试夹具', group: 'node' },
 
   // ---- 纯 Node e2e ----
@@ -57,6 +59,9 @@ export const STEPS = [
   { id: 'test:statement-execution', title: '语句执行契约与三态结果 e2e', group: 'node' },
   { id: 'test:explain', title: 'SQLite 执行计划 RPC 与错误恢复', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
+  { id: 'test:backend-contract', title: 'Renderer 后端契约：缺失降级、可读错误与注入 identity', group: 'node' },
+  { id: 'test:http-transport', title: 'HTTP transport：wire codec、manifest 路由、取消/超时与 dispatcher', group: 'node' },
+  { id: 'test:api-surface', title: '公开 API surface golden snapshot', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
   { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
   { id: 'test:sql-parameters-parser', title: 'SQL 参数扫描边界与值校验', group: 'node' },
@@ -103,6 +108,7 @@ export const STEPS = [
   { id: 'build:sdk', title: '构建 SDK 发布产物', group: 'node' },
   { id: 'test:sdk', title: 'SDK e2e（从 dist 产物导入）', group: 'node' },
   { id: 'test:sdk-contract', title: 'SDK 驱动契约矩阵（版本化能力 + 12 类能力）', group: 'node' },
+  { id: 'test:handshake-contract', title: '握手 / 版本兼容性（SDK 与主进程双侧校验）', group: 'node' },
   { id: 'test:sdk-package', title: 'SDK 包外安装与使用', group: 'node' },
 
   // ---- 需要真实 Electron 窗口 ----

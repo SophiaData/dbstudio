@@ -116,12 +116,22 @@ test('ConnectionManager.previewImport 拒绝无效请求、路径、分隔符、
 })
 
 test('previewImport IPC 通道已接入主进程和 preload 白名单（静态检查）', async () => {
-  const [api, preload, main] = await Promise.all([
+  const [api, preload, manifest, adapter] = await Promise.all([
     (await import('node:fs/promises')).readFile(resolve(root, 'src/core/api.ts'), 'utf8'),
     (await import('node:fs/promises')).readFile(resolve(root, 'src/preload/index.ts'), 'utf8'),
-    (await import('node:fs/promises')).readFile(resolve(root, 'src/main/index.ts'), 'utf8')
+    (await import('node:fs/promises')).readFile(
+      resolve(root, 'src/backend/contract/method-manifest.ts'),
+      'utf8'
+    ),
+    (await import('node:fs/promises')).readFile(
+      resolve(root, 'src/main/transport/electron-ipc-adapter.ts'),
+      'utf8'
+    )
   ])
   assert.match(api, /previewImport:\s*'dbstudio:previewImport'/)
   assert.match(preload, /ipcRenderer\.invoke\(IPC\.previewImport, request\)/)
-  assert.match(main, /ipcMain\.handle\(IPC\.previewImport/)
+  // 方法名 → channel 的绑定在可执行 manifest 里；transport 按该清单注册。
+  assert.match(manifest, /entry\('previewImport',\s*IPC\.previewImport\)/)
+  assert.match(adapter, /previewImport:\s*async \(request\)/)
+  assert.match(adapter, /BACKEND_METHOD_MANIFEST/)
 })

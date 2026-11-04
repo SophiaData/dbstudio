@@ -22,5 +22,5 @@
       "@drivers/*": ["src/drivers/*"]
     }
   },
-  "include": ["src/**/*.ts", "tests/**/*.mjs", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.mjs", "scripts/**/*.mjs"]
 }

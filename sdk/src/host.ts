@@ -31,10 +31,28 @@ import type {
 } from './contracts/resultset.js'
 import type { TestConnectionResult } from './contracts/driver.js'
 import type { SecretInput } from './contracts/driver.js'
+import {
+  DRIVER_API_VERSION,
+  HANDSHAKE_PROTOCOL_VERSION,
+  METADATA_SCHEMA_VERSION,
+  SDK_CONTRACT_VERSION,
+  TRANSFER_SCHEMA_VERSION,
+  validateHandshake,
+  type RpcHandshake
+} from './contracts/driver.js'
 
 /** 单条 RPC 的超时。元数据类操作毫秒级，结果集/写入可能几十秒，故分档。 */
 const METADATA_TIMEOUT_MS = 15_000
 const HEAVY_TIMEOUT_MS = 60_000
+
+/**
+ * 握手超时。
+ *
+ * 宿主启动后第一件事就是写 handshake 帧；10s 还没到只可能是脚本路径错、
+ * 运行时起不来（例如 node 版本过低）或方言加载时卡死。
+ * 不设这个上限，`connect()` 会一直等一个永远不会来的帧，调用方只能自己超时。
+ */
+const HANDSHAKE_TIMEOUT_MS = 10_000
 
 export type DriverHostLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -80,11 +98,31 @@ interface Pending {
  */
 export class DriverHost {
   readonly #child: ChildProcessWithoutNullStreams
+  readonly #dialectId: string
   readonly #pending = new Map<number, Pending>()
   readonly #onLog: (level: DriverHostLogLevel, message: string) => void
+  #handshakeSettler: { resolve: (hs: RpcHandshake) => void; reject: (e: Error) => void } | null =
+    null
   #nextId = 1
   #stdoutBuffer = ''
   #closed = false
+  /**
+   * 导致宿主不可用的首个错误（握手不兼容 / 进程退出）。
+   *
+   * 保留它而不是只留一句「已关闭」：调用方在握手失败后往往还会调用
+   * `connect()`，此时应看到真正的原因（带 code 的 HandshakeValidationError），
+   * 而不是一个把根因盖掉的泛化错误。
+   */
+  #fatalError: Error | null = null
+  /**
+   * 宿主握手 Promise。
+   *
+   * 与主进程的 `DriverHostHandle.handshake` 同一语义：resolve 之前宿主不可用。
+   * SDK 的每个 RPC 都会先 await 它，因此「方言不匹配 / 版本不兼容」会在
+   * **第一条业务请求之前**以可诊断的错误抛出，而不是在某个深层调用里
+   * 变成 `undefined is not a function`。
+   */
+  readonly handshake: Promise<RpcHandshake>
 
   constructor(options: DriverHostOptions) {
     if (!existsSync(options.hostScript)) {
@@ -96,6 +134,7 @@ export class DriverHost {
       )
     }
     this.#onLog = options.onLog ?? (() => {})
+    this.#dialectId = options.dialectId
 
     const execPath = options.execPath ?? process.execPath
     const env: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) }
@@ -109,6 +148,33 @@ export class DriverHost {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     })
+
+    // 握手 Promise 必须在挂 stdout 监听之前建好并安装 settler：
+    // 子进程可能在构造函数的同一 tick 内就写出 handshake 帧。
+    this.handshake = new Promise<RpcHandshake>((resolveHandshake, rejectHandshake) => {
+      const timer = setTimeout(() => {
+        this.#failHandshake(
+          new Error(
+            `驱动宿主 ${options.dialectId} 在 ${HANDSHAKE_TIMEOUT_MS}ms 内未完成握手` +
+              `（pid=${this.#child.pid ?? 'unknown'}）。请检查宿主脚本路径与 Node 版本。`
+          )
+        )
+        this.kill()
+      }, HANDSHAKE_TIMEOUT_MS)
+      this.#handshakeSettler = {
+        resolve: (hs) => {
+          clearTimeout(timer)
+          resolveHandshake(hs)
+        },
+        reject: (e) => {
+          clearTimeout(timer)
+          rejectHandshake(e)
+        }
+      }
+    })
+    // 调用方不一定 await handshake。空 catch 避免 unhandledRejection；
+    // 真正 await 它的调用方仍然会收到拒绝。
+    void this.handshake.catch(() => undefined)
 
     this.#child.stdout.setEncoding('utf8')
     this.#child.stdout.on('data', (chunk: string) => this.#onStdout(chunk))
@@ -156,11 +222,54 @@ export class DriverHost {
       if (typeof f.id === 'number') {
         this.#settle(f as { id: number; ok?: boolean; result?: unknown; error?: { message?: string } })
       } else if (f.kind === 'handshake') {
-        this.#onLog('debug', `宿主就绪（方言 ${String((f as { dialectId?: string }).dialectId)}）`)
+        this.#acceptHandshake(f)
       } else if (f.kind === 'log') {
         this.#onLog((f.level as DriverHostLogLevel) ?? 'info', String(f.message ?? ''))
       }
     }
+  }
+
+  /**
+   * 校验握手帧并结算 `handshake` Promise。
+   *
+   * 版本/方言不匹配时**拒绝握手并杀掉子进程**：不匹配的宿主即使还能回帧，
+   * 它的方法集与返回结构也不可信，继续使用只会把错误推迟到更难排查的位置。
+   */
+  #acceptHandshake(frame: unknown): void {
+    try {
+      const validated = validateHandshake(frame, {
+        dialectId: this.#dialectId,
+        protocolVersion: HANDSHAKE_PROTOCOL_VERSION,
+        driverApiVersion: DRIVER_API_VERSION,
+        metadataSchemaVersion: METADATA_SCHEMA_VERSION,
+        transferSchemaVersion: TRANSFER_SCHEMA_VERSION,
+        sdkContractVersion: SDK_CONTRACT_VERSION
+      })
+      for (const warning of validated.warnings) {
+        this.#onLog('warn', `[driver-host:${this.#dialectId}] ${warning}`)
+      }
+      this.#onLog(
+        'debug',
+        `宿主就绪（方言 ${validated.handshake.dialectId}，driverApi=${String(
+          validated.handshake.driverApiVersion ?? 'legacy'
+        )}）`
+      )
+      this.#handshakeSettler?.resolve(validated.handshake)
+      this.#handshakeSettler = null
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      failure.message = `${failure.message}（pid=${this.#child.pid ?? 'unknown'}）`
+      this.#failHandshake(failure)
+      this.kill()
+    }
+  }
+
+  #failHandshake(error: Error): void {
+    // 首个错误才是根因（例如握手不兼容）；后续进程退出错误只作为补充。
+    if (this.#fatalError === null) this.#fatalError = error
+    const settler = this.#handshakeSettler
+    this.#handshakeSettler = null
+    settler?.reject(error)
   }
 
   #settle(res: { id: number; ok?: boolean; result?: unknown; error?: { message?: string } }): void {
@@ -173,6 +282,7 @@ export class DriverHost {
   }
 
   #failAllPending(err: Error): void {
+    this.#failHandshake(err)
     for (const [, p] of this.#pending) {
       clearTimeout(p.timer)
       p.reject(err)
@@ -180,8 +290,17 @@ export class DriverHost {
     this.#pending.clear()
   }
 
-  #request<T>(method: string, params: unknown, timeoutMs: number): Promise<T> {
-    if (this.#closed) return Promise.reject(new Error(`驱动宿主已关闭，无法调用 ${method}`))
+  async #request<T>(method: string, params: unknown, timeoutMs: number): Promise<T> {
+    if (this.#closed) {
+      throw this.#fatalError ?? new Error(`驱动宿主已关闭，无法调用 ${method}`)
+    }
+    // 除 disconnect 外的所有请求都必须等握手成功。握手失败时这里会抛，
+    // 且**不会**把业务请求写进一个方言/版本不可信的进程。
+    // disconnect 跳过是为了让 close() 在握手失败时仍能清理。
+    if (method !== 'disconnect') await this.handshake
+    if (this.#closed) {
+      throw this.#fatalError ?? new Error(`驱动宿主已关闭，无法调用 ${method}`)
+    }
     const id = this.#nextId++
     return new Promise<T>((res, rej) => {
       const timer = setTimeout(() => {

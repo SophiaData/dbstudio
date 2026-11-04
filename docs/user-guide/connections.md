@@ -28,7 +28,7 @@ SQLite 是单文件数据库，没有主机、端口、用户名这些概念。
 | SSL 模式 | 可选，见下文「SSL / TLS」 |
 | SSH 隧道 | 可选，见下文「SSH 隧道」 |
 
-### MySQL / MariaDB（Beta 只读阶段）
+### MySQL / MariaDB（Beta）
 
 | 字段 | 说明 |
 |---|---|
@@ -37,16 +37,17 @@ SQLite 是单文件数据库，没有主机、端口、用户名这些概念。
 | 数据库 | 要连的库名（MySQL 用 database 作命名空间，等价于其它方言的 schema） |
 | 用户名 | 默认 `root` |
 | 密码 | 可选，见下文「密码是怎么存的」 |
+| SSL / TLS | 可选，支持 disable / require / verify-ca / verify-full |
+| SSH 隧道 | 可选，与 PostgreSQL 共用主机指纹确认 |
 
-> **Beta（只读 + 写入）**：已支持连接、浏览（database → 表/视图 → 列）、表结构元数据
-> （主键 / 索引 / 外键 / 唯一约束）、分页查询、执行 SQL、EXPLAIN、取消（`KILL QUERY`），
-> 以及**网格在线编辑**、**插入/删除行**、**事务**（提交/回滚）、**完整值读取**、
-> **分批导出**、**CSV 批量导入**。
-> **暂不支持**CHECK/触发器读取、结构/数据比较、DDL 结构编辑、SSL/SSH 隧道、参数绑定；
-> 对应界面操作会明确提示不支持。详见[数据库支持矩阵](../support/database-matrix.md)。
+> MySQL / MariaDB 已支持连接、目录和表结构浏览、分页查询、参数绑定（`?`）、EXPLAIN、
+> `KILL QUERY` 取消、网格编辑、插入/删除、事务、完整值读取、CSV/JSON/JSONL/SQL INSERT
+> 导出、CSV 批量导入、结构/数据比较和常用 DDL。CHECK/触发器、视图、例程、外键动作、
+> SSL/TLS 与 SSH 也会按服务端版本和连接配置启用或明确提示边界。
+> 具体能力与版本限制见[数据库支持矩阵](../support/database-matrix.md)。
 >
-> 已知边界：SQL 窗口里手写的 `BEGIN/COMMIT` 不由驱动的事务跟踪覆盖；CSV 导入的
-> 适配器层已实现，完整 GUI 导入链路待补端到端测试。
+> 已知边界：SQL 窗口里手写的 `BEGIN/COMMIT` 不由驱动的事务跟踪覆盖；MySQL DDL 会隐式
+> 提交事务，未提交编辑时需要先提交或回滚；完整 GUI 导入链路仍待补一条真库 GUI 用例。
 
 ### Redis（只读浏览）
 
@@ -120,6 +121,10 @@ Kafka 同样只做**浏览**，不能发送消息。
 
 配了证书校验时，**证书不对会真的被拒绝**，不会降级成不加密继续连。这是有测试覆盖的（`test:postgres-ssl`）。
 
+### MySQL / MariaDB
+
+支持 `disable`、`require`、`verify-ca` 和 `verify-full`。启用证书校验时，服务端证书不匹配会拒绝连接，不会静默回退到明文。
+
 ### Redis / Kafka
 
 两者都支持 TLS（Redis 勾选 TLS，Kafka 配置 SSL/SASL）。按你的服务端实际配置启用即可。
@@ -128,7 +133,7 @@ Kafka 同样只做**浏览**，不能发送消息。
 
 ## SSH 隧道
 
-**仅 PostgreSQL 支持。**
+PostgreSQL 与 MySQL / MariaDB 支持 SSH 隧道。
 
 当数据库只能通过跳板机访问时，配置 SSH 主机、端口、用户名和认证方式（口令或私钥），连接会先建 SSH 隧道再连数据库。
 

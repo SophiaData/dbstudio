@@ -1,12 +1,13 @@
 /**
  * 渲染进程入口：把树、详情面板、新建连接对话框接线起来。
  *
- * 这里刻意保持「薄」——所有数据都来自 `window.dbstudio`（preload 白名单），
+ * 这里刻意保持「薄」——所有数据都来自 Backend Facade（首个实现由 preload 提供），
  * 渲染进程自己**不知道** SQLite 长什么样，也不知道驱动跑在哪个进程。
  * 这条边界就是剖析报告里「model 层无 UI / ui 层无数据库知识」在 Web 侧的对等物。
  */
 
-import { NodeId, type ConnectionSummary, type DbStudioApi } from '../core/api'
+import { NodeId, type ConnectionSummary } from '../core/api'
+import { resolveBackendClient, type BackendClient } from '../backend/backend-client'
 import type { ConnectionConfig } from '../core/dialect'
 import type {
   ConnectionTestCheck,
@@ -58,7 +59,6 @@ import { openComparePanel } from './compare-panel'
 
 declare global {
   interface Window {
-    dbstudio?: DbStudioApi
     /**
      * 主进程在退出前调用它，询问渲染进程「还有未提交的改动吗」。
      *
@@ -93,18 +93,18 @@ function errText(e: unknown): string {
 /**
  * 启动。
  *
- * 第一件事是检查 `window.dbstudio` 是否存在。
- * 如果直接用浏览器打开 index.html（没有 preload），它会不存在——
+ * 第一件事是检查 Backend Facade 是否存在。
+ * 如果直接用浏览器打开 index.html（没有桌面 shell），它会不存在——
  * 此时给一句人能看懂的话，而不是抛一堆 TypeError 白屏。
  */
 async function boot(): Promise<void> {
-  const api = window.dbstudio
+  const api = resolveBackendClient()
   if (!api) {
     document.body.innerHTML =
       '<div style="padding:32px;font:14px/1.7 -apple-system,sans-serif">' +
       '<h2 style="margin-top:0">需要 Electron 环境</h2>' +
-      '<p>这个界面通过 preload 暴露的 <code>window.dbstudio</code> 与主进程通信。' +
-      '当前页面没有该对象，说明它被当成了普通网页打开。</p>' +
+      '<p>这个界面需要通过桌面 shell 的 Backend Facade 与主进程通信。' +
+      '当前页面没有该后端，说明它被当成了普通网页打开。</p>' +
       '<p>请用 <code>pnpm dev</code> 启动。</p></div>'
     return
   }
@@ -1009,7 +1009,7 @@ function download(text: string, filename: string, mime: string): void {
  * 这个函数在 boot() 里也可被复用，直接闭包引用会让依赖关系变成隐式的。
  */
 async function showDetail(
-  api: DbStudioApi,
+  api: BackendClient,
   ref: ObjectRef,
   reloadTree: () => Promise<void>
 ): Promise<void> {
@@ -1386,7 +1386,7 @@ function confirmSshHostKey(check: SshHostKeyCheck): Promise<boolean> {
 }
 
 async function openConnectionDialog(
-  api: DbStudioApi,
+  api: BackendClient,
   onConnected: (summary: ConnectionSummary) => void
 ): Promise<void> {
   const dlg = el<HTMLDialogElement>('dlg-connection')

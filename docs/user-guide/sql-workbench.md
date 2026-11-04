@@ -19,6 +19,7 @@
 |---|---|
 | SQLite | `?`（位置参数） |
 | PostgreSQL | `$1`、`$2` … |
+| MySQL / MariaDB | `?`（位置参数） |
 
 例如 PostgreSQL：
 
@@ -36,6 +37,7 @@ SELECT * FROM users WHERE id = $1 AND email = $2
 
 - **SQLite**：用 `EXPLAIN QUERY PLAN`，显示扫描/索引使用情况。
 - **PostgreSQL**：用 `EXPLAIN (FORMAT JSON)`，以树形结构展示。
+- **MySQL / MariaDB**：使用方言的 `EXPLAIN` 结果，显示访问类型、候选索引和扫描信息。
 
 注意两点：
 
@@ -51,6 +53,7 @@ SELECT * FROM users WHERE id = $1 AND email = $2
 | 数据库 | 能否取消 | 说明 |
 |---|---|---|
 | PostgreSQL | ✅ 真取消 | 在服务端终止该查询 |
+| MySQL / MariaDB | ✅ 真取消 | 使用 `KILL QUERY` 终止该查询 |
 | SQLite | ❌ 不能 | 驱动是同步 API，没有中断接口 |
 
 对 SQLite，界面会**如实告诉你"当前驱动不支持取消"**，而不是让你以为点了就停了。这不是偷懒，是这个数据库驱动本身没法在中途打断。

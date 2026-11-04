@@ -3,7 +3,9 @@
  *
  * 职责严格限定为三件事：
  *   1. 开窗口
- *   2. 把 `DbStudioApi` 的实现注册为 IPC handler（实现身份是「编排者」，不含数据库知识）
+ *   2. 把 manager / SQL library / 文件对话框 shell port 交给
+ *      `transport/electron-ipc-adapter`，由它把 `DbStudioApi` 注册为 IPC handler
+ *      （实现身份是「编排者」，不含数据库知识）
  *   3. 应用退出时回收所有驱动宿主子进程
  *
  * 注意这里**没有一处数据库代码**——所有数据库能力都在子进程里。
@@ -11,22 +13,15 @@
  * 主进程即使遇到某个驱动的原生崩溃，也只是那一个宿主进程挂掉。
  */
 
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
-import type { OpenDialogOptions, WebContents } from 'electron'
+import { app, BrowserWindow, dialog, safeStorage, shell } from 'electron'
+import type { WebContents } from 'electron'
 import { join } from 'node:path'
-import { IPC, type DbStudioApi } from '../core/api'
-import type { DataCompareRequest } from '../core/compare'
-import type { ConnectionConfig } from '../core/dialect'
-import type { SecretInput } from '../core/driver'
-import type { CellValue, QueryOptions, RowUpdate } from '../core/resultset'
-import type { TableCreateSpec } from '../core/model'
-import type { RecordSqlHistoryInput } from '../core/sql-library'
-import type { ImportPreviewRequest, ImportRequest, TransferRequest } from '../core/transfer'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
 import { chooseImportFile } from './import-file-dialog'
 import { SqlLibraryStore } from './SqlLibraryStore'
+import { registerElectronIpc } from './transport/electron-ipc-adapter'
 
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null
@@ -402,269 +397,25 @@ function probeSafeStorage(): {
 }
 
 /**
- * 主进程侧的 API 面。
+ * 打开 CSV 文件选择框的 shell port。
  *
- * 与 `DbStudioApi` 的唯一差别：`chooseImportFile` 多一个**可选**的 `sender`，
- * 用来把系统对话框绑定到"发起这次调用的那个窗口"。
+ * 只做一件事：把发起这次 IPC 调用的渲染进程 `sender` 解析成父窗口，
+ * 再交给 `chooseImportFile`（系统对话框逻辑本身仍在 import-file-dialog.ts）。
  *
- * sender 缺失时返回 `null`，不会回退到主窗口；这只用于内部测试与类型适配，
- * 实际 IPC handler 始终传入 `event.sender`。
+ * 没有发起窗口时返回 null，绝不回退到主窗口或某个默认路径。
  */
-type MainApi = Omit<DbStudioApi, 'chooseImportFile'> & {
-  chooseImportFile(sender?: WebContents): Promise<string | null>
-}
-
-/**
- * 注册 IPC。
- *
- * 每个 handler 都只做「取参数 → 交给 ConnectionManager → 返回」，
- * 不在这里写业务逻辑。这样主进程可以只靠类型检查保证与 UI 契约一致。
- * 错误直接抛出，Electron 会把它序列化成 Error 传给渲染进程，
- * UI 侧 catch 到的就是可展示的 message。
- */
-function registerIpc(): void {
-  const api: MainApi = {
-    listDialects: async () => getManager().listDialects(),
-    listConnections: async () => getManager().list(),
-    addConnection: async (config: ConnectionConfig, secret?: SecretInput) =>
-      getManager().add(config, secret),
-    connectConnection: async (connectionId: string) =>
-      getManager().connectConnection(connectionId),
-    disconnectConnection: async (connectionId: string) =>
-      getManager().disconnectConnection(connectionId),
-    removeConnection: async (connectionId: string) => getManager().remove(connectionId),
-    testConnection: async (config: ConnectionConfig, secret?: SecretInput) =>
-      getManager().testConnection(config, secret),
-    listChildren: async (nodeId: string | null) => getManager().listChildren(nodeId),
-    describeTable: async (tableNodeId: string) => getManager().describeTable(tableNodeId),
-    captureSchemaSnapshot: async (connectionId: string, schema?: string | null) =>
-      getManager().captureSchemaSnapshot(connectionId, schema),
-    compareTableData: async (request: DataCompareRequest) => getManager().compareTableData(request),
-    // 结果集四个通道。注意它们的耗时量级与元数据方法**完全不同**：
-    // 上面几个是毫秒级的元数据查询，这几个跑的是用户 SQL（可能几十秒）。
-    // 超时策略因此在 DriverHostHandle 里分开（见 RESULT_SET_TIMEOUT_MS）。
-    runQuery: async (nodeId: string, sql: string, options?: QueryOptions) =>
-      getManager().runQuery(nodeId, sql, options),
-    executeStatement: async (nodeId: string, sql: string, options?: QueryOptions) =>
-      getManager().executeStatement(nodeId, sql, options),
-    explain: async (nodeId: string, sql: string) => getManager().explain(nodeId, sql),
-    fetchResultPage: async (cursorId: string, offset: number, limit: number) =>
-      getManager().fetchResultPage(cursorId, offset, limit),
-    closeCursor: async (cursorId: string) => getManager().closeCursor(cursorId),
-    previewTable: async (nodeId: string, limit?: number) =>
-      getManager().previewTable(nodeId, limit),
-    tableSelectSql: async (nodeId: string) => getManager().tableSelectSql(nodeId),
-    // 在线编辑与事务。这四个共享结果集的 60s 超时（写比读慢，见 DriverHostHandle）。
-    // 注意 applyEdits **不自动提交**：主进程不做任何"帮你提交"的兜底，
-    // 提交时机完全由 UI 决定（用户点"应用"或"回滚"）。这层不做主，
-    // 否则会出现"用户以为能反悔、其实已经被提交"的情况。
-    applyEdits: async (tableNodeId: string, updates: readonly RowUpdate[]) =>
-      getManager().applyEdits(tableNodeId, updates),
-    commitTransaction: async (nodeId: string) => getManager().commitTransaction(nodeId),
-    rollbackTransaction: async (nodeId: string) => getManager().rollbackTransaction(nodeId),
-    transactionState: async (nodeId: string) => getManager().transactionState(nodeId),
-    // 增删与完整取值（第五阶段）。共享 60s：写入可能慢，countRows 在大表上是全表扫描。
-    insertRow: async (tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
-      getManager().insertRow(tableNodeId, values),
-    deleteRows: async (
-      tableNodeId: string,
-      keys: readonly Readonly<Record<string, CellValue>>[]
-    ) => getManager().deleteRows(tableNodeId, keys),
-    countRows: async (tableNodeId: string) => getManager().countRows(tableNodeId),
-    fetchCellValue: async (cursorId: string, rowIndex: number, columnIndex: number) =>
-      getManager().fetchCellValue(cursorId, rowIndex, columnIndex),
-    // DDL 与编辑连接（第六阶段）。DDL 可能因锁等待而慢，沿用 60s。
-    createTable: async (connectionId: string, spec: TableCreateSpec) =>
-      getManager().createTable(connectionId, spec),
-    dropTable: async (nodeId: string) => getManager().dropTable(nodeId),
-    createView: async (connectionId: string, viewName: string, selectSql: string) =>
-      getManager().createView(connectionId, viewName, selectSql),
-    dropView: async (nodeId: string) => getManager().dropView(nodeId),
-    renameTable: async (nodeId: string, newName: string) =>
-      getManager().renameTable(nodeId, newName),
-    // 取消：按节点找到所属连接，交给宿主进程的 adapter（PG 真取消，SQLite 返回 false）
-    cancelQuery: async (nodeId: string, signalId?: string) => getManager().cancelQuery(nodeId, signalId),
-    updateConnection: async (
-      connectionId: string,
-      config: Partial<ConnectionConfig>,
-      secret?: SecretInput
-    ) => getManager().updateConnection(connectionId, config, secret),
-    listSqlLibrary: async () => getSqlLibrary().snapshot(),
-    recordSqlHistory: async (input: RecordSqlHistoryInput) => {
-      const history = getSqlLibrary()
-      const manager = getManager()
-      const connection = manager.list().find((item) => item.id === input.connectionId)
-      const entry = history.record(input, connection?.name ?? '（已删除的连接）')
-      return entry
+function chooseImportFileForSender(sender?: WebContents): Promise<string | null> {
+  return chooseImportFile<BrowserWindow>({
+    showOpenDialog: async (window, options) => {
+      if (!window) throw new Error('导入文件对话框缺少发起窗口')
+      const result = await dialog.showOpenDialog(window, options)
+      return { canceled: result.canceled, filePaths: result.filePaths }
     },
-    saveSql: async (id: string | null, name: string, sql: string) =>
-      getSqlLibrary().save(id, name, sql),
-    removeSavedSql: async (id: string) => getSqlLibrary().removeSaved(id),
-    clearSqlHistory: async () => getSqlLibrary().clearHistory(),
-    // 流式导出（P2.1）。任务在后台跑，渲染进程只拿进度。
-    startTransfer: async (request: TransferRequest) => getManager().startTransfer(request),
-    getTransferProgress: async (taskId: string) => getManager().getTransferProgress(taskId) ?? null,
-    cancelTransfer: async (taskId: string) => getManager().cancelTransfer(taskId),
-    waitTransfer: async (taskId: string) => getManager().waitTransfer(taskId),
-    // CSV 导入（P2.3）。CSV 内容只在主进程与驱动宿主之间流转。
-    previewImport: async (request: ImportPreviewRequest) => getManager().previewImport(request),
-    startImport: async (request: ImportRequest) => getManager().startImport(request),
-    getImportProgress: async (taskId: string) => getManager().getImportProgress(taskId) ?? null,
-    cancelImport: async (taskId: string) => getManager().cancelImport(taskId),
-    waitImport: async (taskId: string) => getManager().waitImport(taskId),
-    /**
-     * 打开系统文件选择框。
-     *
-     * `sender` 是发起这次调用的渲染进程。**它不是对外契约的一部分**
-     * （`DbStudioApi.chooseImportFile()` 对渲染进程仍然是零参），
-     * 这里多带一个参数只为把对话框**绑定到发起它的那一个窗口**。
-      * sender 缺失或对应窗口已销毁时，helper 返回 `null` 且不会弹框。
-      */
-    chooseImportFile: async (sender?: WebContents) =>
-      chooseImportFile({
-        showOpenDialog: async (window, options) => {
-           if (!window) throw new Error('导入文件对话框缺少发起窗口')
-           const result = await dialog.showOpenDialog(window, options)
-          return { canceled: result.canceled, filePaths: result.filePaths }
-        },
-        resolveWindows: () => {
-          const fromSender = sender ? BrowserWindow.fromWebContents(sender) : null
-          return [fromSender]
-        }
-      })
-  }
-
-  // 编译期证据：主进程实现（含内部可选参数）仍然满足对外契约 DbStudioApi。
-  // 如果哪天 chooseImportFile 的返回值形状变了，这里立刻报错。
-  const _apiContract: DbStudioApi = api
-  void _apiContract
-
-  // 逐个通道注册，而不是用一个万能通道 + 方法名字符串。
-  // 万能通道等于把整个能力面重新打开，preload 的白名单就失效了。
-  ipcMain.handle(IPC.listDialects, () => api.listDialects())
-  ipcMain.handle(IPC.listConnections, () => api.listConnections())
-  ipcMain.handle(IPC.addConnection, (_e, config: ConnectionConfig, secret?: SecretInput) =>
-    api.addConnection(config, secret)
-  )
-  // ---- 持久化连接通道（第四阶段新增） ----
-  // 与 addConnection 拆开，是因为它们语义不同：add 是"存一条新的"，
-  // 这两个是"对已存的做会话开关"，参数只是一个 id。
-  ipcMain.handle(IPC.connectConnection, (_e, connectionId: string) =>
-    api.connectConnection(connectionId)
-  )
-  ipcMain.handle(IPC.disconnectConnection, (_e, connectionId: string) =>
-    api.disconnectConnection(connectionId)
-  )
-  ipcMain.handle(IPC.removeConnection, (_e, connectionId: string) =>
-    api.removeConnection(connectionId)
-  )
-  ipcMain.handle(IPC.testConnection, (_e, config: ConnectionConfig, secret?: SecretInput) =>
-    api.testConnection(config, secret)
-  )
-  ipcMain.handle(IPC.listChildren, (_e, nodeId: string | null) => api.listChildren(nodeId))
-  ipcMain.handle(IPC.describeTable, (_e, tableNodeId: string) => api.describeTable(tableNodeId))
-  ipcMain.handle(IPC.captureSchemaSnapshot, (_e, connectionId: string, schema?: string | null) =>
-    api.captureSchemaSnapshot(connectionId, schema)
-  )
-  ipcMain.handle(IPC.compareTableData, (_e, request: DataCompareRequest) => api.compareTableData(request))
-
-  // ---- 结果集通道（第二阶段新增） ----
-  // 每个通道单独注册，理由同上：万能通道会让 preload 的白名单失效。
-  ipcMain.handle(IPC.runQuery, (_e, nodeId: string, sql: string, options?: QueryOptions) =>
-    api.runQuery(nodeId, sql, options)
-  )
-  ipcMain.handle(IPC.executeStatement, (_e, nodeId: string, sql: string, options?: QueryOptions) =>
-    api.executeStatement(nodeId, sql, options)
-  )
-  ipcMain.handle(IPC.explain, (_e, nodeId: string, sql: string) => api.explain(nodeId, sql))
-  ipcMain.handle(
-    IPC.fetchResultPage,
-    (_e, cursorId: string, offset: number, limit: number) =>
-      api.fetchResultPage(cursorId, offset, limit)
-  )
-  ipcMain.handle(IPC.closeCursor, (_e, cursorId: string) => api.closeCursor(cursorId))
-  ipcMain.handle(IPC.previewTable, (_e, nodeId: string, limit?: number) =>
-    api.previewTable(nodeId, limit)
-  )
-  ipcMain.handle(IPC.tableSelectSql, (_e, nodeId: string) => api.tableSelectSql(nodeId))
-
-  // ---- 在线编辑与事务通道（第三阶段新增） ----
-  ipcMain.handle(IPC.applyEdits, (_e, tableNodeId: string, updates: readonly RowUpdate[]) =>
-    api.applyEdits(tableNodeId, updates)
-  )
-  ipcMain.handle(IPC.commitTransaction, (_e, nodeId: string) => api.commitTransaction(nodeId))
-  ipcMain.handle(IPC.rollbackTransaction, (_e, nodeId: string) => api.rollbackTransaction(nodeId))
-  ipcMain.handle(IPC.transactionState, (_e, nodeId: string) => api.transactionState(nodeId))
-
-  // ---- 增删与完整取值通道（第五阶段新增） ----
-  ipcMain.handle(
-    IPC.insertRow,
-    (_e, tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
-      api.insertRow(tableNodeId, values)
-  )
-  ipcMain.handle(
-    IPC.deleteRows,
-    (_e, tableNodeId: string, keys: readonly Readonly<Record<string, CellValue>>[]) =>
-      api.deleteRows(tableNodeId, keys)
-  )
-  ipcMain.handle(IPC.countRows, (_e, tableNodeId: string) => api.countRows(tableNodeId))
-  ipcMain.handle(
-    IPC.fetchCellValue,
-    (_e, cursorId: string, rowIndex: number, columnIndex: number) =>
-      api.fetchCellValue(cursorId, rowIndex, columnIndex)
-  )
-
-  // ---- DDL 与编辑连接通道（第六阶段新增） ----
-  ipcMain.handle(IPC.createTable, (_e, connectionId: string, spec: TableCreateSpec) =>
-    api.createTable(connectionId, spec)
-  )
-  ipcMain.handle(IPC.dropTable, (_e, nodeId: string) => api.dropTable(nodeId))
-  ipcMain.handle(
-    IPC.createView,
-    (_e, connectionId: string, viewName: string, selectSql: string) =>
-      api.createView(connectionId, viewName, selectSql)
-  )
-  ipcMain.handle(IPC.dropView, (_e, nodeId: string) => api.dropView(nodeId))
-  ipcMain.handle(IPC.renameTable, (_e, nodeId: string, newName: string) =>
-    api.renameTable(nodeId, newName)
-  )
-  ipcMain.handle(IPC.cancelQuery, (_e, nodeId: string, signalId?: string) => api.cancelQuery(nodeId, signalId))
-  ipcMain.handle(
-    IPC.updateConnection,
-    (_e, connectionId: string, config: Partial<ConnectionConfig>, secret?: SecretInput) =>
-      api.updateConnection(connectionId, config, secret)
-  )
-
-  ipcMain.handle(IPC.listSqlLibrary, () => api.listSqlLibrary())
-  ipcMain.handle(IPC.recordSqlHistory, (_e, input: RecordSqlHistoryInput) =>
-    api.recordSqlHistory(input)
-  )
-  ipcMain.handle(IPC.saveSql, (_e, id: string | null, name: string, sql: string) =>
-    api.saveSql(id, name, sql)
-  )
-  ipcMain.handle(IPC.removeSavedSql, (_e, id: string) => api.removeSavedSql(id))
-  ipcMain.handle(IPC.clearSqlHistory, () => api.clearSqlHistory())
-
-  // ---- 流式导出通道（P2.1） ----
-  // 四个通道：启动 / 查进度 / 取消 / 等结束。
-  // 进度用**轮询**而不是事件推送：导出面板本来就要定时刷新，
-  // 轮询的实现与调试成本都低得多，且不需要给 preload 再开一条事件白名单。
-  ipcMain.handle(IPC.startTransfer, (_e, request: TransferRequest) => api.startTransfer(request))
-  ipcMain.handle(IPC.getTransferProgress, (_e, taskId: string) => api.getTransferProgress(taskId))
-  ipcMain.handle(IPC.cancelTransfer, (_e, taskId: string) => api.cancelTransfer(taskId))
-  ipcMain.handle(IPC.waitTransfer, (_e, taskId: string) => api.waitTransfer(taskId))
-
-  // ---- CSV 导入预览通道 ----
-  ipcMain.handle(IPC.previewImport, (_e, request: ImportPreviewRequest) => api.previewImport(request))
-  ipcMain.handle(IPC.startImport, (_e, request: ImportRequest) => api.startImport(request))
-  ipcMain.handle(IPC.getImportProgress, (_e, taskId: string) => api.getImportProgress(taskId))
-  ipcMain.handle(IPC.cancelImport, (_e, taskId: string) => api.cancelImport(taskId))
-  ipcMain.handle(IPC.waitImport, (_e, taskId: string) => api.waitImport(taskId))
-
-  // ---- 系统文件选择器通道 ----
-  // 唯一需要 `event.sender` 的通道：对话框必须挂在**发起这次调用的那个窗口**上，
-  // 否则系统框会跑到别的窗口前面，用户不知道自己在给谁选文件。
-  ipcMain.handle(IPC.chooseImportFile, (event) => api.chooseImportFile(event.sender))
+    resolveWindows: () => {
+      const fromSender = sender ? BrowserWindow.fromWebContents(sender) : null
+      return [fromSender]
+    }
+  })
 }
 
 app.whenReady().then(() => {
@@ -673,7 +424,11 @@ app.whenReady().then(() => {
     app.setActivationPolicy('accessory')
     app.dock?.hide()
   }
-  registerIpc()
+  registerElectronIpc({
+    getManager,
+    getSqlLibrary,
+    chooseImportFile: chooseImportFileForSender
+  })
   createWindow()
 
   app.on('activate', () => {

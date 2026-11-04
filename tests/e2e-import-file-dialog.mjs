@@ -228,6 +228,18 @@ function fakeWindow(destroyed = false) {
   return { isDestroyed: () => destroyed }
 }
 
+/** 断言主进程 handler 返回成功信封，并取出业务值。 */
+function successValue(envelope) {
+  assert.equal(envelope?.ok, true, `期望成功信封，实际：${JSON.stringify(envelope)}`)
+  return envelope.value
+}
+
+/** 断言主进程 handler 返回失败信封，并返回 payload。 */
+function failurePayload(envelope) {
+  assert.equal(envelope?.ok, false, `期望失败信封，实际：${JSON.stringify(envelope)}`)
+  return envelope.error
+}
+
 // ---------------------------------------------------------------------------
 // 第一部分：helper 的纯行为
 // ---------------------------------------------------------------------------
@@ -391,7 +403,7 @@ test('主进程接线：chooseImportFile 通道存在，且调用它会弹框并
   mainState.senderWindow = senderWindow
 
   const result = await handler({ sender: { id: 'sender-webcontents' } })
-  assert.equal(result, '/tmp/picked.csv')
+  assert.equal(successValue(result), '/tmp/picked.csv')
   assert.equal(mainState.dialogCalls.length, 1)
 })
 
@@ -425,7 +437,7 @@ test('主进程接线：发起窗口已销毁时不调用对话框，也不回�
 
   const result = await handler({ sender: { id: 'sender-webcontents' } })
   assert.equal(mainState.dialogCalls.length, 0, '销毁窗口时不应弹框')
-  assert.equal(result, null)
+  assert.equal(successValue(result), null)
 })
 
 test('主进程接线：取消返回 null；对话框异常传播给 UI', async () => {
@@ -437,10 +449,16 @@ test('主进程接线：取消返回 null；对话框异常传播给 UI', async 
 
   mainState.nextDialogError = null
   mainState.nextDialogResult = { canceled: true, filePaths: [] }
-  assert.equal(await handler({ sender: {} }), null)
+  assert.equal(successValue(await handler({ sender: {} })), null)
 
   mainState.nextDialogError = new Error('dialog exploded')
-  await assert.rejects(handler({ sender: {} }), /dialog exploded/)
+  const payload = failurePayload(await handler({ sender: {} }))
+  assert.equal(payload.code, 'internal')
+  assert.equal(payload.message, 'dialog exploded')
+  assert.equal(payload.method, 'chooseImportFile')
+  assert.equal(payload.callId, 'dbstudio:chooseImportFile')
+  assert.equal('stack' in payload, false)
+  assert.doesNotMatch(JSON.stringify(payload), /dialog exploded\n\s+at /)
   mainState.nextDialogError = null
 })
 
@@ -451,7 +469,7 @@ test('主进程接线：缺失 sender 时不调用对话框且返回 null', asyn
   mainState.senderWindow = { id: 'fallback-window', isDestroyed: () => false }
   mainState.nextDialogError = null
   mainState.nextDialogResult = { canceled: false, filePaths: ['/tmp/should-not-open.csv'] }
-  assert.equal(await handler({}), null)
+  assert.equal(successValue(await handler({})), null)
   assert.equal(mainState.dialogCalls.length, 0)
 })
 
@@ -507,6 +525,50 @@ test('preload 接线：暴露的 api 方法集合与 core/api.ts 的通道集合
   const exposed = Object.keys(preloadState.exposed.api).sort()
   const declared = normalizeChannels(Object.values(apiModule.IPC))
   assert.deepEqual(exposed, declared, 'preload 白名单必须与 core/api.ts 的通道一一对应')
+})
+
+test('preload 接线：成功信封会解包成业务值', async () => {
+  preloadState.invoked.length = 0
+  preloadState.nextResult = { ok: true, value: '/tmp/enveloped.csv' }
+  const value = await preloadState.exposed.api.chooseImportFile()
+  assert.equal(value, '/tmp/enveloped.csv')
+  assert.equal(preloadState.invoked.length, 1)
+  assert.equal(preloadState.invoked[0].channel, 'dbstudio:chooseImportFile')
+})
+
+test('preload 接线：失败信封抛出带 code / message / method 的 BackendError', async () => {
+  preloadState.invoked.length = 0
+  preloadState.nextResult = {
+    ok: false,
+    error: {
+      code: 'not-found',
+      message: '文件不存在',
+      method: 'chooseImportFile',
+      callId: 'dbstudio:chooseImportFile',
+      details: { reason: 'missing' }
+    }
+  }
+  await assert.rejects(
+    preloadState.exposed.api.chooseImportFile(),
+    (error) => {
+      assert.equal(error.name, 'BackendError')
+      assert.equal(error.code, 'not-found')
+      assert.equal(error.message, '文件不存在')
+      assert.equal(error.method, 'chooseImportFile')
+      assert.equal(error.callId, 'dbstudio:chooseImportFile')
+      assert.deepEqual(error.details, { reason: 'missing' })
+      return true
+    }
+  )
+})
+
+test('preload 接线：旧版 raw 返回值原样透传（不误判成信封）', async () => {
+  preloadState.nextResult = '/tmp/raw.csv'
+  assert.equal(await preloadState.exposed.api.chooseImportFile(), '/tmp/raw.csv')
+
+  const rawObject = { ok: 'not-a-boolean', value: 'still-raw' }
+  preloadState.nextResult = rawObject
+  assert.deepEqual(await preloadState.exposed.api.chooseImportFile(), rawObject)
 })
 
 // 产物目录仅供人工复核，测试不删除任何文件。

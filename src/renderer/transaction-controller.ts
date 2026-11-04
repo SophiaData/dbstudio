@@ -1,4 +1,4 @@
-import type { DbStudioApi } from '../core/api'
+import type { BackendClient } from '../backend/backend-client'
 import type { TransactionState } from '../core/resultset'
 
 export interface LocalDirtySummary {
@@ -51,7 +51,7 @@ const controllers = new Map<string, TransactionController>()
  */
 export class TransactionController {
   readonly connectionId: string
-  #api: DbStudioApi | null = null
+  #api: BackendClient | null = null
   readonly #participants = new Map<string, TransactionParticipant>()
   #state: TransactionState = { active: false, pendingAffected: 0 }
   #queue: Promise<unknown> = Promise.resolve()
@@ -62,7 +62,7 @@ export class TransactionController {
     this.connectionId = connectionId
   }
 
-  register(api: DbStudioApi, participant: TransactionParticipant): () => void {
+  register(api: BackendClient, participant: TransactionParticipant): () => void {
     this.#api = api
     this.#participants.set(participant.transactionParticipantId, participant)
     participant.setConnectionOperationLocked?.(this.#connectionOperation || this.#exitGuardLocked)
@@ -240,7 +240,7 @@ export class TransactionController {
   }
 
   async runConnectionOperation<T>(
-    api: DbStudioApi, action: string, operation: () => Promise<T>
+    api: BackendClient, action: string, operation: () => Promise<T>
   ): Promise<T> {
     if (this.#connectionOperation || this.#exitGuardLocked) throw new Error('当前连接正在处理离开操作，请等待')
     this.#connectionOperation = true
@@ -324,7 +324,7 @@ export class TransactionController {
    * SQL 编辑器或其他外部 DML/DDL 变更通知。
    * 重新拉取连接级事务状态并广播刷新所有参与者网格。
    */
-  async notifyExternalMutation(api?: DbStudioApi): Promise<void> {
+  async notifyExternalMutation(api?: BackendClient): Promise<void> {
     await this.#enqueue(async () => {
       const activeApi = api ?? this.#api
       if (activeApi) {
@@ -381,7 +381,7 @@ export class TransactionController {
     }
   }
 
-  #requireApi(): DbStudioApi {
+  #requireApi(): BackendClient {
     if (!this.#api) throw new Error('事务控制器尚未绑定 API')
     return this.#api
   }
@@ -540,7 +540,7 @@ export async function guardAllTransactions(action: string): Promise<boolean> {
 
 /** Guard one connection before an operation that closes or replaces its host. */
 export async function runConnectionOperation<T>(
-  api: DbStudioApi, connectionId: string, action: string, operation: () => Promise<T>
+  api: BackendClient, connectionId: string, action: string, operation: () => Promise<T>
 ): Promise<T> {
   return getTransactionController(connectionId).runConnectionOperation(api, action, operation)
 }

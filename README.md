@@ -104,7 +104,11 @@ src/
     redis/           Redis 只读浏览（ioredis）
     kafka/           Kafka 只读浏览（kafkajs）
   driver-host/     驱动宿主进程（纯 Node，禁止 import electron）
-  main/            Electron 主进程
+  backend/         application contract、transport facade 与 wire codec
+  main/
+    application/   连接、查询、写入、元数据、比较、导入、导出应用服务
+    transport/     Electron IPC adapter
+    index.ts       Electron 主进程组合根
   preload/         白名单桥（48 个方法）
   renderer/
     tree.ts         虚拟化懒加载元数据树
@@ -134,6 +138,7 @@ tests/
 | [导入与导出](docs/user-guide/import-export.md) | 四种导出格式、CSV 导入、失败回滚、非快照语义 |
 | [元数据、ER 图与结构比较](docs/user-guide/metadata-and-er.md) | 表结构、ER 关系、结构/数据比较 |
 | [数据库支持矩阵](docs/support/database-matrix.md) | 每个数据库支持什么、不支持什么，及对应验证条目 |
+| [Backend contract 与 transport 边界](docs/architecture/backend-contract.md) | application services、Electron/HTTP capability、wire 与 driver-host handshake |
 
 ---
 
@@ -230,7 +235,7 @@ offset 行），见下文「一个已知代价」。这些数字是**基线**：
 
 | 分组 | 包含 |
 |---|---|
-| `node` | 类型检查、构建、夹具；元数据、结果集、编辑、持久化、增删改、DDL 与结构化 DDL 预览、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC、CSV 导入解析/预览契约与导入任务事务（SQLite；PG 分支可选）、导入驱动安全/RPC 超时竞态/PG 事务状态同步（模拟 pg Client，非真 PG）、导入终态结果文案分类（纯函数）、ER 关系与布局契约；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |
+| `node` | 类型检查、源码架构护栏、build 后 bundle 边界、API surface golden、backend contract、HTTP transport、driver-host handshake/version、夹具；元数据、结果集、编辑、持久化、增删改、DDL 与结构化 DDL 预览、连接恢复、驱动宿主连续启动与退出压力、PostgreSQL 主键解析、SQLite 取消、参数化 SQL、SQL 脚本切分与源码位置、SQL 库、语句执行契约、SQLite 执行计划 RPC、CSV 导入解析/预览契约与导入任务事务（SQLite；PG 分支可选）、导入驱动安全/RPC 超时竞态/PG 事务状态同步（模拟 pg Client，非真 PG）、导入终态结果文案分类（纯函数）、ER 关系与布局契约；清单一致性、执行器子进程、发布门禁与打包冒烟脚本回归；Electron 运行时、SDK 包外安装 |
 | `gui` | 布局、后台模式、查询和元数据交互、SQL 编辑器、SQL 参数面板与 SQLite 取消状态、SQLite 执行计划与断线恢复、SSL/SSH 表单、SQL 库、多标签上下文、导出完整性、CSV 导入、事务与网格生命周期、真实窗口关闭/退出、连接断开/删除/更新保护、SQL 事务联动、工作台结果形态卡片、多语句脚本顺序执行与错误中断、SQL 草稿按连接恢复、ER 图关系/选表/布局隔离/SVG 导出 |
 | `external` | 真实 PostgreSQL、PostgreSQL JSON 执行计划 RPC/GUI、查询取消、SSL/TLS 和 SSH 隧道；真实 MySQL（连接、元数据、参数、比较、DDL、写入、导出、CSV 导入、TLS，可选 SSH）；其中执行计划 GUI 需要显示器（Linux 使用 xvfb）；实际数量与运行环境记录在验收报告中 |
 
@@ -478,11 +483,11 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 
 | 能力 | 说明 |
 |---|---|
-| **多方言** | SQL 数据源：SQLite（`node:sqlite`，零依赖）+ **PostgreSQL**（`pg`，实测 PG 17.11 52/52 通过）；**只浏览数据源**：Redis（`ioredis`）、Kafka（`kafkajs`）——支持测试连接与树浏览，SQL 方法一律返回 `unsupported_method` |
+| **多方言** | SQL 数据源：SQLite（`node:sqlite`，零依赖）+ **PostgreSQL**（`pg`）+ **MySQL / MariaDB**（`mysql2`）；**只浏览数据源**：Redis（`ioredis`）、Kafka（`kafkajs`）——支持测试连接与树浏览，SQL 方法一律返回 `unsupported_method` |
 | **结构与数据比较** | 两个已连接数据源之间比表结构（表/视图/例程，按 schema+表名对齐，输出确定性 diff 与同步 SQL）；两张表按主键或指定唯一列比数据（分批读取、长值取全文、给出 INSERT/UPDATE/DELETE 计数）；**删除类语句只生成不执行**，面板没有“执行”按钮 |
 | 连接管理 | 配置落盘、密码经 OS 钥匙串加密；**连接颜色标记**（7 色，红=生产/绿=本地）；**连接分组**（真父节点，可重命名/删除，删组不删连接） |
 | 元数据浏览 | 虚拟化懒加载树；搜索过滤（明确标注「仅搜索已展开节点」）；右键刷新/复制/连接断开/查看 ER 图 |
-| **SQL 编辑器** | 语法高亮（textarea+pre 叠加，零依赖）、**自动补全**（关键字+表名列名）、**格式化**（Shift+Alt+F）、**多语句顺序执行与行号错误定位**（Ctrl+Enter 当前 / Ctrl+Shift+Enter 全部）、**参数面板与参数绑定**（SQLite `?`/`:name`、PostgreSQL `$1`/`$2`；参数值不拼接进 SQL）、**执行中状态与取消按钮**（PostgreSQL 真实取消；SQLite 明确提示同步查询不可中断并锁住重复提交）、**方言级执行计划**（SQLite `EXPLAIN QUERY PLAN` / PostgreSQL `EXPLAIN (FORMAT JSON)`；失败清除旧计划，断线后可重连再执行）、**按连接草稿自动持久化** |
+| **SQL 编辑器** | 语法高亮（textarea+pre 叠加，零依赖）、**自动补全**（关键字+表名列名）、**格式化**（Shift+Alt+F）、**多语句顺序执行与行号错误定位**（Ctrl+Enter 当前 / Ctrl+Shift+Enter 全部）、**参数面板与参数绑定**（SQLite `?`/`:name`、PostgreSQL `$1`/`$2`、MySQL/MariaDB `?`；参数值不拼接进 SQL）、**执行中状态与取消按钮**（PostgreSQL / MySQL 真取消；SQLite 明确提示同步查询不可中断并锁住重复提交）、**方言级执行计划**（SQLite `EXPLAIN QUERY PLAN` / PostgreSQL `EXPLAIN (FORMAT JSON)` / MySQL `EXPLAIN`；失败清除旧计划，断线后可重连再执行）、**按连接草稿自动持久化** |
 | **数据写入与 SQL 工作台** | 表格视图与自由 SQL 工作台均支持 UPDATE / INSERT / DELETE / DDL；工作台区分三种执行形态（结果集展示网格、影响行数展示卡片、DDL 变更摘要）；写操作自动纳入连接级事务，同连接多标签与工具栏自动同步 |
 | **SQL 历史与收藏** | 成功/失败执行自动入历史（最近 500 条），支持搜索、载入或重跑；收藏独立持久化、可命名/重命名/删除，清空历史不会误删收藏 |
 | 结果集 | 游标分页 + 虚拟滚动；点列头排序（重新查询）；列宽拖拽/双击自适应；**排序与列宽持久化**（按表记忆） |
@@ -494,19 +499,19 @@ src/drivers/index.ts              ← 带实现，只给驱动宿主进程用
 | **导出** | CSV / JSON / INSERT 语句 / Markdown（导出已加载行，明确标注范围）+ 导出全部（带进度与 5 万行上限） |
 | **DDL** | 建表（列编辑器/类型白名单/主键/自增/默认值）、删表、建视图、删视图、重命名表 |
 | **ER 图** | SVG 手绘；真实外键关系线（含复合外键与跨 schema）；按表名/schema 筛选、选择子集、布局按连接与 schema 集合持久化、SVG 导出；单次最多绘制 100 张表 |
-| **查询取消** | PostgreSQL 真取消（`pg_cancel_backend`，实测 516ms 中断 10 秒慢查询）；**SQLite 如实不支持**（同步 API 无法中断） |
-| **SSL/TLS** | PostgreSQL 六种 libpq 语义的 sslmode（disable/allow/prefer/require/verify-ca/verify-full）+ CA 证书校验；**语义差异已实测核对**（见下方说明） |
-| **SSH 隧道** | PostgreSQL 经跳板机连接：私钥/口令认证、SHA256 主机指纹确认（不做 TOFU）、目标地址覆盖；SSL 回退与取消查询复用隧道连接 |
+| **查询取消** | PostgreSQL（`pg_cancel_backend`）与 MySQL/MariaDB（`KILL QUERY`）支持真取消；**SQLite 如实不支持**（同步 API 无法中断） |
+| **SSL/TLS** | PostgreSQL 的 libpq sslmode + CA 校验；MySQL/MariaDB 支持 disable / require / verify-ca / verify-full；证书校验失败不会静默降级 |
+| **SSH 隧道** | PostgreSQL 与 MySQL/MariaDB 支持跳板机连接：私钥/口令认证、SHA256 主机指纹确认（不做 TOFU）、目标地址覆盖 |
 
 ### 还没做（与 DBeaver 的差距）
 
 | 缺口 | 影响 |
 |---|---|
-| 只有 2 个 SQL 方言 | DBeaver 支持 100+；但**加驱动零架构改动**（PG 验证过，只加一个目录）。Redis / Kafka 目前只做浏览，不是 SQL 工作台 |
+| 只有 3 个 SQL 方言 | DBeaver 支持 100+；但**加驱动零架构改动**（驱动宿主进程隔离，只需增加适配器与契约测试）。Redis / Kafka 目前只做浏览，不是 SQL 工作台 |
 | **导出完整性与一致性仍有边界** | 流式导出已支持任务进度、取消、原子落盘和长字段截断拒绝；当前仍是 `LIMIT/OFFSET` 的 live-paged 语义，不保证时间点快照，BOM/编码选项与深分页性能仍待补全 |
 | **CSV 导入** | 已支持表节点右键导入、原生 CSV 文件选择器、分隔符/NULL 配置、主进程 `previewImport` 有界样例与错误定位、目标列映射、`requiredOnInsert`（含 identity/generated）实时校验、开始按钮禁用、参数化批量导入、取消与失败回滚、终态 task 跟踪及向导恢复；当前 `readFile` 仍将完整文件读入主进程内存，流式读取与超大 CSV 内存基准待补全；真 PostgreSQL 导入证据和完整项目验证清单仍待执行 |
 | **结构编辑不完整** | 已支持建表、删表、建/删视图和重命名表；结构化 DDL 预览、ALTER 列/索引/约束/触发器编辑仍待补全 |
-| 只有 2 个 SQL 方言 | DBeaver 支持 100+；驱动宿主隔离和 SDK 已具备扩展边界，但仍需逐方言实现与验证。Redis / Kafka 是只浏览接入，未提供值查看、写入与消费 |
+| SQL 方言覆盖仍有限 | DBeaver 支持 100+；当前 SQL 方言为 SQLite、PostgreSQL、MySQL/MariaDB，驱动宿主隔离和 SDK 已具备扩展边界，但仍需逐方言实现与验证。Redis / Kafka 是只浏览接入，未提供值查看、写入与消费 |
 | SQLite 查询不可取消 | 同步 API 的硬限制 |
 
 ---

@@ -6,8 +6,8 @@
  * 直接暴露 `ipcRenderer` 等于把整个 IPC 面全开：页面里任何一段代码
  * （包括被注入的、或某个第三方脚本）都能调用任意通道。
  *
- * 这里显式枚举 **42 个**方法（第一~五阶段 21 + 第六阶段 6 + 第七阶段 1 + 第八阶段 5
- * + P2.1 流式导出 4 + P2.3 CSV 导入 5），多一个都没有。
+ * 这里显式枚举 **48 个**方法，覆盖连接、查询、事务、DDL、比较、SQL library、导入和导出，
+ * 多一个都没有。具体发布面由 `BACKEND_METHOD_MANIFEST` 与 golden snapshot 固定。
  *
  * P2.3 的第五个是**系统文件选择器**（chooseImportFile）：
  * 它只回一个绝对路径，**不读文件、不回传内容**。
@@ -121,9 +121,14 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
+import {
+  backendErrorFromPayload,
+  isBackendEnvelope,
+  type BackendEnvelope
+} from '../backend/contract/errors'
 import type { DataCompareRequest, DataCompareResult, SchemaSnapshot } from '../core/compare'
 import type { ConnectionConfig } from '../core/dialect'
-import type { SecretInput } from '../core/driver'
+import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
 import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
 import type { ConnectionSummary } from '../core/api'
 import type { CellValue, ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
@@ -149,11 +154,39 @@ import type {
   TransactionState
 } from '../core/resultset'
 
+/**
+ * 统一的后端调用入口。
+ *
+ * 所有对外方法都经过这里，通道仍然由 `IPC` 常量提供——helper 是模块内部函数，
+ * 不存在「渲染进程可指定任意 channel」的入口。
+ *
+ * 三种返回值都要兼容：
+ *   1. 成功信封 `{ ok: true, value }`：解包后返回业务值；
+ *   2. 失败信封 `{ ok: false, error }`：还原成 `BackendError` 后抛出；
+ *   3. 旧的 raw 返回值（测试替身或尚未迁移的 handler）：原样透传。
+ *
+ * 第 3 条是刻意的兼容层：GUI 测试会替换主进程 handler 并返回裸值，
+ * 不能因为我们引入了信封就把这些既有测试/调用方弄坏。
+ */
+async function invokeBackend<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const result: unknown = await ipcRenderer.invoke(channel, ...args)
+  if (isBackendEnvelope(result)) {
+    return unwrapEnvelope(result) as T
+  }
+  return result as T
+}
+
+/** 解包信封；失败时抛出带分类信息的 `BackendError`。 */
+function unwrapEnvelope<T>(envelope: BackendEnvelope<T>): T {
+  if (envelope.ok) return envelope.value
+  throw backendErrorFromPayload(envelope.error)
+}
+
 const api: DbStudioApi = {
-  listDialects: () => ipcRenderer.invoke(IPC.listDialects),
-  listConnections: () => ipcRenderer.invoke(IPC.listConnections) as Promise<ConnectionSummary[]>,
+  listDialects: () => invokeBackend<DialectInfo[]>(IPC.listDialects),
+  listConnections: () => invokeBackend(IPC.listConnections) as Promise<ConnectionSummary[]>,
   addConnection: (config: ConnectionConfig, secret?: SecretInput) =>
-    ipcRenderer.invoke(IPC.addConnection, config, secret) as Promise<ConnectionSummary>,
+    invokeBackend(IPC.addConnection, config, secret) as Promise<ConnectionSummary>,
 
   /**
    * 为已保存的连接建立会话。
@@ -162,35 +195,35 @@ const api: DbStudioApi = {
    * 这两个只对**已存在的 id** 开会话/关会话，不带配置参数。
    */
   connectConnection: (connectionId: string) =>
-    ipcRenderer.invoke(IPC.connectConnection, connectionId) as Promise<ConnectionSummary>,
+    invokeBackend(IPC.connectConnection, connectionId) as Promise<ConnectionSummary>,
 
   /** 关闭会话但保留配置：下次还能再连，这是持久化的意义所在。 */
   disconnectConnection: (connectionId: string) =>
-    ipcRenderer.invoke(IPC.disconnectConnection, connectionId) as Promise<ConnectionSummary>,
+    invokeBackend(IPC.disconnectConnection, connectionId) as Promise<ConnectionSummary>,
 
   removeConnection: (connectionId: string) =>
-    ipcRenderer.invoke(IPC.removeConnection, connectionId) as Promise<void>,
+    invokeBackend(IPC.removeConnection, connectionId) as Promise<void>,
   testConnection: (config: ConnectionConfig, secret?: SecretInput) =>
-    ipcRenderer.invoke(IPC.testConnection, config, secret),
+    invokeBackend<TestConnectionResult>(IPC.testConnection, config, secret),
   listChildren: (nodeId: string | null) =>
-    ipcRenderer.invoke(IPC.listChildren, nodeId) as Promise<ObjectRef[]>,
+    invokeBackend(IPC.listChildren, nodeId) as Promise<ObjectRef[]>,
   describeTable: (tableNodeId: string) =>
-    ipcRenderer.invoke(IPC.describeTable, tableNodeId) as Promise<TableDescription>,
+    invokeBackend(IPC.describeTable, tableNodeId) as Promise<TableDescription>,
   captureSchemaSnapshot: (connectionId: string, schema?: string | null) =>
-    ipcRenderer.invoke(IPC.captureSchemaSnapshot, connectionId, schema) as Promise<SchemaSnapshot>,
+    invokeBackend(IPC.captureSchemaSnapshot, connectionId, schema) as Promise<SchemaSnapshot>,
   compareTableData: (request: DataCompareRequest) =>
-    ipcRenderer.invoke(IPC.compareTableData, request) as Promise<DataCompareResult>,
+    invokeBackend(IPC.compareTableData, request) as Promise<DataCompareResult>,
 
   // ---- 结果集（第二阶段） ----
 
   runQuery: (nodeId: string, sql: string, options?: QueryOptions) =>
-    ipcRenderer.invoke(IPC.runQuery, nodeId, sql, options) as Promise<QueryResult>,
+    invokeBackend(IPC.runQuery, nodeId, sql, options) as Promise<QueryResult>,
 
   executeStatement: (nodeId: string, sql: string, options?: QueryOptions) =>
-    ipcRenderer.invoke(IPC.executeStatement, nodeId, sql, options) as Promise<StatementResult>,
+    invokeBackend(IPC.executeStatement, nodeId, sql, options) as Promise<StatementResult>,
 
   explain: (nodeId: string, sql: string) =>
-    ipcRenderer.invoke(IPC.explain, nodeId, sql) as Promise<ExplainResult>,
+    invokeBackend(IPC.explain, nodeId, sql) as Promise<ExplainResult>,
 
   /**
    * 注意 `cursorId` 必须**原样**回传 runQuery 给的那个值。
@@ -198,15 +231,15 @@ const api: DbStudioApi = {
    * UI 应该把它当不透明字符串存着，不要尝试解析或自己拼。
    */
   fetchResultPage: (cursorId: string, offset: number, limit: number) =>
-    ipcRenderer.invoke(IPC.fetchResultPage, cursorId, offset, limit) as Promise<ResultPage>,
+    invokeBackend(IPC.fetchResultPage, cursorId, offset, limit) as Promise<ResultPage>,
 
   closeCursor: (cursorId: string) =>
-    ipcRenderer.invoke(IPC.closeCursor, cursorId) as Promise<void>,
+    invokeBackend(IPC.closeCursor, cursorId) as Promise<void>,
 
   previewTable: (nodeId: string, limit?: number) =>
-    ipcRenderer.invoke(IPC.previewTable, nodeId, limit) as Promise<QueryResult>,
+    invokeBackend(IPC.previewTable, nodeId, limit) as Promise<QueryResult>,
   tableSelectSql: (nodeId: string) =>
-    ipcRenderer.invoke(IPC.tableSelectSql, nodeId) as Promise<string>,
+    invokeBackend(IPC.tableSelectSql, nodeId) as Promise<string>,
 
   // ---- 在线编辑与事务（第三阶段） ----
 
@@ -215,16 +248,16 @@ const api: DbStudioApi = {
    * `nodeId` 是表节点 id；`updates` 用主键值定位行（不是行下标，见 core/resultset.ts）。
    */
   applyEdits: (tableNodeId: string, updates: readonly RowUpdate[]) =>
-    ipcRenderer.invoke(IPC.applyEdits, tableNodeId, updates) as Promise<EditApplyResult>,
+    invokeBackend(IPC.applyEdits, tableNodeId, updates) as Promise<EditApplyResult>,
 
   commitTransaction: (nodeId: string) =>
-    ipcRenderer.invoke(IPC.commitTransaction, nodeId) as Promise<TransactionState>,
+    invokeBackend(IPC.commitTransaction, nodeId) as Promise<TransactionState>,
 
   rollbackTransaction: (nodeId: string) =>
-    ipcRenderer.invoke(IPC.rollbackTransaction, nodeId) as Promise<TransactionState>,
+    invokeBackend(IPC.rollbackTransaction, nodeId) as Promise<TransactionState>,
 
   transactionState: (nodeId: string) =>
-    ipcRenderer.invoke(IPC.transactionState, nodeId) as Promise<TransactionState>,
+    invokeBackend(IPC.transactionState, nodeId) as Promise<TransactionState>,
 
   // ---- 增删与完整取值（第五阶段） ----
 
@@ -232,7 +265,7 @@ const api: DbStudioApi = {
    * 插入一行，返回新行主键（`keyValues`）让 UI 能定位它。**不自动提交**。
    */
   insertRow: (tableNodeId: string, values: Readonly<Record<string, CellValue>>) =>
-    ipcRenderer.invoke(IPC.insertRow, tableNodeId, values) as Promise<{
+    invokeBackend(IPC.insertRow, tableNodeId, values) as Promise<{
       affected: number
       keyValues: Record<string, CellValue>
     }>,
@@ -241,38 +274,38 @@ const api: DbStudioApi = {
   deleteRows: (
     tableNodeId: string,
     keys: readonly Readonly<Record<string, CellValue>>[]
-  ) => ipcRenderer.invoke(IPC.deleteRows, tableNodeId, keys) as Promise<EditApplyResult>,
+  ) => invokeBackend(IPC.deleteRows, tableNodeId, keys) as Promise<EditApplyResult>,
 
   /** 统计行数。**显式动作**，大表上是全表扫描，UI 不要在展开目录时自动调用。 */
   countRows: (tableNodeId: string) =>
-    ipcRenderer.invoke(IPC.countRows, tableNodeId) as Promise<number>,
+    invokeBackend(IPC.countRows, tableNodeId) as Promise<number>,
 
   /**
    * 取单格完整值。用 `runQuery` 返回的 cursorId（带连接前缀，原样回传），
    * 解决"超长文本被截断到 1000 字符看不懂"的问题。
    */
   fetchCellValue: (cursorId: string, rowIndex: number, columnIndex: number) =>
-    ipcRenderer.invoke(IPC.fetchCellValue, cursorId, rowIndex, columnIndex) as Promise<CellValue>,
+    invokeBackend(IPC.fetchCellValue, cursorId, rowIndex, columnIndex) as Promise<CellValue>,
 
   // ---- DDL 与编辑连接（第六阶段） ----
 
   /** 建表。成功后 listChildren 立刻能看到（DDL 已提交）。 */
   createTable: (connectionId: string, spec: TableCreateSpec) =>
-    ipcRenderer.invoke(IPC.createTable, connectionId, spec) as Promise<void>,
+    invokeBackend(IPC.createTable, connectionId, spec) as Promise<void>,
 
   /** 删表。`nodeId` 是节点 id（如 `connection:c1|table:users`）。 */
-  dropTable: (nodeId: string) => ipcRenderer.invoke(IPC.dropTable, nodeId) as Promise<void>,
+  dropTable: (nodeId: string) => invokeBackend(IPC.dropTable, nodeId) as Promise<void>,
 
   /** 建视图：`CREATE VIEW <viewName> AS <selectSql>`。 */
   createView: (connectionId: string, viewName: string, selectSql: string) =>
-    ipcRenderer.invoke(IPC.createView, connectionId, viewName, selectSql) as Promise<void>,
+    invokeBackend(IPC.createView, connectionId, viewName, selectSql) as Promise<void>,
 
   /** 删视图。`nodeId` 是节点 id。 */
-  dropView: (nodeId: string) => ipcRenderer.invoke(IPC.dropView, nodeId) as Promise<void>,
+  dropView: (nodeId: string) => invokeBackend(IPC.dropView, nodeId) as Promise<void>,
 
   /** 重命名表。`nodeId` 是节点 id，`newName` 是新表名。 */
   renameTable: (nodeId: string, newName: string) =>
-    ipcRenderer.invoke(IPC.renameTable, nodeId, newName) as Promise<void>,
+    invokeBackend(IPC.renameTable, nodeId, newName) as Promise<void>,
 
   /**
    * 取消某个节点所属连接上正在执行的查询。
@@ -282,7 +315,7 @@ const api: DbStudioApi = {
    * 或当时并没有在跑的查询。UI 应先看能力的 `supportsCancel`。
    */
   cancelQuery: (nodeId: string, signalId?: string) =>
-    ipcRenderer.invoke(IPC.cancelQuery, nodeId, signalId) as Promise<boolean>,
+    invokeBackend(IPC.cancelQuery, nodeId, signalId) as Promise<boolean>,
 
   /**
    * 编辑已保存连接。若当前已连接，主进程内部会断开重连，使新配置生效；
@@ -293,7 +326,7 @@ const api: DbStudioApi = {
     config: Partial<ConnectionConfig>,
     secret?: SecretInput
   ) =>
-    ipcRenderer.invoke(
+    invokeBackend(
       IPC.updateConnection,
       connectionId,
       config,
@@ -303,14 +336,14 @@ const api: DbStudioApi = {
   // ---- SQL 历史与收藏（第八阶段） ----
 
   listSqlLibrary: () =>
-    ipcRenderer.invoke(IPC.listSqlLibrary) as Promise<SqlLibrarySnapshot>,
+    invokeBackend(IPC.listSqlLibrary) as Promise<SqlLibrarySnapshot>,
   recordSqlHistory: (input: RecordSqlHistoryInput) =>
-    ipcRenderer.invoke(IPC.recordSqlHistory, input) as Promise<SqlHistoryEntry>,
+    invokeBackend(IPC.recordSqlHistory, input) as Promise<SqlHistoryEntry>,
   saveSql: (id: string | null, name: string, sql: string) =>
-    ipcRenderer.invoke(IPC.saveSql, id, name, sql) as Promise<SavedSql>,
+    invokeBackend(IPC.saveSql, id, name, sql) as Promise<SavedSql>,
   removeSavedSql: (id: string) =>
-    ipcRenderer.invoke(IPC.removeSavedSql, id) as Promise<void>,
-  clearSqlHistory: () => ipcRenderer.invoke(IPC.clearSqlHistory) as Promise<void>,
+    invokeBackend(IPC.removeSavedSql, id) as Promise<void>,
+  clearSqlHistory: () => invokeBackend(IPC.clearSqlHistory) as Promise<void>,
 
   // ---- 流式导出（P2.1） ----
 
@@ -321,36 +354,41 @@ const api: DbStudioApi = {
    * 可安全过 contextBridge；不接受函数、不接受回调。
    */
   startTransfer: (request: TransferRequest) =>
-    ipcRenderer.invoke(IPC.startTransfer, request) as Promise<TransferProgress>,
+    invokeBackend(IPC.startTransfer, request) as Promise<TransferProgress>,
 
   /** 轮询任务进度。未知任务 id 返回 null。 */
   getTransferProgress: (taskId: string) =>
-    ipcRenderer.invoke(IPC.getTransferProgress, taskId) as Promise<TransferProgress | null>,
+    invokeBackend(IPC.getTransferProgress, taskId) as Promise<TransferProgress | null>,
 
   /** 取消任务（任务级，不影响同连接的其它查询）。 */
   cancelTransfer: (taskId: string) =>
-    ipcRenderer.invoke(IPC.cancelTransfer, taskId) as Promise<boolean>,
+    invokeBackend(IPC.cancelTransfer, taskId) as Promise<boolean>,
 
   /** 等任务结束，返回终态结果。 */
   waitTransfer: (taskId: string) =>
-    ipcRenderer.invoke(IPC.waitTransfer, taskId) as Promise<TransferResult>,
+    invokeBackend(IPC.waitTransfer, taskId) as Promise<TransferResult>,
 
   // ---- CSV 导入（P2.3） ----
 
-  previewImport: (request: ImportPreviewRequest) =>
-    ipcRenderer.invoke(IPC.previewImport, request) as Promise<ImportPreview>,
+  previewImport: async (request: ImportPreviewRequest) => {
+    const result: unknown = await ipcRenderer.invoke(IPC.previewImport, request)
+    if (isBackendEnvelope(result)) {
+      return unwrapEnvelope<ImportPreview>(result as BackendEnvelope<ImportPreview>)
+    }
+    return result as ImportPreview
+  },
 
   startImport: (request: ImportRequest) =>
-    ipcRenderer.invoke(IPC.startImport, request) as Promise<ImportProgress>,
+    invokeBackend(IPC.startImport, request) as Promise<ImportProgress>,
 
   getImportProgress: (taskId: string) =>
-    ipcRenderer.invoke(IPC.getImportProgress, taskId) as Promise<ImportProgress | null>,
+    invokeBackend(IPC.getImportProgress, taskId) as Promise<ImportProgress | null>,
 
   cancelImport: (taskId: string) =>
-    ipcRenderer.invoke(IPC.cancelImport, taskId) as Promise<boolean>,
+    invokeBackend(IPC.cancelImport, taskId) as Promise<boolean>,
 
   waitImport: (taskId: string) =>
-    ipcRenderer.invoke(IPC.waitImport, taskId) as Promise<ImportResult>,
+    invokeBackend(IPC.waitImport, taskId) as Promise<ImportResult>,
 
   /**
    * 打开系统文件选择框，让用户挑一个 CSV 文件。
@@ -362,7 +400,7 @@ const api: DbStudioApi = {
    * 也没有"任意路径"参数——要选文件就得让用户自己在系统框里选。
    */
   chooseImportFile: () =>
-    ipcRenderer.invoke(IPC.chooseImportFile) as Promise<string | null>
+    invokeBackend(IPC.chooseImportFile) as Promise<string | null>
 }
 
 contextBridge.exposeInMainWorld(API_GLOBAL, api)
