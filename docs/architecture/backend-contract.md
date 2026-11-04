@@ -47,6 +47,8 @@ HTTP server 组合根的安全检查按以下顺序执行：
 
 这组约束对应的自动验证入口是 `test:http-server-composition`、`test:http-server-handler`、`test:artifact-contract`、`test:http-transport`、`test:architecture` 与 `check:bundle-boundaries`。生产部署仍需通过注入的 resolver 接入真实认证，并配置 TLS、反向代理 body limit、持久化 job/artifact store、审计和速率限制策略。
 
+远程 API 的限流分两层：handler 的全局并发上限防止单实例资源耗尽，`OwnerGovernance` 的 owner 请求/连接配额防止单租户挤占资源；两层拒绝都返回可重试标记，且租约释放必须幂等。出站连接只有在显式 `RemoteOutboundPolicy` 的 host/port allowlist 命中时才允许，策略不解析 DNS、不跟随重定向，也拒绝 localhost、私网 IPv4 与路径式 host。`HttpRequestAuditSink` 与 `metricsSink` 只接收 request id、owner、方法、状态、耗时和错误码，禁止记录请求体、响应值、凭据、token 或 header；sink 故障不得改变业务响应。
+
 ## 错误与协议
 
 跨 transport 的错误使用：
