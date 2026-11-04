@@ -25,13 +25,11 @@ import { registerElectronIpc } from './transport/electron-ipc-adapter'
 import {
   createHttpServer,
   createHttpServerComposition,
-  type HttpServer
-} from './server'
-import {
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig,
+  type HttpServer,
   type HttpServerPrincipalResolver
-} from './server/http-server-config'
+} from './server'
 
 let mainWindow: BrowserWindow | null = null
 let manager: ConnectionManager | null = null

@@ -55,6 +55,22 @@ await check('合法 loopback 配置使用默认 host 与固定 owner resolver', 
   assert.deepEqual(await createHttpServerPrincipalResolver(config)({}), { id: 'desktop' })
 })
 
+await check('注入 resolver 接收原始请求并返回认证 principal', async () => {
+  const config = readHttpServerStartupConfig({
+    DBSTUDIO_HTTP_PORT: '8123',
+    DBSTUDIO_HTTP_HOST: '127.0.0.1'
+  })
+  const request = { headers: { authorization: 'opaque-test-token' } }
+  let observed
+  const injected = async (value) => {
+    observed = value
+    return { id: 'owner-a' }
+  }
+  const resolver = createHttpServerPrincipalResolver(config, injected)
+  assert.deepEqual(await resolver(request), { id: 'owner-a' })
+  assert.strictEqual(observed, request)
+})
+
 await check('非 loopback 模式要求注入 resolver，拒绝固定 owner', async () => {
   const config = readHttpServerStartupConfig({
     DBSTUDIO_HTTP_PORT: '8123',

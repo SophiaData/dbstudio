@@ -1,6 +1,15 @@
 export {
   createHttpServerComposition
 } from './http-server-composition'
+export {
+  createHttpServerPrincipalResolver,
+  readHttpServerStartupConfig
+} from './http-server-config'
+export type {
+  HttpServerPrincipalResolver,
+  HttpServerStartupConfig,
+  HttpServerStartupEnv
+} from './http-server-config'
 export type {
   HttpServerComposition,
   HttpServerCompositionOptions,

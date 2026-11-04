@@ -27,11 +27,15 @@ export interface HttpServerListenOptions {
   readonly backlog?: number
 }
 
+export const DEFAULT_HTTP_CLOSE_GRACE_MS = 5_000
+
 export interface HttpServerOptions
   extends Omit<HttpServerHandlerOptions, 'composition'> {
   readonly composition: HttpServerComposition
   readonly listen: HttpServerListenOptions
   readonly maxArtifactMetadataBodyBytes?: number
+  /** 优雅关闭等待中的请求的最长时间；超时强制关闭连接。 */
+  readonly closeGraceMs?: number
 }
 
 export interface HttpServerAddress {
@@ -46,6 +50,14 @@ export interface HttpServer {
   readonly address: HttpServerAddress | null
   listen(): Promise<HttpServerAddress>
   close(): Promise<void>
+}
+
+function positiveLimit(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback
+  if (!Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new Error(`${name} 必须是正整数`)
+  }
+  return resolved
 }
 
 function validateListenOptions(options: HttpServerListenOptions): void {
@@ -74,10 +86,18 @@ function toAddress(value: string | AddressInfo | null): HttpServerAddress {
   }
 }
 
-function closeNodeServer(server: Server): Promise<void> {
+function closeNodeServer(server: Server, graceMs: number): Promise<void> {
   if (!server.listening) return Promise.resolve()
   return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      server.closeAllConnections?.()
+    }, graceMs)
+    timer.unref?.()
     server.close((error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       if (error) reject(error)
       else resolve()
     })
@@ -90,6 +110,7 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
     throw new Error('HTTP server 缺少 composition')
   }
   validateListenOptions(options.listen)
+  const closeGraceMs = positiveLimit(options.closeGraceMs, DEFAULT_HTTP_CLOSE_GRACE_MS, 'closeGraceMs')
 
   const handler = createHttpServerHandler({
     ...options,
@@ -165,7 +186,7 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
         let firstError: unknown
         try {
           if (listenPromise) await listenPromise.catch(() => undefined)
-          await closeNodeServer(server)
+          await closeNodeServer(server, closeGraceMs)
         } catch (error) {
           firstError = error
         }
