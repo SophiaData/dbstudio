@@ -1,6 +1,7 @@
 import type { ConnectionSummary } from '../../core/api'
 import type { ConnectionConfig } from '../../core/dialect'
 import type { SecretInput, TestConnectionResult } from '../../core/driver'
+import { isRemoteSecretOptionKey } from './remote'
 
 export interface RemoteConnectionCreateRequest {
   readonly config: ConnectionConfig
@@ -50,20 +51,20 @@ export function remoteConnectionPath(
   return action === undefined ? `/connections/${encoded}` : `/connections/${encoded}/${action}`
 }
 
-function isSecretLikeKey(key: string): boolean {
-  return /(password|secret|token|credential|authorization|cookie|privatekey|passphrase)/i.test(key)
-}
-
 function isPathLikeKey(key: string): boolean {
   return /(path|file|directory|filename|socket|sslrootcert|cafile|certfile|keyfile|credentialsfile|configfile)/i.test(key)
+}
+
+export function isRemoteConnectionOptionSafe(key: string, value: unknown): value is string | number | boolean {
+  return !isRemoteSecretOptionKey(key) && !isPathLikeKey(key) &&
+    (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
 }
 
 function safeOptions(value: unknown): Readonly<Record<string, string | number | boolean>> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const output: Record<string, string | number | boolean> = {}
   for (const [key, item] of Object.entries(value)) {
-    if (isSecretLikeKey(key) || isPathLikeKey(key)) continue
-    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+    if (isRemoteConnectionOptionSafe(key, item)) {
       output[key] = item
     }
   }

@@ -159,6 +159,7 @@ const toolbarState = () =>
       applyEnabled: apply ? !apply.disabled : null,
       dirtyCells,
       txInfo: info?.textContent ?? '',
+      status: document.querySelector('#status-bar')?.textContent ?? '',
       rows
     }
   })

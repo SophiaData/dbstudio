@@ -49,7 +49,11 @@ const summary = contract.toRemoteConnectionSummary({
   persisted: true,
   secretStored: true,
   capabilities: null,
-  options: { host: 'db.example.test', file: '/server/private.db', password: 'must-not-appear' },
+  options: {
+    host: 'db.example.test', file: '/server/private.db', password: 'must-not-appear',
+    api_key: 'must-not-appear', accessKey: 'must-not-appear', 'private-key': 'must-not-appear',
+    passphrase: 'must-not-appear', credentials: 'must-not-appear'
+  },
   secret: { dbPassword: 'must-not-appear' }
 })
 assert.deepEqual(summary, {

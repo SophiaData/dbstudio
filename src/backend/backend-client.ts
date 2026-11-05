@@ -14,7 +14,7 @@
  */
 
 import type { ConnectionSummary, DbStudioApi } from '../core/api'
-import type { SecretInput, TestConnectionResult } from '../core/driver'
+import type { TestConnectionResult } from '../core/driver'
 import type {
   BackendApi,
   RemoteBackendArgs,
@@ -170,7 +170,7 @@ export {
  * here so the next phase can split the application contract from the Electron
  * IPC contract without another renderer-wide migration.
  */
-export interface BackendClient extends BackendApi {
+export interface RemoteConnectionControlClient {
   listRemoteConnections(): Promise<readonly ConnectionSummary[]>
   createRemoteConnection(request: RemoteConnectionCreateRequest): Promise<ConnectionSummary>
   testRemoteConnection(request: RemoteConnectionCreateRequest): Promise<TestConnectionResult>
@@ -178,6 +178,9 @@ export interface BackendClient extends BackendApi {
   connectRemoteConnection(connectionId: string): Promise<ConnectionSummary>
   disconnectRemoteConnection(connectionId: string): Promise<ConnectionSummary>
   removeRemoteConnection(connectionId: string): Promise<void>
+}
+
+export interface BackendClient extends BackendApi, Partial<RemoteConnectionControlClient> {
   /** HTTP remote client 的低层调用入口，保留单次取消与超时选项。 */
   invoke?<K extends RemoteBackendMethod>(
     method: K,
@@ -248,10 +251,7 @@ type RemoteRouteRequest = (
   body?: unknown
 ) => Promise<unknown>
 
-function createConnectionControlMethods(request: RemoteRouteRequest): Pick<BackendClient,
-  'listRemoteConnections' | 'createRemoteConnection' | 'testRemoteConnection' |
-  'updateRemoteConnection' | 'connectRemoteConnection' | 'disconnectRemoteConnection' |
-  'removeRemoteConnection'> {
+function createConnectionControlMethods(request: RemoteRouteRequest): RemoteConnectionControlClient {
   return {
     listRemoteConnections: async () => request('/connections', 'GET') as Promise<readonly ConnectionSummary[]>,
     createRemoteConnection: async (body) => request('/connections', 'POST', body) as Promise<ConnectionSummary>,
@@ -346,11 +346,13 @@ export function createBackendClientSelection(
     }
   }
   const connectionMethods = createConnectionControlMethods(invokeRoute)
-  const connectionAliases: Record<string, unknown> = {
-    listConnections: connectionMethods.listRemoteConnections,
-    addConnection: connectionMethods.createRemoteConnection,
-    testConnection: connectionMethods.testRemoteConnection,
-    updateConnection: connectionMethods.updateRemoteConnection,
+  const connectionAliases: Pick<BackendApi,
+    'listConnections' | 'addConnection' | 'testConnection' | 'updateConnection' |
+    'connectConnection' | 'disconnectConnection' | 'removeConnection'> = {
+    listConnections: async () => [...await connectionMethods.listRemoteConnections()],
+    addConnection: (config, secret) => connectionMethods.createRemoteConnection({ config, secret }),
+    testConnection: (config, secret) => connectionMethods.testRemoteConnection({ config, secret }),
+    updateConnection: (id, config, secretPatch) => connectionMethods.updateRemoteConnection(id, { config, secretPatch }),
     connectConnection: connectionMethods.connectRemoteConnection,
     disconnectConnection: connectionMethods.disconnectRemoteConnection,
     removeConnection: connectionMethods.removeRemoteConnection
@@ -362,15 +364,15 @@ export function createBackendClientSelection(
       if (typeof property !== 'string') return undefined
       if (property === 'status') return status
       if (property === 'reconnect') return reconnect
-      if (property in connectionAliases) return connectionAliases[property]
-      if (property in connectionMethods) return connectionMethods[property as keyof typeof connectionMethods]
-      if (typeof current[property as keyof HttpBackendClient] !== 'function') return undefined
+      if (Object.hasOwn(connectionAliases, property)) return connectionAliases[property as keyof typeof connectionAliases]
+      if (Object.hasOwn(connectionMethods, property)) return connectionMethods[property as keyof typeof connectionMethods]
+      if (property === 'requestJson' || typeof current[property as keyof HttpBackendClient] !== 'function') return undefined
       return (...args: readonly unknown[]) => invoke(property, args)
     },
     has(_target, property): boolean {
       return property === 'invoke' || property === 'status' || property === 'reconnect' ||
-        property in connectionAliases || property in connectionMethods ||
-        (typeof property === 'string' && typeof current[property as keyof HttpBackendClient] === 'function')
+        Object.hasOwn(connectionAliases, property) || Object.hasOwn(connectionMethods, property) ||
+        (typeof property === 'string' && property !== 'requestJson' && typeof current[property as keyof HttpBackendClient] === 'function')
     }
   }) as unknown as BackendClient
   return { client, status, reconnect }
@@ -380,7 +382,7 @@ export function createBackendClientSelection(
 export function createElectronBackendClient(api: DbStudioApi): BackendClient {
   // Desktop preload already exposes the stable connection method names. Keep the
   // original object untouched: contextBridge objects may be non-extensible.
-  return api as BackendClient
+  return api
 }
 
 let configuredSelection: BackendClientSelection | null = null

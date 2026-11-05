@@ -120,6 +120,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
+import { readRendererRemoteBackendConfig } from './remote-backend-config'
 import { API_GLOBAL, IPC, type DbStudioApi } from '../core/api'
 import {
   backendErrorFromPayload,
@@ -403,4 +404,6 @@ const api: DbStudioApi = {
     invokeBackend(IPC.chooseImportFile) as Promise<string | null>
 }
 
+const remoteConfig = readRendererRemoteBackendConfig(process.env)
+if (remoteConfig) contextBridge.exposeInMainWorld('__DBSTUDIO_BACKEND_CONFIG__', remoteConfig)
 contextBridge.exposeInMainWorld(API_GLOBAL, api)

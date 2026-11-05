@@ -85,4 +85,26 @@ const outDir = await mkdtemp(join(tmpdir(), 'dbstudio-remote-contract-'))
   assert.equal(badShape.ok, false)
   assert.ok(badShape.issues.some((issue) => issue.field === 'options.secret'))
 
+for (const [dialectId, options, port] of [
+  ['mysql', { host: 'db.example.test', port: 3306 }, 3306],
+  ['redis', { host: 'db.example.test', port: 6379 }, 6379],
+  ['kafka', { brokers: 'db.example.test:9092' }, 9092]
+]) {
+  assert.equal(remote.validateRemoteConnectionConfig({ dialectId, name: 'explicit-target', options }, {
+    allowedHosts: ['db.example.test'], allowedPorts: [port]
+  }).ok, true, dialectId)
+}
+assert.equal(remote.validateRemoteConnectionConfig({ dialectId: 'extension', name: 'unknown', options: { host: 'db.example.test', port: 5432 } }, policy).ok, false)
+for (const dialectId of ['postgresql', 'mysql', 'redis', 'kafka', 'sqlite', 'extension']) {
+  assert.equal(remote.validateRemoteConnectionConfig({ dialectId, name: 'missing-target', options: {} }, policy).ok, false, dialectId)
+}
+for (const options of [
+  { host: 'db.example.test' },
+  { host: 'db.example.test', port: 5432, password: 'synthetic' },
+  { host: 'db.example.test', port: 5432, api_key: 'synthetic' },
+  { host: 'db.example.test', port: 5432, sshHost: 'db.example.test', sshPort: 5432, sshTargetPort: 6379 },
+  { host: 'db.example.test', port: 5432, sshPrivateKeyPath: '/synthetic/key' }
+]) {
+  assert.equal(remote.validateRemoteConnectionConfig({ dialectId: 'postgresql', name: 'unsafe', options }, policy).ok, false)
+}
 console.log('远程连接 contract 测试通过')

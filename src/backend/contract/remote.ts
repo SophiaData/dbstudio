@@ -6,6 +6,33 @@
  */
 
 import type { ConnectionConfig } from '../../core/dialect'
+import { SECRET_KEYS, type SecretInput } from '../../core/driver'
+
+/** 分隔符不能让 api_key / private-key 等机密参数绕过配置与摘要边界。 */
+export function isRemoteSecretOptionKey(key: string): boolean {
+  return /(password|passwd|pwd|secret|token|credential|authorization|cookie|privatekey|passphrase|apikey|accesskey)/i.test(key.replace(/[^a-z0-9]/gi, ''))
+}
+
+export function isRemoteSecretInput(value: unknown): value is SecretInput {
+  if (value === undefined || typeof value === 'string') return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.entries(value).every(([key, item]) =>
+    (SECRET_KEYS as readonly string[]).includes(key) && typeof item === 'string'
+  )
+}
+
+export function isRemoteConnectionConfigShape(value: unknown, partial = false): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some((key) => !['dialectId', 'name', 'options'].includes(key))) return false
+  for (const key of ['dialectId', 'name']) {
+    if ((!partial || key in record) && (typeof record[key] !== 'string' || (record[key] as string).trim() === '')) return false
+  }
+  if (!partial || 'options' in record) {
+    if (!record.options || typeof record.options !== 'object' || Array.isArray(record.options)) return false
+  }
+  return true
+}
 
 export type RemoteOptionValue = string | number | boolean
 
@@ -51,7 +78,7 @@ export interface RemoteOutboundPolicy {
 
 export interface RemoteValidationIssue {
   readonly field: string
-  readonly code: 'invalid' | 'forbidden-path' | 'outbound-denied'
+  readonly code: 'invalid' | 'forbidden-path' | 'forbidden-secret' | 'outbound-denied'
   readonly message: string
 }
 
@@ -113,7 +140,7 @@ export function isRemoteOutboundTargetAllowed(
 }
 
 function isPathField(key: string): boolean {
-  return PATH_FIELD_PATTERN.test(key) || PATH_FIELD_NAMES.has(key.toLowerCase())
+  return PATH_FIELD_PATTERN.test(key) || /(?:path|directory)$/i.test(key) || PATH_FIELD_NAMES.has(key.toLowerCase())
 }
 
 interface OutboundTargetCandidate {
@@ -122,26 +149,30 @@ interface OutboundTargetCandidate {
   readonly port: unknown
 }
 
-function outboundTargetCandidates(optionRecord: Record<string, unknown>): readonly OutboundTargetCandidate[] {
+function outboundTargetCandidates(dialectId: unknown, optionRecord: Record<string, unknown>): readonly OutboundTargetCandidate[] {
   const candidates: OutboundTargetCandidate[] = []
-  if (optionRecord.host !== undefined || optionRecord.port !== undefined) {
+  // 远程入口要求显式目标，不能由驱动缺省为 localhost 或缺省端口。
+  if (dialectId !== 'kafka') {
     candidates.push({ field: 'options.host', host: optionRecord.host, port: optionRecord.port })
   }
   const hasText = (value: unknown): value is string =>
     typeof value === 'string' && value.trim() !== ''
   const optionalValue = (value: unknown): unknown =>
     typeof value === 'string' && value.trim() === '' ? undefined : value
-  if (hasText(optionRecord.sshHost)) {
+  if ((dialectId === 'postgresql' || dialectId === 'mysql') && hasText(optionRecord.sshHost)) {
     candidates.push({ field: 'options.sshHost', host: optionRecord.sshHost, port: optionalValue(optionRecord.sshPort) ?? 22 })
-  }
-  if (hasText(optionRecord.sshTargetHost)) {
+    // targetHost 留空时驱动仍使用主机地址，独立提供 targetPort 也必须校验。
     candidates.push({
       field: 'options.sshTargetHost',
-      host: optionRecord.sshTargetHost,
+      host: optionalValue(optionRecord.sshTargetHost) ?? optionRecord.host,
       port: optionalValue(optionRecord.sshTargetPort) ?? optionRecord.port
     })
   }
-  if (typeof optionRecord.brokers === 'string') {
+  if (dialectId === 'kafka' || typeof optionRecord.brokers === 'string') {
+    if (typeof optionRecord.brokers !== 'string' || optionRecord.brokers.trim() === '') {
+      candidates.push({ field: 'options.brokers', host: undefined, port: undefined })
+      return candidates
+    }
     for (const [index, broker] of optionRecord.brokers.split(',').map((value) => value.trim()).entries()) {
       const separator = broker.lastIndexOf(':')
       if (separator <= 0) {
@@ -169,8 +200,13 @@ export function validateRemoteConnectionConfig(
   }
 
   const candidate = config as Record<string, unknown>
-  if (typeof candidate.dialectId !== 'string' || candidate.dialectId.trim() === '') {
-    issues.push({ field: 'dialectId', code: 'invalid', message: 'dialectId 不能为空' })
+  for (const key of Object.keys(candidate)) {
+    if (!['dialectId', 'name', 'options'].includes(key)) {
+      issues.push({ field: key, code: 'invalid', message: '连接配置含未知字段' })
+    }
+  }
+  if (typeof candidate.dialectId !== 'string' || !['postgresql', 'mysql', 'redis', 'kafka'].includes(candidate.dialectId)) {
+    issues.push({ field: 'dialectId', code: 'invalid', message: '远程连接不支持此方言的出站目标校验' })
   }
   if (typeof candidate.name !== 'string' || candidate.name.trim() === '') {
     issues.push({ field: 'name', code: 'invalid', message: 'name 不能为空' })
@@ -183,19 +219,25 @@ export function validateRemoteConnectionConfig(
 
   const optionRecord = options as Record<string, unknown>
   for (const [key, value] of Object.entries(optionRecord)) {
+    if (['host', 'sshHost', 'sshTargetHost', 'brokers'].includes(key) && typeof value !== 'string') {
+      issues.push({ field: `options.${key}`, code: 'invalid', message: '出站主机地址必须是字符串' })
+    }
     if (isPathField(key) && !(typeof value === 'string' && value.trim() === '')) {
       issues.push({ field: `options.${key}`, code: 'forbidden-path', message: '远程连接配置禁止 server-local 路径字段' })
     }
-    if (!['string', 'number', 'boolean'].includes(typeof value)) {
-      issues.push({ field: `options.${key}`, code: 'invalid', message: '连接参数只能是字符串、数字或布尔值' })
+    if (isRemoteSecretOptionKey(key) && !(isPathField(key) && value === '')) {
+      issues.push({ field: `options.${key}`, code: 'forbidden-secret', message: '机密参数必须通过独立 secret 通道提供' })
+    }
+    if (!['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))) {
+      issues.push({ field: `options.${key}`, code: 'invalid', message: '连接参数只能是字符串、有限数字或布尔值' })
     }
   }
 
-  for (const candidate of outboundTargetCandidates(optionRecord)) {
-    if (typeof candidate.host !== 'string' || typeof candidate.port !== 'number') {
-      issues.push({ field: candidate.field, code: 'invalid', message: '出站 host 与 port 必须成对提供' })
-    } else if (!isRemoteOutboundTargetAllowed({ host: candidate.host, port: candidate.port }, policy)) {
-      issues.push({ field: candidate.field, code: 'outbound-denied', message: '出站目标未命中允许的主机与端口策略' })
+  for (const target of outboundTargetCandidates(candidate.dialectId, optionRecord)) {
+    if (typeof target.host !== 'string' || typeof target.port !== 'number') {
+      issues.push({ field: target.field, code: 'invalid', message: '出站 host 与 port 必须成对提供' })
+    } else if (!isRemoteOutboundTargetAllowed({ host: target.host, port: target.port }, policy)) {
+      issues.push({ field: target.field, code: 'outbound-denied', message: '出站目标未命中允许的主机与端口策略' })
     }
   }
 

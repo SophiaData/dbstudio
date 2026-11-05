@@ -11,9 +11,10 @@ await build({
   configFile: false,
   root,
   logLevel: 'warn',
+  ssr: { noExternal: ['jose'] },
   build: {
     outDir,
-    emptyOutDir: true,
+    emptyOutDir: false,
     target: 'node22',
     ssr: true,
     lib: { entry: { server: resolve(root, 'src/main/server/index.ts') }, formats: ['es'], fileName: (_f, n) => `${n}.mjs` },
@@ -24,8 +25,9 @@ const { createHttpServer, OwnerQuotaError } = await import(pathToFileURL(join(ou
 const scopes = new Map()
 let quotaReject = false
 let calls = 0
+let oversizedList = false
 const manager = {
-  list: () => [],
+  list: () => oversizedList ? [{ id: 'large', name: 'x'.repeat(2000), dialectId: 'postgresql', connected: false, persisted: true, secretStored: false, options: {} }] : [],
   add: async (_config, secret) => {
     calls += 1
     assert.equal(secret.dbPassword, 'do-not-log')
@@ -63,7 +65,8 @@ const server = createHttpServer({
   governance,
   auditSink: { record: () => { throw new Error('audit sink down') } },
   metricsSink: { record: () => { throw new Error('metrics sink down') } },
-  maxConcurrentRequests: 1
+  maxConcurrentRequests: 1,
+  maxResponseBytes: 1024
 })
 const address = await server.listen()
 const origin = `http://127.0.0.1:${address.port}`
@@ -80,7 +83,10 @@ try {
   quotaReject = true
   const quota = await post({ config: { dialectId: 'sqlite', name: 'quota', options: {} }, secret: { dbPassword: 'do-not-log' } })
   assert.equal(quota.status, 429)
-  assert.equal((await quota.json()).error.code, 'conflict')
+  const quotaError = (await quota.json()).error
+  assert.equal(quotaError.code, 'conflict')
+  assert.equal(quotaError.retryable, true)
+  assert.deepEqual(quotaError.details, { resource: 'connections' })
   quotaReject = false
 
   const success = await post({ config: { dialectId: 'sqlite', name: 'ok', options: {} }, secret: { dbPassword: 'do-not-log' } })
@@ -95,6 +101,15 @@ try {
   })
   assert.equal(malformed.status, 400)
   assert.equal((await malformed.json()).error.code, 'invalid-argument')
+  oversizedList = true
+  const tooLarge = await fetch(`${origin}/connections`, { headers: { 'x-owner-id': 'owner-a' } })
+  assert.equal(tooLarge.status, 500)
+  const limitBody = await tooLarge.text()
+  assert.ok(Buffer.byteLength(limitBody) < 1024)
+  assert.equal(JSON.parse(limitBody).error.code, 'internal')
+  oversizedList = false
+  const recovered = await fetch(`${origin}/connections`, { headers: { 'x-owner-id': 'owner-a' } })
+  assert.equal(recovered.status, 200, 'oversized response must release shared request limiter')
   console.log('远程 connection failure recovery 测试通过')
 } finally {
   await server.close()

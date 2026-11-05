@@ -9,6 +9,10 @@ export type {
   BearerTokenVerifier,
   HttpAuthProvider
 } from './http-auth'
+export { createJwtPrincipalResolver } from './http-jwt-auth'
+export type { HttpJwtAuthConfig } from './http-jwt-auth'
+export { createConfiguredHttpServer } from './http-server-runtime'
+export type { HttpServerRuntimeDependencies } from './http-server-runtime'
 export {
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig

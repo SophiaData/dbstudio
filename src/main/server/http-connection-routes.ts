@@ -9,12 +9,14 @@ import {
   type RemoteConnectionUpdateRequest
 } from '../../backend/contract/remote-connection'
 import { BackendError, toBackendErrorPayload } from '../../backend/contract/errors'
+import { isRemoteConnectionConfigShape, isRemoteSecretInput } from '../../backend/contract/remote'
 import type { ConnectionConfig } from '../../core/dialect'
 import type { SecretInput } from '../../core/driver'
 import type { HttpServerComposition } from './http-server-composition'
 import {
   createHttpRequestLimiter,
   DEFAULT_HTTP_MAX_BODY_BYTES,
+  DEFAULT_HTTP_MAX_RESPONSE_BYTES,
   DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH,
   type HttpRequestAuditEvent,
   type HttpRequestAuditSink,
@@ -32,6 +34,7 @@ export interface HttpConnectionRouterOptions {
   readonly requestLimiter?: HttpRequestLimiter
   readonly maxConcurrentRequests?: number
   readonly maxBodyBytes?: number
+  readonly maxResponseBytes?: number
   readonly maxRequestIdLength?: number
   readonly governance?: OwnerGovernance
   readonly auditSink?: HttpRequestAuditSink
@@ -43,9 +46,12 @@ export type HttpConnectionRouter = (
   response: ServerResponse
 ) => Promise<boolean>
 
-function writeJson(response: ServerResponse, statusCode: number, value: unknown): void {
+function writeJson(response: ServerResponse, statusCode: number, value: unknown, maxBytes: number): void {
   if (response.writableEnded || response.destroyed) return
   const body = JSON.stringify(value)
+  if (statusCode < 400 && Buffer.byteLength(body) > maxBytes) {
+    throw new BackendError({ code: 'internal', message: 'connection 响应超过大小上限' })
+  }
   response.statusCode = statusCode
   response.setHeader('cache-control', 'no-store')
   response.setHeader('content-type', 'application/json; charset=utf-8')
@@ -57,8 +63,8 @@ function success(value: unknown): { readonly ok: true; readonly value: unknown }
   return { ok: true, value }
 }
 
-function failure(code: string, message: string): { readonly ok: false; readonly error: { code: string; message: string } } {
-  return { ok: false, error: { code, message } }
+function failure(code: string, message: string, metadata?: { readonly retryable?: boolean; readonly details?: unknown }): { readonly ok: false; readonly error: { code: string; message: string; retryable?: boolean; details?: unknown } } {
+  return { ok: false, error: { code, message, ...metadata } }
 }
 
 function statusForCode(code: string): number {
@@ -76,7 +82,8 @@ function statusForCode(code: string): number {
 
 function routeError(error: unknown): { status: number; body: ReturnType<typeof failure> } {
   if (error instanceof OwnerQuotaError) {
-    return { status: 429, body: failure('conflict', error.message) }
+    const payload = toBackendErrorPayload(error)
+    return { status: 429, body: failure('conflict', payload.message, { retryable: payload.retryable, details: payload.details }) }
   }
   if (error instanceof BackendError) {
     const status = error.code === 'conflict' &&
@@ -84,7 +91,8 @@ function routeError(error: unknown): { status: number; body: ReturnType<typeof f
       'resource' in error.details
       ? 429
       : statusForCode(error.code)
-    return { status, body: failure(error.code, error.message) }
+    const payload = toBackendErrorPayload(error)
+    return { status, body: failure(payload.code, payload.message, { retryable: payload.retryable, details: payload.details }) }
   }
   const payload = toBackendErrorPayload(error)
   return {
@@ -142,6 +150,9 @@ function bodyRecord(value: unknown): Record<string, unknown> {
 
 function configAndSecret(value: unknown): RemoteConnectionCreateRequest {
   const record = bodyRecord(value)
+  if (!isRemoteConnectionConfigShape(record.config) || !isRemoteSecretInput(record.secret)) {
+    throw new BackendError({ code: 'invalid-argument', message: 'connection config 或 secret 格式不合法' })
+  }
   return {
     config: record.config as ConnectionConfig,
     secret: record.secret as SecretInput
@@ -150,6 +161,9 @@ function configAndSecret(value: unknown): RemoteConnectionCreateRequest {
 
 function updateRequest(value: unknown): RemoteConnectionUpdateRequest {
   const record = bodyRecord(value)
+  if (!isRemoteConnectionConfigShape(record.config, true) || !isRemoteSecretInput(record.secretPatch)) {
+    throw new BackendError({ code: 'invalid-argument', message: 'connection config 或 secretPatch 格式不合法' })
+  }
   return {
     config: record.config as Partial<ConnectionConfig>,
     secretPatch: record.secretPatch as SecretInput
@@ -200,6 +214,10 @@ function isConnectionRoute(request: IncomingMessage): boolean {
 export function createHttpConnectionRouter(options: HttpConnectionRouterOptions): HttpConnectionRouter {
   const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(options.maxConcurrentRequests)
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_HTTP_MAX_BODY_BYTES
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_HTTP_MAX_RESPONSE_BYTES
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) throw new Error('maxResponseBytes 必须是正整数')
+  const writeResponse = (response: ServerResponse, status: number, value: unknown): void =>
+    writeJson(response, status, value, maxResponseBytes)
   const maxRequestIdLength = options.maxRequestIdLength ?? DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH
 
   return async (request, response): Promise<boolean> => {
@@ -215,7 +233,7 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
 
     if (!requestLimiter.tryAcquire()) {
       request.resume()
-      writeJson(response, 429, failure('conflict', 'HTTP connection 并发请求已达上限'))
+      writeResponse(response, 429, failure('conflict', 'HTTP connection 并发请求已达上限'))
       return true
     }
     counted = true
@@ -235,7 +253,7 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
 
       if (request.method === 'GET' && parts.id === undefined) {
         outcome = 'completed'
-        writeJson(response, 200, success(manager.list().map(toRemoteConnectionSummary)))
+        writeResponse(response, 200, success(manager.list().map(toRemoteConnectionSummary)))
         return true
       }
 
@@ -243,7 +261,7 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
         if (!isJson(request)) throw new BackendError({ code: 'invalid-argument', message: 'connection route 只接受 JSON' })
         const requestBody = configAndSecret(await readJson(request, maxBodyBytes))
         outcome = 'completed'
-        writeJson(response, 201, success(toRemoteConnectionSummary(await manager.add(requestBody.config, requestBody.secret))))
+        writeResponse(response, 201, success(toRemoteConnectionSummary(await manager.add(requestBody.config, requestBody.secret))))
         return true
       }
 
@@ -251,7 +269,7 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
         if (!isJson(request)) throw new BackendError({ code: 'invalid-argument', message: 'connection route 只接受 JSON' })
         const requestBody = configAndSecret(await readJson(request, maxBodyBytes))
         outcome = 'completed'
-        writeJson(response, 200, success(await manager.testConnection(requestBody.config, requestBody.secret)))
+        writeResponse(response, 200, success(await manager.testConnection(requestBody.config, requestBody.secret)))
         return true
       }
 
@@ -259,25 +277,25 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
       const id = parts.id
       if (request.method === 'POST' && parts.action === 'connect') {
         outcome = 'completed'
-        writeJson(response, 200, success(toRemoteConnectionSummary(await manager.connectConnection(id))))
+        writeResponse(response, 200, success(toRemoteConnectionSummary(await manager.connectConnection(id))))
         return true
       }
       if (request.method === 'POST' && parts.action === 'disconnect') {
         outcome = 'completed'
-        writeJson(response, 200, success(toRemoteConnectionSummary(await manager.disconnectConnection(id))))
+        writeResponse(response, 200, success(toRemoteConnectionSummary(await manager.disconnectConnection(id))))
         return true
       }
       if (request.method === 'PATCH' && parts.action === undefined) {
         if (!isJson(request)) throw new BackendError({ code: 'invalid-argument', message: 'connection route 只接受 JSON' })
         const requestBody = updateRequest(await readJson(request, maxBodyBytes))
         outcome = 'completed'
-        writeJson(response, 200, success(toRemoteConnectionSummary(await manager.updateConnection(id, requestBody.config, requestBody.secretPatch))))
+        writeResponse(response, 200, success(toRemoteConnectionSummary(await manager.updateConnection(id, requestBody.config, requestBody.secretPatch))))
         return true
       }
       if (request.method === 'DELETE' && parts.action === undefined) {
         await manager.remove(id)
         outcome = 'completed'
-        writeJson(response, 200, success(null))
+        writeResponse(response, 200, success(null))
         return true
       }
 
@@ -287,7 +305,7 @@ export function createHttpConnectionRouter(options: HttpConnectionRouterOptions)
       outcome = 'failed'
       const result = routeError(error)
       errorCode = result.body.error.code as HttpRequestAuditEvent['errorCode']
-      if (!response.headersSent) writeJson(response, result.status, result.body)
+      if (!response.headersSent) writeResponse(response, result.status, result.body)
       else if (!response.destroyed) response.destroy()
       return true
     } finally {

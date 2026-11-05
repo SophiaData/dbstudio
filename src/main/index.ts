@@ -23,18 +23,9 @@ import { chooseImportFile } from './import-file-dialog'
 import { SqlLibraryStore } from './SqlLibraryStore'
 import { registerElectronIpc } from './transport/electron-ipc-adapter'
 import {
-  createHttpServer,
-  createHttpServerComposition,
-  DEFAULT_OWNER_QUOTA,
-  OwnerGovernance,
-  createHttpAuthResolver,
-  createHttpServerPrincipalResolver,
-  readHttpServerStartupConfig,
-  type HttpAuthProvider,
-  type HttpRequestAuditSink,
+  createConfiguredHttpServer,
   type HttpServer,
-  type HttpServerPrincipalResolver,
-  type OwnerQuota
+  type HttpServerRuntimeDependencies
 } from './server'
 
 let mainWindow: BrowserWindow | null = null
@@ -110,82 +101,22 @@ function createSafeStorageCipher(): SecretCipher | null {
   }
 }
 
-export interface HttpServerStartupDependencies {
-  readonly resolvePrincipal?: HttpServerPrincipalResolver
-  readonly authProvider?: HttpAuthProvider
-  readonly governance?: OwnerGovernance
-  readonly ownerQuota?: OwnerQuota
-  readonly remoteOutboundPolicy?: import('../backend/contract/remote').RemoteOutboundPolicy
-  readonly auditSink?: HttpRequestAuditSink
-  readonly metricsSink?: HttpRequestAuditSink
-}
-
-function positiveEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
-  const raw = env[name]?.trim()
-  if (!raw) return fallback
-  const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${name} 必须是正整数`)
-  }
-  return value
-}
-
-function startupOwnerQuota(env: NodeJS.ProcessEnv): OwnerQuota {
-  return {
-    maxConcurrentRequests: positiveEnv(env, 'DBSTUDIO_HTTP_MAX_CONCURRENT_REQUESTS', DEFAULT_OWNER_QUOTA.maxConcurrentRequests),
-    maxConnections: positiveEnv(env, 'DBSTUDIO_HTTP_MAX_CONNECTIONS', DEFAULT_OWNER_QUOTA.maxConnections),
-    maxStorageBytes: positiveEnv(env, 'DBSTUDIO_HTTP_MAX_STORAGE_BYTES', DEFAULT_OWNER_QUOTA.maxStorageBytes)
-  }
-}
-
-function consoleAuditSink(prefix: string): HttpRequestAuditSink {
-  return {
-    record: (event) => console.log(`[${prefix}] ${JSON.stringify(event)}`)
-  }
-}
+export type HttpServerStartupDependencies = Omit<HttpServerRuntimeDependencies, 'baseDir' | 'cipher'>
 
 export async function startConfiguredHttpServer(
   dependencies: HttpServerStartupDependencies = {}
 ): Promise<void> {
-  const config = readHttpServerStartupConfig(process.env)
-  if (!config) return
-
-  const governance = dependencies.governance ?? new OwnerGovernance({
-    quota: dependencies.ownerQuota ?? startupOwnerQuota(process.env),
-    audit: (event) => console.log(`[http-owner-audit] ${JSON.stringify(event)}`)
-  })
-  const auditSink = dependencies.auditSink ?? consoleAuditSink('http-audit')
-  const metricsSink = dependencies.metricsSink ?? consoleAuditSink('http-metrics')
-
-  const resolvePrincipal = dependencies.resolvePrincipal ??
-    (dependencies.authProvider ? createHttpAuthResolver(dependencies.authProvider) : undefined)
-
-  const composition = createHttpServerComposition({
-    dialects: BUILTIN_DIALECT_METADATA,
+  if (!process.env['DBSTUDIO_HTTP_PORT']?.trim()) return
+  const server = await createConfiguredHttpServer(process.env, {
+    ...dependencies,
     baseDir: app.getPath('userData'),
     cipher: createSafeStorageCipher(),
-    onLog: (level, msg) => console[level === 'error' ? 'error' : 'log'](msg),
-    remoteOutboundPolicy: dependencies.remoteOutboundPolicy ?? config.remoteOutboundPolicy,
-    artifactMaxBytes: positiveEnv(process.env, 'DBSTUDIO_HTTP_ARTIFACT_MAX_BYTES', 100 * 1024 * 1024),
-    artifactMaxTotalBytes: positiveEnv(process.env, 'DBSTUDIO_HTTP_ARTIFACT_MAX_TOTAL_BYTES', 1024 * 1024 * 1024),
-    artifactSweepIntervalMs: positiveEnv(process.env, 'DBSTUDIO_HTTP_ARTIFACT_SWEEP_INTERVAL_MS', 60 * 1000),
-    governance
+    onLog: dependencies.onLog ?? ((level, msg) => console[level === 'error' ? 'error' : 'log'](msg))
   })
-  const server = createHttpServer({
-    composition,
-    listen: { host: config.host, port: config.port },
-    resolvePrincipal: createHttpServerPrincipalResolver(config, resolvePrincipal),
-    governance,
-    auditSink,
-    metricsSink
-  })
-  try {
-    const address = await server.listen()
+  if (server) {
     httpServer = server
+    const address = server.address!
     console.log(`[main] HTTP server 已监听 ${address.address}:${address.port}`)
-  } catch (error) {
-    await server.close().catch(() => undefined)
-    throw error
   }
 }
 

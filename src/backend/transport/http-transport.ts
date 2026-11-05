@@ -91,6 +91,8 @@ export interface HttpBackendClientOptions {
   readonly fetch: HttpFetch
   /** 额外请求头（认证等），不会覆盖 content-type / request id。 */
   readonly headers?: HttpHeaders
+  /** 每次发送前由受信任 session provider 提供最新认证头；不保存 token，不重放请求。 */
+  readonly getHeaders?: () => HttpHeaders | Promise<HttpHeaders>
   /** 默认超时毫秒数；`0` 或非有限值表示不设超时。缺省 30s。 */
   readonly timeoutMs?: number
   /** 请求 id 生成器；并发调用必须唯一。缺省用 crypto.randomUUID 或回退实现。 */
@@ -238,14 +240,33 @@ export function createHttpBackendClient(
   )
   const methodCache = new Map<string, (...args: unknown[]) => Promise<unknown>>()
 
+  async function requestHeaders(signal: AbortSignal, callId: string): Promise<HttpHeaders> {
+    if (!options.getHeaders) return options.headers ?? {}
+    let onAbort: () => void = () => undefined
+    try {
+      const dynamic = await new Promise<HttpHeaders>((resolve, reject) => {
+        onAbort = () => reject(new Error('aborted'))
+        if (signal.aborted) return onAbort()
+        signal.addEventListener('abort', onAbort, { once: true })
+        Promise.resolve().then(() => options.getHeaders!()).then(resolve, reject)
+      })
+      return { ...options.headers, ...dynamic }
+    } catch {
+      // Session providers may include token/claims in errors. Never forward their message.
+      throw makeError('unauthorized', '获取认证信息失败', { callId, retryable: false })
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
   async function requestJson(
     path: string,
     requestMethod: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     bodyValue?: unknown,
     callOptions?: BackendCallOptions
   ): Promise<unknown> {
-    if (!path.startsWith('/')) {
-      throw makeError('invalid-argument', 'HTTP route path 必须以 / 开头', { callId: nextRequestId() })
+    if (!path.startsWith('/') || new URL(path, endpoint).origin !== new URL(endpoint).origin) {
+      throw makeError('invalid-argument', 'HTTP route path 必须位于后端同一 origin', { callId: nextRequestId() })
     }
     const callId = nextRequestId()
     if (callOptions?.signal?.aborted === true) {
@@ -262,10 +283,12 @@ export function createHttpBackendClient(
     try {
       let response: HttpResponseLike
       try {
+        const headers = await requestHeaders(scope.signal, callId)
+        if (scope.signal.aborted) throw new Error('aborted')
         response = await fetchImpl(new URL(path, endpoint).toString(), {
           method: requestMethod,
           headers: {
-            ...options.headers,
+            ...headers,
             'content-type': 'application/json',
             accept: 'application/json',
             'x-dbstudio-request-id': callId
@@ -375,10 +398,12 @@ export function createHttpBackendClient(
 
       let response: HttpResponseLike
       try {
+        const headers = await requestHeaders(scope.signal, callId)
+        if (scope.signal.aborted) throw new Error('aborted')
         response = await fetchImpl(endpoint, {
           method: 'POST',
           headers: {
-            ...options.headers,
+            ...headers,
             // 顺序刻意放在用户头之后：这些是 wire 契约的一部分，不允许被覆盖。
             'content-type': 'application/json',
             accept: 'application/json',

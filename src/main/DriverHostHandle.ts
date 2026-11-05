@@ -276,7 +276,12 @@ export class DriverHostHandle {
     this.#child = spawn(process.execPath, [script, '--dialect', options.dialectId], {
       // ELECTRON_RUN_AS_NODE=1：让 Electron 二进制以纯 Node 身份运行子进程，
       // 这样宿主里可以正常使用 node:sqlite 等内置模块，且不必依赖用户装了系统 node。
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      // 服务认证和凭据加密配置属于主进程，不能被数据库驱动继承。
+      env: {
+        ...Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+          !key.startsWith('DBSTUDIO_HTTP_') && !key.startsWith('DBSTUDIO_BACKEND_'))),
+        ELECTRON_RUN_AS_NODE: '1'
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     })

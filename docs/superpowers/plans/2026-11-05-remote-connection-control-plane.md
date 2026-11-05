@@ -2,7 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为 HTTP remote backend 增加可替换认证、owner-scoped 连接管理控制面和前端远程连接操作，并在 staging 通过完整安全与集成门禁。
+**Goal:** 为 HTTP remote backend 增加可替换认证、owner-scoped 连接管理控制面和前端远程连接操作，并提供可执行的 staging 部署和验收边界。
+
+**2026-11-05 实施进度：**
+
+- Contract、owner-scoped routes、实际 renderer 参数适配和生命周期已实现。
+- 已接入 jose RS256/ES256 验签与默认环境认证，独立 Node 构建/启动、数据目录、AES-GCM cipher 和 SIGTERM 关闭均有测试。
+- 非法 config/secret 在持久化前拒绝；缺省目标、SSH fallback、RPC 摘要和根节点 metadata 旁路已补回归；远程保存额度默认100。
+- 冻结 preload identity 保留；首次请求获取动态认证头，mutation 不重放；显式环境配置可启动远程客户端。
+- 实际 GUI 七组场景已通过（HTTP layer mock）；真实 HTTP composition/manager/store 的 owner 隔离另有集成测试，仅替换 driver host。
+- 已修复同连接跨标签并行刷新竞态，确定性 Node 回归与新构建 GUI 75/75 通过。
+- 多轮只读审查提出的问题已修复并复核；完整 headless 109步骤通过、0失败，12项缺外部环境明确跳过；最终 Node 门禁81/81通过（含新增CORS）。PR/远程CI需继续收口。
+- CORS 使用显式 origin allowlist（默认关闭，禁止通配符），仅 JWT/REQUIRE_AUTH 配置可启用。实际请求仍需认证；Electron 当前版本可能不发送 Origin，显式 null/HTTPS origin 与预检另有真实 listener 回归。
+- 本地生成的 key/token 只用于合成测试；真实 IdP、部署后双身份、外部数据库与网络出口验收必须在目标环境执行，不能标为本地已完成。
 
 **Architecture:** 保留通用 `BACKEND_METHOD_MANIFEST` 的能力边界，连接配置管理走独立的 owner-bound HTTP routes，避免把连接配置和 secret 混入普通 RPC envelope。HTTP server 仍由 composition root 注入 principal resolver、governance、remote outbound policy、audit sink 和 metrics sink；每条连接管理 route 都从 principal 选择 owner scope，再调用现有 `ConnectionApplicationService`，不复制连接生命周期逻辑。前端通过 `BackendClient` 的 transport-neutral connection control API 访问桌面 IPC 或 HTTP route，桌面路径保持现有行为。
 

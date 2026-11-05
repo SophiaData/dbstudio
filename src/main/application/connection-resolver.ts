@@ -41,6 +41,7 @@
  */
 
 import { NodeId } from '../../core/api'
+import { BackendError } from '../../backend/contract/errors'
 import type { LiveConnection, SavedConnection } from './types'
 
 /** 游标 id 解析结果。与 `CursorRegistry.parse` 的返回形状一致。 */
@@ -115,7 +116,7 @@ export class ConnectionResolver {
     const parsed = NodeId.parse(connectionId)
     const realId = parsed ? parsed.connectionId : connectionId
     const saved = this.#ctx.getSaved(realId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) throw new BackendError({ code: 'not-found', message: `连接不存在: ${connectionId}` })
     return { conn: this.#ctx.getSession(realId), saved }
   }
 

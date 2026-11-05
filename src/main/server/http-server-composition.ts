@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import type { BackendPrincipal, BackendRequestContext } from '../../backend/transport/transport'
 import type { RemoteBackendApi } from '../../backend/contract/backend'
 import type { RemoteOutboundPolicy } from '../../backend/contract/remote'
+import { isRemoteConnectionOptionSafe, toRemoteConnectionSummary } from '../../backend/contract/remote-connection'
 import { REMOTE_BACKEND_METHOD_MANIFEST } from '../../backend/contract/method-manifest'
 import { BackendError } from '../../backend/contract/errors'
 import {
@@ -40,7 +41,7 @@ export interface HttpServerCompositionOptions {
   readonly cipher: SecretCipher | null | ((ownerId: string) => SecretCipher | null)
   readonly onLog?: ConnectionLogger
   readonly createDriverHost?: DriverHostFactory
-  /** 远程连接出站目标策略；未提供时远程连接管理仍不启用。 */
+  /** 远程连接出站目标策略；未提供时使用空allowlist拒绝所有连接目标。 */
   readonly remoteOutboundPolicy?: RemoteOutboundPolicy
   /** 外部 wire 请求的解码深度与节点数上限。 */
   readonly decodeLimits?: WireDecodeLimits
@@ -110,6 +111,24 @@ function projectRemoteApi(api: ApplicationApi): RemoteBackendApi {
     if (typeof handler !== 'function') {
       throw new Error(`remote manifest 方法 ${method} 未在 application API 实现`)
     }
+    if (method === 'listConnections') {
+      return [method, async () => (await api.listConnections()).map(toRemoteConnectionSummary)] as const
+    }
+    if (method === 'connectConnection' || method === 'disconnectConnection') {
+      return [method, async (id: string) => toRemoteConnectionSummary(await api[method](id))] as const
+    }
+    if (method === 'listChildren') {
+      return [method, async (nodeId: string | null) => {
+        const nodes = await api.listChildren(nodeId)
+        if (nodeId !== null) return nodes
+        return nodes.map((node) => node.meta ? {
+          ...node,
+          meta: Object.fromEntries(Object.entries(node.meta).filter(([key, value]) =>
+            !key.startsWith('options.') || isRemoteConnectionOptionSafe(key.slice('options.'.length), value)
+          ))
+        } : node)
+      }] as const
+    }
     return [method, handler] as const
   })
   return Object.fromEntries(entries) as RemoteBackendApi
@@ -148,7 +167,7 @@ export function createHttpServerComposition(
     const manager = new ConnectionManager(options.dialects, store, {
       onLog: options.onLog,
       createDriverHost: options.createDriverHost,
-      remoteOutboundPolicy: options.remoteOutboundPolicy,
+      remoteOutboundPolicy: options.remoteOutboundPolicy ?? { allowedHosts: [], allowedPorts: [] },
       reserveConnection: options.governance
         ? () => options.governance!.reserveConnection(ownerId)
         : undefined

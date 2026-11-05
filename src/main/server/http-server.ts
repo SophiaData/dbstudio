@@ -7,8 +7,10 @@
  */
 
 import { createServer, type Server } from 'node:http'
+import { createHttpCorsHandler } from './http-cors'
 import type { AddressInfo } from 'node:net'
 import type { HttpServerComposition } from './http-server-composition'
+import { createHttpAuthResolver } from './http-auth'
 import {
   createHttpArtifactRouter,
   type HttpArtifactRouter
@@ -40,6 +42,8 @@ export interface HttpServerOptions
   readonly composition: HttpServerComposition
   readonly listen: HttpServerListenOptions
   readonly maxArtifactMetadataBodyBytes?: number
+  /** 显式跨源客户端；默认关闭，禁止通配 origin。Electron file origin 必须配置 null。 */
+  readonly allowedOrigins?: readonly string[]
   /** 优雅关闭等待中的请求的最长时间；超时强制关闭连接。 */
   readonly closeGraceMs?: number
 }
@@ -123,15 +127,20 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
     'maxConcurrentRequests'
   )
 
+  const cors = createHttpCorsHandler(options.allowedOrigins)
+  const resolvePrincipal = createHttpAuthResolver({
+    resolvePrincipal: async (request) => await options.resolvePrincipal?.(request) ?? null
+  })
   const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(maxConcurrentRequests)
   const handler = createHttpServerHandler({
     ...options,
     composition: options.composition,
+    resolvePrincipal,
     requestLimiter
   })
   const artifactRouter: HttpArtifactRouter = createHttpArtifactRouter({
     composition: options.composition,
-    resolvePrincipal: options.resolvePrincipal,
+    resolvePrincipal,
     maxMetadataBodyBytes: options.maxArtifactMetadataBodyBytes,
     maxConcurrentRequests: options.maxConcurrentRequests,
     maxRequestIdLength: options.maxRequestIdLength,
@@ -142,10 +151,11 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
   })
   const connectionRouter: HttpConnectionRouter = createHttpConnectionRouter({
     composition: options.composition,
-    resolvePrincipal: options.resolvePrincipal,
+    resolvePrincipal,
     requestLimiter,
     maxConcurrentRequests: options.maxConcurrentRequests,
     maxBodyBytes: options.maxBodyBytes,
+    maxResponseBytes: options.maxResponseBytes,
     maxRequestIdLength: options.maxRequestIdLength,
     governance: options.governance,
     auditSink: options.auditSink,
@@ -153,6 +163,7 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
   })
   const server = createServer((request, response) => {
     void (async () => {
+      if (cors(request, response, requestLimiter)) return
       if (await artifactRouter(request, response)) return
       if (await connectionRouter(request, response)) return
       await handler(request, response)
