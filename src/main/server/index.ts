@@ -2,6 +2,14 @@ export {
   createHttpServerComposition
 } from './http-server-composition'
 export {
+  createBearerTokenPrincipalResolver,
+  createHttpAuthResolver
+} from './http-auth'
+export type {
+  BearerTokenVerifier,
+  HttpAuthProvider
+} from './http-auth'
+export {
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig
 } from './http-server-config'

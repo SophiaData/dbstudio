@@ -27,8 +27,10 @@ import {
   createHttpServerComposition,
   DEFAULT_OWNER_QUOTA,
   OwnerGovernance,
+  createHttpAuthResolver,
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig,
+  type HttpAuthProvider,
   type HttpRequestAuditSink,
   type HttpServer,
   type HttpServerPrincipalResolver,
@@ -110,6 +112,7 @@ function createSafeStorageCipher(): SecretCipher | null {
 
 export interface HttpServerStartupDependencies {
   readonly resolvePrincipal?: HttpServerPrincipalResolver
+  readonly authProvider?: HttpAuthProvider
   readonly governance?: OwnerGovernance
   readonly ownerQuota?: OwnerQuota
   readonly remoteOutboundPolicy?: import('../backend/contract/remote').RemoteOutboundPolicy
@@ -154,6 +157,9 @@ export async function startConfiguredHttpServer(
   const auditSink = dependencies.auditSink ?? consoleAuditSink('http-audit')
   const metricsSink = dependencies.metricsSink ?? consoleAuditSink('http-metrics')
 
+  const resolvePrincipal = dependencies.resolvePrincipal ??
+    (dependencies.authProvider ? createHttpAuthResolver(dependencies.authProvider) : undefined)
+
   const composition = createHttpServerComposition({
     dialects: BUILTIN_DIALECT_METADATA,
     baseDir: app.getPath('userData'),
@@ -168,7 +174,7 @@ export async function startConfiguredHttpServer(
   const server = createHttpServer({
     composition,
     listen: { host: config.host, port: config.port },
-    resolvePrincipal: createHttpServerPrincipalResolver(config, dependencies.resolvePrincipal),
+    resolvePrincipal: createHttpServerPrincipalResolver(config, resolvePrincipal),
     governance,
     auditSink,
     metricsSink
