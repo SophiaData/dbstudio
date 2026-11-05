@@ -105,6 +105,45 @@ try {
     )
   })
 
+  await check('artifact ticket 内存数量有上限', async () => {
+    const capped = new ArtifactStore({
+      baseDir: join(stateDir, 'ticket-cap-owner'),
+      maxTickets: 1,
+      maxBytes: 8,
+      maxTotalBytes: 8
+    })
+    await capped.createUploadTicket({ purpose: 'import-source', expectedBytes: 1 })
+    await assert.rejects(
+      () => capped.createUploadTicket({ purpose: 'import-source', expectedBytes: 1 }),
+      (error) => error?.code === 'conflict'
+    )
+    capped.dispose()
+  })
+
+  await check('owner storage lease 随 artifact 完成与删除释放', async () => {
+    const reserved = []
+    const released = []
+    const governed = new ArtifactStore({
+      baseDir: join(stateDir, 'governed-owner'),
+      maxBytes: 16,
+      maxTotalBytes: 16,
+      reserveStorage: (bytes) => {
+        reserved.push(bytes)
+        return { release: () => released.push(bytes) }
+      }
+    })
+    const ticket = await governed.createUploadTicket({ purpose: 'import-source', expectedBytes: 4 })
+    await governed.upload(
+      ticket.artifact.artifactId,
+      ticket.headers['x-dbstudio-artifact-ticket'].replace(/^Bearer /, ''),
+      (async function* () { yield Buffer.from('data') })()
+    )
+    assert.deepEqual(reserved, [4])
+    await governed.deleteArtifact(ticket.artifact.artifactId)
+    assert.deepEqual(released, [4])
+    governed.dispose()
+  })
+
   await check('sweep 不删除活跃上传，TTL 到期后收口为 expired', async () => {
     let now = 0
     const active = new ArtifactStore({
@@ -221,9 +260,22 @@ try {
       for (const scope of scopes.values()) scope.artifactStore.dispose()
     }
   }
+  const governanceEvents = []
+  const auditEvents = []
+  const metricEvents = []
+  const governance = {
+    recordAuthenticationFailure: (requestId) => governanceEvents.push(['auth-failed', requestId]),
+    acquireRequest: (ownerId, requestId) => {
+      governanceEvents.push(['accepted', ownerId, requestId])
+      return { release: () => governanceEvents.push(['released', ownerId, requestId]) }
+    }
+  }
   const server = createHttpServer({
     composition,
     listen: { host: '127.0.0.1', port: 0 },
+    governance,
+    auditSink: { record: (event) => auditEvents.push(event) },
+    metricsSink: { record: (event) => metricEvents.push(event) },
     resolvePrincipal: (request) => {
       const owner = request.headers['x-owner-id']
       return typeof owner === 'string' ? { id: owner } : null
@@ -257,6 +309,9 @@ try {
       assert.equal(uploadTicket.method, 'PUT')
        assert.equal(uploadTicket.uploadUrl.includes('ticket='), false)
        assert.match(uploadTicket.headers['x-dbstudio-artifact-ticket'], /^Bearer /)
+       assert.ok(governanceEvents.some(([type, owner]) => type === 'accepted' && owner === 'owner-a'))
+       assert.ok(auditEvents.some((event) => event.method === 'artifact:POST:upload-tickets' && event.ownerId === 'owner-a'))
+       assert.ok(metricEvents.some((event) => event.method === 'artifact:POST:upload-tickets'))
     })
 
     await check('upload route 拒绝 export-result 和路径型 filename', async () => {

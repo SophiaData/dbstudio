@@ -35,6 +35,11 @@ export interface HttpRequestAuditSink {
   record(event: HttpRequestAuditEvent): void
 }
 
+export interface HttpRequestLimiter {
+  tryAcquire(): boolean
+  release(): void
+}
+
 export interface HttpServerHandlerOptions {
   readonly composition: Pick<HttpServerComposition, 'dispatch'>
   /** 认证后的 principal；缺省拒绝全部请求，避免误把未认证 handler 暴露出去。 */
@@ -51,6 +56,8 @@ export interface HttpServerHandlerOptions {
   readonly auditSink?: HttpRequestAuditSink
   /** 与审计事件共享安全字段，供指标系统计数/分组。 */
   readonly metricsSink?: HttpRequestAuditSink
+  /** RPC 与 artifact route 共享的全局请求预算。 */
+  readonly requestLimiter?: HttpRequestLimiter
 }
 
 export type HttpServerHandler = (
@@ -76,6 +83,21 @@ function positiveLimit(value: number | undefined, fallback: number, name: string
     throw new Error(`${name} 必须是正整数`)
   }
   return resolved
+}
+
+export function createHttpRequestLimiter(maxConcurrentRequests?: number): HttpRequestLimiter {
+  const limit = positiveLimit(maxConcurrentRequests, DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS, 'maxConcurrentRequests')
+  let active = 0
+  return {
+    tryAcquire(): boolean {
+      if (active >= limit) return false
+      active += 1
+      return true
+    },
+    release(): void {
+      active = Math.max(0, active - 1)
+    }
+  }
 }
 
 function headerValue(request: IncomingMessage, name: string): string | undefined {
@@ -291,11 +313,12 @@ export function createHttpServerHandler(
     DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH,
     'maxRequestIdLength'
   )
-  let activeRequests = 0
+  const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(maxConcurrentRequests)
 
   return async (request, response): Promise<void> => {
     const startedAt = Date.now()
     let headerId = fallbackRequestId()
+    let requestId = headerId
     let ownerId: string | undefined
     let method: string | undefined
     let outcome: HttpRequestAuditEvent['outcome'] = 'rejected'
@@ -315,11 +338,10 @@ export function createHttpServerHandler(
         drainRequest(request)
         throw new HttpGuardError(413, 'invalid-argument', 'HTTP 请求体超过大小上限')
       }
-      if (activeRequests >= maxConcurrentRequests) {
+      if (!requestLimiter.tryAcquire()) {
         drainRequest(request)
         throw new HttpGuardError(429, 'conflict', 'HTTP backend 并发请求已达上限', true)
       }
-      activeRequests += 1
       let ownerRequestLease: OwnerLease | undefined
 
       try {
@@ -376,7 +398,7 @@ export function createHttpServerHandler(
           if (headerId !== bodyId && headerValue(request, 'x-dbstudio-request-id')) {
             throw new HttpGuardError(400, 'invalid-argument', 'request id 与请求体 id 不一致')
           }
-          const requestId = bodyId ?? headerId
+          requestId = bodyId ?? headerId
           const context: BackendRequestContext = {
             requestId,
             principal,
@@ -406,8 +428,11 @@ export function createHttpServerHandler(
           response.removeListener('close', onResponseClose)
         }
       } finally {
-        ownerRequestLease?.release()
-        activeRequests -= 1
+        try {
+          ownerRequestLease?.release()
+        } finally {
+          requestLimiter.release()
+        }
       }
     } catch (error) {
       if (!request.readableEnded) drainRequest(request)
@@ -428,7 +453,7 @@ export function createHttpServerHandler(
       ))
     } finally {
       const event: HttpRequestAuditEvent = {
-        requestId: headerId,
+        requestId,
         ...(ownerId === undefined ? {} : { ownerId }),
         ...(method === undefined ? {} : { method }),
         statusCode: response.statusCode || 500,

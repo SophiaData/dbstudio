@@ -29,7 +29,7 @@ import {
   type ApplicationApi
 } from '../application/create-application-api'
 import type { ConnectionLogger, DriverHostFactory } from '../application/types'
-import { LocalArtifactStore } from './artifact-store'
+import { DEFAULT_ARTIFACT_MAX_TOTAL_BYTES, LocalArtifactStore } from './artifact-store'
 import type { OwnerGovernance } from './owner-governance'
 
 export interface HttpServerCompositionOptions {
@@ -46,6 +46,8 @@ export interface HttpServerCompositionOptions {
   readonly decodeLimits?: WireDecodeLimits
   /** 每个 owner 的 artifact 单文件大小上限。 */
   readonly artifactMaxBytes?: number
+  /** 每个 owner 的 artifact 总容量上限；还会与 owner governance 取更小值。 */
+  readonly artifactMaxTotalBytes?: number
   /** artifact ticket 的默认有效期。 */
   readonly artifactTtlMs?: number
   /** artifact 过期清理的定时周期。 */
@@ -151,11 +153,19 @@ export function createHttpServerComposition(
         ? () => options.governance!.reserveConnection(ownerId)
         : undefined
     })
+    const ownerQuota = options.governance?.quotaFor(ownerId)
     const artifactStore = new LocalArtifactStore({
       baseDir: ownerDir,
       maxBytes: options.artifactMaxBytes,
+      maxTotalBytes: Math.min(
+        options.artifactMaxTotalBytes ?? DEFAULT_ARTIFACT_MAX_TOTAL_BYTES,
+        ownerQuota?.maxStorageBytes ?? DEFAULT_ARTIFACT_MAX_TOTAL_BYTES
+      ),
       defaultTtlMs: options.artifactTtlMs,
-      sweepIntervalMs: options.artifactSweepIntervalMs
+      sweepIntervalMs: options.artifactSweepIntervalMs,
+      reserveStorage: options.governance
+        ? (bytes) => options.governance!.reserveStorage(ownerId, bytes)
+        : undefined
     })
     artifactStore.startSweep()
     const api = projectRemoteApi(

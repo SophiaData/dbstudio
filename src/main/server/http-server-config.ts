@@ -2,12 +2,15 @@
 
 import type { IncomingMessage } from 'node:http'
 import type { BackendPrincipal } from '../../backend/transport/transport'
+import type { RemoteOutboundPolicy } from '../../backend/contract/remote'
 
 export interface HttpServerStartupConfig {
   readonly host: string
   readonly port: number
   /** 仅 loopback 本地单租户模式使用；远程模式必须注入 resolver。 */
   readonly ownerId?: string
+  /** 远程驱动实际可访问的主机/端口 allowlist；缺省为空，fail closed。 */
+  readonly remoteOutboundPolicy: RemoteOutboundPolicy
 }
 
 export type HttpServerStartupEnv = Readonly<Record<string, string | undefined>>
@@ -18,6 +21,14 @@ export type HttpServerPrincipalResolver = (
 
 function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+}
+
+function csvValues(value: string | undefined): string[] {
+  return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? []
+}
+
+function portValues(value: string | undefined): number[] {
+  return csvValues(value).map((item) => Number(item)).filter((item) => Number.isSafeInteger(item) && item >= 1 && item <= 65_535)
 }
 
 /**
@@ -37,7 +48,13 @@ export function readHttpServerStartupConfig(
 
   const host = env['DBSTUDIO_HTTP_HOST']?.trim() || '127.0.0.1'
   const ownerId = env['DBSTUDIO_HTTP_OWNER_ID']?.trim() || undefined
-  return ownerId === undefined ? { host, port } : { host, port, ownerId }
+  const remoteOutboundPolicy = {
+    allowedHosts: csvValues(env['DBSTUDIO_HTTP_ALLOWED_HOSTS']),
+    allowedPorts: portValues(env['DBSTUDIO_HTTP_ALLOWED_PORTS'])
+  }
+  return ownerId === undefined
+    ? { host, port, remoteOutboundPolicy }
+    : { host, port, ownerId, remoteOutboundPolicy }
 }
 
 export function createHttpServerPrincipalResolver(

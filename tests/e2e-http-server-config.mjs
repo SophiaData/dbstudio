@@ -51,8 +51,25 @@ await check('合法 loopback 配置使用默认 host 与固定 owner resolver', 
     DBSTUDIO_HTTP_PORT: '0',
     DBSTUDIO_HTTP_OWNER_ID: 'desktop'
   })
-  assert.deepEqual(config, { host: '127.0.0.1', port: 0, ownerId: 'desktop' })
+  assert.deepEqual(config, {
+    host: '127.0.0.1',
+    port: 0,
+    ownerId: 'desktop',
+    remoteOutboundPolicy: { allowedHosts: [], allowedPorts: [] }
+  })
   assert.deepEqual(await createHttpServerPrincipalResolver(config)({}), { id: 'desktop' })
+})
+
+await check('启动配置解析显式出站 allowlist', () => {
+  const config = readHttpServerStartupConfig({
+    DBSTUDIO_HTTP_PORT: '8123',
+    DBSTUDIO_HTTP_ALLOWED_HOSTS: 'db.example.test, jump.example.test',
+    DBSTUDIO_HTTP_ALLOWED_PORTS: '5432,22'
+  })
+  assert.deepEqual(config.remoteOutboundPolicy, {
+    allowedHosts: ['db.example.test', 'jump.example.test'],
+    allowedPorts: [5432, 22]
+  })
 })
 
 await check('注入 resolver 接收原始请求并返回认证 principal', async () => {
@@ -76,7 +93,11 @@ await check('非 loopback 模式要求注入 resolver，拒绝固定 owner', asy
     DBSTUDIO_HTTP_PORT: '8123',
     DBSTUDIO_HTTP_HOST: '0.0.0.0'
   })
-  assert.deepEqual(config, { host: '0.0.0.0', port: 8123 })
+  assert.deepEqual(config, {
+    host: '0.0.0.0',
+    port: 8123,
+    remoteOutboundPolicy: { allowedHosts: [], allowedPorts: [] }
+  })
   assert.throws(() => createHttpServerPrincipalResolver(config), /必须注入 resolvePrincipal/)
   const injected = async () => ({ id: 'remote-owner' })
   assert.strictEqual(createHttpServerPrincipalResolver(config, injected), injected)

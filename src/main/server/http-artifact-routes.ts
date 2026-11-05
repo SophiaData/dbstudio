@@ -6,6 +6,7 @@
  * composition 取得 owner scope。
  */
 
+import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { pipeline } from 'node:stream/promises'
 import { URL } from 'node:url'
@@ -18,6 +19,13 @@ import {
 import { BackendError, toBackendErrorPayload } from '../../backend/contract/errors'
 import type { BackendPrincipal } from '../../backend/transport/transport'
 import type { HttpServerComposition } from './http-server-composition'
+import {
+  createHttpRequestLimiter,
+  type HttpRequestAuditEvent,
+  type HttpRequestAuditSink,
+  type HttpRequestLimiter
+} from './http-server-handler'
+import { OwnerGovernance, OwnerQuotaError, type OwnerLease } from './owner-governance'
 import { ArtifactStoreError, type LocalArtifactStore } from './artifact-store'
 
 export const ARTIFACT_ROUTE_PREFIX = '/artifacts/'
@@ -29,6 +37,11 @@ export interface HttpArtifactRouterOptions {
     request: IncomingMessage
   ) => BackendPrincipal | null | undefined | Promise<BackendPrincipal | null | undefined>
   readonly maxMetadataBodyBytes?: number
+  readonly maxConcurrentRequests?: number
+  readonly requestLimiter?: HttpRequestLimiter
+  readonly governance?: OwnerGovernance
+  readonly auditSink?: HttpRequestAuditSink
+  readonly metricsSink?: HttpRequestAuditSink
 }
 
 export type HttpArtifactRouter = (
@@ -210,17 +223,53 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
     DEFAULT_ARTIFACT_METADATA_BODY_BYTES
   )
 
+  const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(options.maxConcurrentRequests)
+
   return async (request, response): Promise<boolean> => {
     if (!isArtifactRoute(request)) return false
+    const startedAt = Date.now()
+    const requestIdHeader = request.headers['x-dbstudio-request-id']
+    const requestId = typeof requestIdHeader === 'string' && requestIdHeader.trim() !== ''
+      ? requestIdHeader.trim()
+      : `artifact-${randomUUID()}`
+    let ownerId: string | undefined
+    let method: string | undefined = request.method ?? 'GET'
+    let outcome: HttpRequestAuditEvent['outcome'] = 'rejected'
+    let errorCode: HttpRequestAuditEvent['errorCode']
+    let counted = false
+    let ownerRequestLease: OwnerLease | undefined
     try {
-      const principal = requirePrincipal(await options.resolvePrincipal?.(request))
+      let principal: BackendPrincipal
+      try {
+        principal = requirePrincipal(await options.resolvePrincipal?.(request))
+        ownerId = principal.id
+      } catch (error) {
+        options.governance?.recordAuthenticationFailure(requestId)
+        throw error
+      }
+      if (!requestLimiter.tryAcquire()) {
+        throw new ArtifactStoreError(
+          { code: 'conflict', message: 'HTTP artifact 并发请求已达上限', retryable: true },
+          429
+        )
+      }
+      counted = true
+      try {
+        ownerRequestLease = options.governance?.acquireRequest(principal.id, requestId)
+      } catch (error) {
+        if (error instanceof OwnerQuotaError) {
+          throw new ArtifactStoreError({ code: 'conflict', message: error.message, retryable: true }, 429)
+        }
+        throw error
+      }
       const scope = options.composition.scopeFor(principal)
       const store = scope.artifactStore
       const url = parseUrl(request)
       const parts = routeParts(url)
-      const method = request.method ?? 'GET'
+      method = `artifact:${request.method ?? 'GET'}:${parts[1] ?? 'unknown'}`
+      outcome = 'completed'
 
-      if (method === 'POST' && parts.length === 2 && parts[1] === 'upload-tickets') {
+      if (request.method === 'POST' && parts.length === 2 && parts[1] === 'upload-tickets') {
         if (!contentTypeIsJson(request)) {
           throw new ArtifactStoreError({ code: 'invalid-argument', message: 'artifact ticket 只接受 JSON' }, 415)
         }
@@ -229,21 +278,21 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
         return true
       }
 
-      if (method === 'PUT' && parts.length === 3 && parts[1] === 'uploads') {
+      if (request.method === 'PUT' && parts.length === 3 && parts[1] === 'uploads') {
         const artifactId = requireArtifactId(parts[2])
         const metadata = await store.upload(artifactId, ticketFromHeader(request), request)
         writeJson(response, 200, success(metadata))
         return true
       }
 
-      if (method === 'POST' && parts.length === 3 && parts[1] === 'download-tickets') {
+      if (request.method === 'POST' && parts.length === 3 && parts[1] === 'download-tickets') {
         const artifactId = requireArtifactId(parts[2])
         const ticket = await store.createDownloadTicket(artifactId)
         writeJson(response, 201, success(ticket))
         return true
       }
 
-      if (method === 'GET' && parts.length === 3 && parts[1] === 'downloads') {
+      if (request.method === 'GET' && parts.length === 3 && parts[1] === 'downloads') {
         const artifactId = requireArtifactId(parts[2])
         const opened = await store.openDownload(artifactId, ticketFromHeader(request))
         setDownloadHeaders(response, opened.artifact)
@@ -253,11 +302,11 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
 
       if (parts.length === 2 && isArtifactId(parts[1])) {
         const artifactId = parts[1]
-        if (method === 'GET') {
+        if (request.method === 'GET') {
           writeJson(response, 200, success(await store.inspectArtifact(artifactId)))
           return true
         }
-        if (method === 'DELETE') {
+        if (request.method === 'DELETE') {
           await store.deleteArtifact(artifactId)
           writeJson(response, 200, success(null))
           return true
@@ -265,17 +314,40 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
       }
 
       request.resume()
+      outcome = 'failed'
+      errorCode = 'not-found'
       writeJson(response, 404, failure('not-found', 'artifact route 不存在'))
       return true
     } catch (error) {
       if (!request.readableEnded && request.method !== 'GET' && request.method !== 'DELETE') request.resume()
+      outcome = 'failed'
       if (!response.headersSent) {
         const result = routeError(error)
+        errorCode = result.body.error.code as HttpRequestAuditEvent['errorCode']
         writeJson(response, result.status, result.body)
       } else if (!response.destroyed) {
         response.destroy()
       }
       return true
+    } finally {
+      ownerRequestLease?.release()
+      if (counted) requestLimiter.release()
+      const event: HttpRequestAuditEvent = {
+        requestId,
+        ...(ownerId === undefined ? {} : { ownerId }),
+        ...(method === undefined ? {} : { method }),
+        statusCode: response.statusCode || (outcome === 'completed' ? 200 : 500),
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outcome,
+        ...(errorCode === undefined ? {} : { errorCode })
+      }
+      for (const sink of [options.auditSink, options.metricsSink]) {
+        try {
+          sink?.record(event)
+        } catch {
+          // artifact 可观测性失败不能改变响应或资源回收。
+        }
+      }
     }
   }
 }
