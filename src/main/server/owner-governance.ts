@@ -5,6 +5,8 @@
  * 不绑定 JWT/mTLS，也不直接操作连接或 artifact 实现。
  */
 
+import { BackendError } from '../../backend/contract/errors'
+
 export interface OwnerQuota {
   readonly maxConcurrentRequests?: number
   readonly maxConnections?: number
@@ -44,12 +46,17 @@ export interface OwnerLease {
   readonly release: () => void
 }
 
-export class OwnerQuotaError extends Error {
+export class OwnerQuotaError extends BackendError {
   constructor(
     readonly resource: 'requests' | 'connections' | 'storage',
     message: string
   ) {
-    super(message)
+    super({
+      code: 'conflict',
+      message,
+      retryable: true,
+      details: { resource }
+    })
     this.name = 'OwnerQuotaError'
   }
 }

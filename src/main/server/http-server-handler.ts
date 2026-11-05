@@ -149,6 +149,15 @@ function errorResponse(
 
 function statusForResponse(response: BackendResponse): number {
   if (response.ok) return 200
+  if (
+    response.error.code === 'conflict' &&
+    response.error.details &&
+    typeof response.error.details === 'object' &&
+    'resource' in response.error.details &&
+    ['requests', 'connections', 'storage'].includes(String(response.error.details.resource))
+  ) {
+    return 429
+  }
   switch (response.error.code) {
     case 'invalid-argument':
       return 400

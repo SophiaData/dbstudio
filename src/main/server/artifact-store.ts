@@ -292,6 +292,13 @@ export class LocalArtifactStore {
     }
   }
 
+  #purgeExpiredTickets(): void {
+    const now = this.#now()
+    for (const [token, ticket] of this.#tickets) {
+      if (now >= ticket.expiresAt) this.#tickets.delete(token)
+    }
+  }
+
   async #readMetadata(artifactId: ArtifactMetadata['artifactId']): Promise<ArtifactMetadata> {
     if (!isArtifactId(artifactId)) {
       throw artifactError('invalid-argument', 'artifact id 不合法')
@@ -386,6 +393,7 @@ export class LocalArtifactStore {
   }
 
   async sweepExpired(): Promise<void> {
+    this.#purgeExpiredTickets()
     if (this.#sweepInFlight) return this.#sweepInFlight
     const sweep = this.#runSweep()
     this.#sweepInFlight = sweep
@@ -444,6 +452,7 @@ export class LocalArtifactStore {
       if (expectedBytes !== null && quota.bytes + expectedBytes > this.#maxTotalBytes) {
         throw artifactError('invalid-argument', 'artifact 总容量已达到 owner 上限', 413)
       }
+      this.#purgeExpiredTickets()
       if (this.#tickets.size >= this.#maxTickets) {
         throw artifactError('conflict', 'artifact ticket 数量已达到 owner 上限', 409)
       }
@@ -502,7 +511,6 @@ export class LocalArtifactStore {
     const output = createWriteStream(temporaryPath, { flags: 'wx', mode: 0o600 })
     const hash = createHash('sha256')
     let sizeBytes = 0
-    let reservedBytes = 0
     try {
       for await (const value of source) {
         const chunk = typeof value === 'string' ? Buffer.from(value) : Buffer.from(value)
@@ -516,9 +524,6 @@ export class LocalArtifactStore {
         if (quota.bytes + inFlightBytes > this.#maxTotalBytes) {
           throw artifactError('invalid-argument', 'artifact 总容量已达到 owner 上限', 413)
         }
-        const delta = sizeBytes - reservedBytes
-        this.#reserveStorage(artifactId, delta)
-        reservedBytes = sizeBytes
         hash.update(chunk)
         await writeChunk(output, chunk)
       }
@@ -533,6 +538,7 @@ export class LocalArtifactStore {
       if (current.sha256 !== null && current.sha256.toLowerCase() !== sha256) {
         throw artifactError('invalid-argument', 'artifact sha256 与 expectedSha256 不一致', 400)
       }
+      this.#reserveStorage(artifactId, sizeBytes)
       await rename(temporaryPath, this.#dataPath(artifactId))
       const ready: ArtifactMetadata = { ...current, status: 'ready', sizeBytes, sha256 }
       await this.#writeMetadata(ready)
@@ -554,25 +560,31 @@ export class LocalArtifactStore {
   }
 
   async createDownloadTicket(artifactId: ArtifactMetadata['artifactId']): Promise<ArtifactDownloadTicket> {
-    const artifact = await this.#expireIfNeeded(await this.#readMetadata(artifactId))
-    if (artifact.status !== 'ready') {
-      throw artifactError('conflict', 'artifact 尚未准备好下载', 409)
-    }
-    const token = ticketValue()
-    this.#tickets.set(token, {
-      kind: 'download',
-      artifactId,
-      expiresAt: artifact.expiresAt
+    return this.#withQuotaLock(async () => {
+      const artifact = await this.#expireIfNeeded(await this.#readMetadata(artifactId))
+      if (artifact.status !== 'ready') {
+        throw artifactError('conflict', 'artifact 尚未准备好下载', 409)
+      }
+      this.#purgeExpiredTickets()
+      if (this.#tickets.size >= this.#maxTickets) {
+        throw artifactError('conflict', 'artifact ticket 数量已达到 owner 上限', 409)
+      }
+      const token = ticketValue()
+      this.#tickets.set(token, {
+        kind: 'download',
+        artifactId,
+        expiresAt: artifact.expiresAt
+      })
+      return {
+        artifact,
+        method: 'GET',
+        downloadUrl: `/artifacts/downloads/${artifactId}`,
+        headers: {
+          [ARTIFACT_TICKET_HEADER]: `Bearer ${token}`
+        },
+        expiresAt: artifact.expiresAt
+      }
     })
-    return {
-      artifact,
-      method: 'GET',
-      downloadUrl: `/artifacts/downloads/${artifactId}`,
-      headers: {
-        [ARTIFACT_TICKET_HEADER]: `Bearer ${token}`
-      },
-      expiresAt: artifact.expiresAt
-    }
   }
 
   async openDownload(

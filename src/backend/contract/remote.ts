@@ -127,14 +127,18 @@ function outboundTargetCandidates(optionRecord: Record<string, unknown>): readon
   if (optionRecord.host !== undefined || optionRecord.port !== undefined) {
     candidates.push({ field: 'options.host', host: optionRecord.host, port: optionRecord.port })
   }
-  if (optionRecord.sshHost !== undefined || optionRecord.sshPort !== undefined) {
-    candidates.push({ field: 'options.sshHost', host: optionRecord.sshHost, port: optionRecord.sshPort ?? 22 })
+  const hasText = (value: unknown): value is string =>
+    typeof value === 'string' && value.trim() !== ''
+  const optionalValue = (value: unknown): unknown =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value
+  if (hasText(optionRecord.sshHost)) {
+    candidates.push({ field: 'options.sshHost', host: optionRecord.sshHost, port: optionalValue(optionRecord.sshPort) ?? 22 })
   }
-  if (optionRecord.sshTargetHost !== undefined || optionRecord.sshTargetPort !== undefined) {
+  if (hasText(optionRecord.sshTargetHost)) {
     candidates.push({
       field: 'options.sshTargetHost',
       host: optionRecord.sshTargetHost,
-      port: optionRecord.sshTargetPort ?? optionRecord.port
+      port: optionalValue(optionRecord.sshTargetPort) ?? optionRecord.port
     })
   }
   if (typeof optionRecord.brokers === 'string') {
@@ -179,7 +183,7 @@ export function validateRemoteConnectionConfig(
 
   const optionRecord = options as Record<string, unknown>
   for (const [key, value] of Object.entries(optionRecord)) {
-    if (isPathField(key)) {
+    if (isPathField(key) && !(typeof value === 'string' && value.trim() === '')) {
       issues.push({ field: `options.${key}`, code: 'forbidden-path', message: '远程连接配置禁止 server-local 路径字段' })
     }
     if (!['string', 'number', 'boolean'].includes(typeof value)) {

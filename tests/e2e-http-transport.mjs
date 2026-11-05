@@ -117,8 +117,8 @@ try {
       backendCalls.push({ method: 'executeStatement', nodeId, sql, options, signal })
       return { kind: 'affected', affected: 1 }
     },
-    previewTable: async (nodeId, limit, options, signal) => {
-      backendCalls.push({ method: 'previewTable', nodeId, limit, options, signal })
+    previewTable: async (nodeId, limit, signal) => {
+      backendCalls.push({ method: 'previewTable', nodeId, limit, signal })
       return { cursorId: null, columns: [], rows: [], returned: 0, hasMore: false, executedSql: 'select 1', elapsedMs: 1 }
     },
     removeConnection: async (connectionId) => {
@@ -249,7 +249,8 @@ try {
     for (const [method, args] of [
       ['runQuery', ['connection:c1', 'select 1']],
       ['executeStatement', ['connection:c1', 'update t set x = 1']],
-      ['previewTable', ['connection:c1|table:t', 20]]
+      ['previewTable', ['connection:c1|table:t', 20]],
+      ['previewTable', ['connection:c1|table:t']]
     ]) {
       const response = await dispatch({ id: `${method}-signal`, method, args }, context)
       assert.equal(response.ok, true)

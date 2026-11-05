@@ -36,6 +36,19 @@ const outDir = await mkdtemp(join(tmpdir(), 'dbstudio-remote-contract-'))
   )
   assert.equal(accepted.ok, true)
 
+  const formDefaults = remote.validateRemoteConnectionConfig(
+    {
+      dialectId: 'postgresql',
+      name: 'form-defaults',
+      options: {
+        host: 'db.example.test', port: 5432, sshPort: 22,
+        sshHost: '', sshTargetHost: '', sshPrivateKey: '', sslrootcert: ''
+      }
+    },
+    policy
+  )
+  assert.equal(formDefaults.ok, true)
+
   for (const field of ['path', 'file', 'sourcePath', 'destinationPath', 'socketPath', 'sslrootcert', 'sshPrivateKey']) {
     const result = remote.validateRemoteConnectionConfig(
       { dialectId: 'sqlite', name: 'remote', options: { [field]: '/server/private.db' } },

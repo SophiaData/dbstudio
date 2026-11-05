@@ -140,9 +140,10 @@ export class ConnectionSessionService {
     this.#sessionSecrets.set(connectionId, secret)
   }
 
-  /** 删除会话令牌。remove 在配置撤销后调用，防止清理期间被重新拉起。 */
+  /** 删除会话令牌与内存凭据。配置撤销后调用，防止清理期间被重新拉起或残留密码。 */
   forgetToken(connectionId: string): void {
     this.#sessionTokens.delete(connectionId)
+    this.#sessionSecrets.delete(connectionId)
   }
 
   /**

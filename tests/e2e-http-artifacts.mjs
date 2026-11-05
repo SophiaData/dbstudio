@@ -120,6 +120,27 @@ try {
     capped.dispose()
   })
 
+  await check('download ticket 也受内存数量上限保护', async () => {
+    const ready = new ArtifactStore({
+      baseDir: join(stateDir, 'download-ticket-cap-owner'),
+      maxTickets: 1,
+      maxBytes: 8,
+      maxTotalBytes: 8
+    })
+    const upload = await ready.createUploadTicket({ purpose: 'import-source', expectedBytes: 4 })
+    await ready.upload(
+      upload.artifact.artifactId,
+      upload.headers['x-dbstudio-artifact-ticket'].replace(/^Bearer /, ''),
+      (async function* () { yield Buffer.from('data') })()
+    )
+    await ready.createDownloadTicket(upload.artifact.artifactId)
+    await assert.rejects(
+      () => ready.createDownloadTicket(upload.artifact.artifactId),
+      (error) => error?.code === 'conflict'
+    )
+    ready.dispose()
+  })
+
   await check('owner storage lease 随 artifact 完成与删除释放', async () => {
     const reserved = []
     const released = []
@@ -136,7 +157,10 @@ try {
     await governed.upload(
       ticket.artifact.artifactId,
       ticket.headers['x-dbstudio-artifact-ticket'].replace(/^Bearer /, ''),
-      (async function* () { yield Buffer.from('data') })()
+      (async function* () {
+        yield Buffer.from('da')
+        yield Buffer.from('ta')
+      })()
     )
     assert.deepEqual(reserved, [4])
     await governed.deleteArtifact(ticket.artifact.artifactId)

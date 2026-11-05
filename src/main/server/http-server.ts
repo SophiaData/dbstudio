@@ -130,6 +130,7 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
     resolvePrincipal: options.resolvePrincipal,
     maxMetadataBodyBytes: options.maxArtifactMetadataBodyBytes,
     maxConcurrentRequests: options.maxConcurrentRequests,
+    maxRequestIdLength: options.maxRequestIdLength,
     requestLimiter,
     governance: options.governance,
     auditSink: options.auditSink,

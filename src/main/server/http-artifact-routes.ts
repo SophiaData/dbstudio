@@ -21,6 +21,7 @@ import type { BackendPrincipal } from '../../backend/transport/transport'
 import type { HttpServerComposition } from './http-server-composition'
 import {
   createHttpRequestLimiter,
+  DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH,
   type HttpRequestAuditEvent,
   type HttpRequestAuditSink,
   type HttpRequestLimiter
@@ -38,6 +39,7 @@ export interface HttpArtifactRouterOptions {
   ) => BackendPrincipal | null | undefined | Promise<BackendPrincipal | null | undefined>
   readonly maxMetadataBodyBytes?: number
   readonly maxConcurrentRequests?: number
+  readonly maxRequestIdLength?: number
   readonly requestLimiter?: HttpRequestLimiter
   readonly governance?: OwnerGovernance
   readonly auditSink?: HttpRequestAuditSink
@@ -93,6 +95,12 @@ function routeError(error: unknown): { status: number; body: ReturnType<typeof f
     return {
       status: error.statusCode,
       body: failure(error.code, error.message)
+    }
+  }
+  if (error instanceof OwnerQuotaError) {
+    return {
+      status: 429,
+      body: failure('conflict', error.message)
     }
   }
   if (error instanceof BackendError) {
@@ -224,19 +232,27 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
   )
 
   const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(options.maxConcurrentRequests)
+  const maxRequestIdLength = options.maxRequestIdLength ?? DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH
 
   return async (request, response): Promise<boolean> => {
     if (!isArtifactRoute(request)) return false
     const startedAt = Date.now()
     const requestIdHeader = request.headers['x-dbstudio-request-id']
-    const requestId = typeof requestIdHeader === 'string' && requestIdHeader.trim() !== ''
+    const requestId = typeof requestIdHeader === 'string' &&
+      requestIdHeader.trim() !== '' && requestIdHeader.trim().length <= maxRequestIdLength
       ? requestIdHeader.trim()
       : `artifact-${randomUUID()}`
+    let counted = false
+    if (!requestLimiter.tryAcquire()) {
+      request.resume()
+      writeJson(response, 429, failure('conflict', 'HTTP artifact 并发请求已达上限'))
+      return true
+    }
+    counted = true
     let ownerId: string | undefined
     let method: string | undefined = request.method ?? 'GET'
     let outcome: HttpRequestAuditEvent['outcome'] = 'rejected'
     let errorCode: HttpRequestAuditEvent['errorCode']
-    let counted = false
     let ownerRequestLease: OwnerLease | undefined
     try {
       let principal: BackendPrincipal
@@ -247,13 +263,6 @@ export function createHttpArtifactRouter(options: HttpArtifactRouterOptions): Ht
         options.governance?.recordAuthenticationFailure(requestId)
         throw error
       }
-      if (!requestLimiter.tryAcquire()) {
-        throw new ArtifactStoreError(
-          { code: 'conflict', message: 'HTTP artifact 并发请求已达上限', retryable: true },
-          429
-        )
-      }
-      counted = true
       try {
         ownerRequestLease = options.governance?.acquireRequest(principal.id, requestId)
       } catch (error) {
