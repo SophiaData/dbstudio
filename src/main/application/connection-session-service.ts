@@ -193,25 +193,33 @@ export class ConnectionSessionService {
     this.#sessionTokens.set(connectionId, token)
     const lease = this.#ctx.reserveConnection?.(connectionId)
     if (lease) this.#connectionLeases.set(connectionId, lease)
-    const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
-      dialectId: saved.config.dialectId,
-      onLog: (level, msg) => this.#ctx.onLog(level, msg),
-      onExit: (error) => {
-        // 旧宿主的退出事件不能清掉已经重连的新会话。
-        if (this.#connections.get(connectionId)?.host === host) {
-          this.#connections.delete(connectionId)
-          this.#ctx.cursors.clearConnection(connectionId)
-          this.#sessionSecrets.delete(connectionId)
-          this.#releaseConnectionLease(connectionId)
-          this.#ctx.onLog(
-            'error',
-            `[manager] 连接 ${connectionId}（${saved.config.name}）的驱动宿主退出: ${error.message}`
-          )
-        } else if (this.#connecting.get(connectionId)?.host === host) {
-          this.#sessionSecrets.delete(connectionId)
+    let host: DriverHostHandle
+    try {
+      host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
+        dialectId: saved.config.dialectId,
+        onLog: (level, msg) => this.#ctx.onLog(level, msg),
+        onExit: (error) => {
+          // 旧宿主的退出事件不能清掉已经重连的新会话。
+          if (this.#connections.get(connectionId)?.host === host) {
+            this.#connections.delete(connectionId)
+            this.#ctx.cursors.clearConnection(connectionId)
+            this.#sessionSecrets.delete(connectionId)
+            this.#releaseConnectionLease(connectionId)
+            this.#ctx.onLog(
+              'error',
+              `[manager] 连接 ${connectionId}（${saved.config.name}）的驱动宿主退出: ${error.message}`
+            )
+          } else if (this.#connecting.get(connectionId)?.host === host) {
+            this.#sessionSecrets.delete(connectionId)
+          }
         }
-      }
-    })
+      })
+    } catch (error) {
+      // reserveConnection 先于 host 构造，构造失败时必须同步释放，否则
+      // 下一次连接会被一个从未创建成功的会话占用 owner 配额。
+      this.#releaseConnectionLease(connectionId)
+      throw error
+    }
     const promise = this.#connectHost(saved, host, token, lease).finally(() => {
       if (this.#connecting.get(connectionId)?.host === host) {
         this.#connecting.delete(connectionId)

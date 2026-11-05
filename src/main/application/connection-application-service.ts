@@ -187,7 +187,21 @@ export class ConnectionApplicationService {
     )
 
     // ---- 第二步：尝试连通 ----
-    const summary = await sessions.connectSaved(id, saved)
+    let summary: ConnectionSummary
+    try {
+      summary = await sessions.connectSaved(id, saved)
+    } catch (error) {
+      // owner 连接额度拒绝表示本次 add 根本没有建立会话；回滚本次
+      // 预写配置，避免用户看到一个无法重试的幽灵连接。普通网络失败
+      // 仍由 connectSaved 返回 connected:false，并保留配置供用户修正。
+      if (error instanceof Error && error.name === 'OwnerQuotaError' &&
+          (error as Error & { resource?: unknown }).resource === 'connections') {
+        sessions.forgetToken(id)
+        catalog.delete(id)
+        catalog.deleteConnection(id)
+      }
+      throw error
+    }
     // 密码保存失败时，把这件事"挂"在返回对象之外无法表达（ConnectionSummary 没这个字段），
     // 所以走日志 + 让 summary 反映真实连接结果。UI 侧通过 list() 看到 persisted=true。
     if (secretError !== null) {
@@ -211,6 +225,9 @@ export class ConnectionApplicationService {
     if (sessions.disposed) throw new Error('连接管理器已关闭')
     const saved = catalog.get(connectionId)
     if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    // 配置可能在启动时从磁盘载入，也可能由受信任桌面端预置；远程 scope
+    // 必须在每次真正建立宿主前重新执行出站策略校验，不能只信任落盘时的结果。
+    this.#validateRemoteConfig(saved.config)
     return sessions.connectSaved(connectionId, saved)
   }
 
@@ -253,16 +270,27 @@ export class ConnectionApplicationService {
   ): Promise<TestConnectionResult> {
     this.#validateRemoteConfig(config)
     const lease = this.#ctx.reserveConnection?.('__test__')
-    const host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
-      dialectId: config.dialectId
-    })
+    let host: DriverHostHandle
+    try {
+      host = (this.#ctx.createDriverHost ?? ((options) => new DriverHostHandle(options)))({
+        dialectId: config.dialectId
+      })
+    } catch (error) {
+      // host 构造失败时没有 finally 可兜底，必须立即释放预留的测试连接额度。
+      lease?.release()
+      throw error
+    }
     try {
       await host.handshake
       return await host.testConnection(config, secret)
     } finally {
-      // 测试连接不留会话，务必回收宿主与临时 owner lease。
-      await host.close()
-      lease?.release()
+      // 测试连接不留会话，务必回收宿主与临时 owner lease；即使 close 失败，
+      // lease 也不能因为清理异常而泄漏。
+      try {
+        await host.close()
+      } finally {
+        lease?.release()
+      }
     }
   }
 
