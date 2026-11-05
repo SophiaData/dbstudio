@@ -5,10 +5,18 @@
  * 不绑定 JWT/mTLS，也不直接操作连接或 artifact 实现。
  */
 
+import { BackendError } from '../../backend/contract/errors'
+
 export interface OwnerQuota {
   readonly maxConcurrentRequests?: number
   readonly maxConnections?: number
   readonly maxStorageBytes?: number
+}
+
+export const DEFAULT_OWNER_QUOTA: Required<OwnerQuota> = {
+  maxConcurrentRequests: 64,
+  maxConnections: 32,
+  maxStorageBytes: 1024 * 1024 * 1024
 }
 
 export interface OwnerAuditEvent {
@@ -38,12 +46,17 @@ export interface OwnerLease {
   readonly release: () => void
 }
 
-export class OwnerQuotaError extends Error {
+export class OwnerQuotaError extends BackendError {
   constructor(
     readonly resource: 'requests' | 'connections' | 'storage',
     message: string
   ) {
-    super(message)
+    super({
+      code: 'conflict',
+      message,
+      retryable: true,
+      details: { resource }
+    })
     this.name = 'OwnerQuotaError'
   }
 }
@@ -78,9 +91,9 @@ export class OwnerGovernance {
 
   constructor(options: OwnerGovernanceOptions = {}) {
     this.quota = {
-      maxConcurrentRequests: positiveQuota(options.quota?.maxConcurrentRequests, 'maxConcurrentRequests') ?? Number.MAX_SAFE_INTEGER,
-      maxConnections: positiveQuota(options.quota?.maxConnections, 'maxConnections') ?? Number.MAX_SAFE_INTEGER,
-      maxStorageBytes: positiveQuota(options.quota?.maxStorageBytes, 'maxStorageBytes') ?? Number.MAX_SAFE_INTEGER
+      maxConcurrentRequests: positiveQuota(options.quota?.maxConcurrentRequests, 'maxConcurrentRequests') ?? DEFAULT_OWNER_QUOTA.maxConcurrentRequests,
+      maxConnections: positiveQuota(options.quota?.maxConnections, 'maxConnections') ?? DEFAULT_OWNER_QUOTA.maxConnections,
+      maxStorageBytes: positiveQuota(options.quota?.maxStorageBytes, 'maxStorageBytes') ?? DEFAULT_OWNER_QUOTA.maxStorageBytes
     }
     this.audit = options.audit
   }
@@ -100,11 +113,20 @@ export class OwnerGovernance {
   }
 
   private emit(event: Omit<OwnerAuditEvent, 'at'>): void {
-    this.audit?.({ ...event, at: Date.now() })
+    try {
+      this.audit?.({ ...event, at: Date.now() })
+    } catch {
+      // 审计 sink 不能破坏资源计数；失败交给上层可观测性记录。
+    }
   }
 
   ensureOwner(ownerId: string): void {
     this.stateFor(ownerId)
+  }
+
+  quotaFor(ownerId: string): Required<OwnerQuota> {
+    this.stateFor(ownerId)
+    return { ...this.quota }
   }
 
   recordAuthenticationFailure(requestId?: string, ownerId = 'unknown'): void {

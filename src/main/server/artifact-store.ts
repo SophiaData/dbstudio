@@ -29,6 +29,7 @@ export const MAX_ARTIFACT_TTL_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_ARTIFACT_MAX_COUNT = 100
 export const DEFAULT_ARTIFACT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 export const DEFAULT_ARTIFACT_MAX_CONCURRENT_UPLOADS = 4
+export const DEFAULT_ARTIFACT_MAX_TICKETS = 200
 export const DEFAULT_ARTIFACT_SWEEP_INTERVAL_MS = 60 * 1000
 
 export class ArtifactStoreError extends BackendError {
@@ -41,6 +42,10 @@ export class ArtifactStoreError extends BackendError {
   }
 }
 
+export interface ArtifactStorageLease {
+  release(): void
+}
+
 export interface ArtifactStoreOptions {
   readonly baseDir: string
   readonly maxBytes?: number
@@ -48,6 +53,8 @@ export interface ArtifactStoreOptions {
   readonly maxArtifacts?: number
   readonly maxTotalBytes?: number
   readonly maxConcurrentUploads?: number
+  readonly maxTickets?: number
+  readonly reserveStorage?: (bytes: number) => ArtifactStorageLease
   readonly sweepIntervalMs?: number
   readonly now?: () => number
 }
@@ -169,6 +176,9 @@ export class LocalArtifactStore {
   readonly #maxArtifacts: number
   readonly #maxTotalBytes: number
   readonly #maxConcurrentUploads: number
+  readonly #maxTickets: number
+  readonly #reserveStorageLease: ((bytes: number) => ArtifactStorageLease) | undefined
+  readonly #storageLeases = new Map<string, ArtifactStorageLease[]>()
   readonly #sweepIntervalMs: number
   readonly #now: () => number
   readonly #tickets = new Map<string, Ticket>()
@@ -243,6 +253,8 @@ export class LocalArtifactStore {
       DEFAULT_ARTIFACT_MAX_CONCURRENT_UPLOADS,
       'maxConcurrentUploads'
     )
+    this.#maxTickets = positiveLimit(options.maxTickets, DEFAULT_ARTIFACT_MAX_TICKETS, 'maxTickets')
+    this.#reserveStorageLease = options.reserveStorage
     this.#sweepIntervalMs = positiveLimit(
       options.sweepIntervalMs,
       DEFAULT_ARTIFACT_SWEEP_INTERVAL_MS,
@@ -257,6 +269,34 @@ export class LocalArtifactStore {
 
   #dataPath(artifactId: ArtifactMetadata['artifactId']): string {
     return join(this.#rootDir, `${artifactId}.bin`)
+  }
+
+  #reserveStorage(artifactId: ArtifactMetadata['artifactId'], bytes: number): void {
+    if (!this.#reserveStorageLease || bytes <= 0) return
+    const lease = this.#reserveStorageLease(bytes)
+    const leases = this.#storageLeases.get(artifactId) ?? []
+    leases.push(lease)
+    this.#storageLeases.set(artifactId, leases)
+  }
+
+  #releaseStorage(artifactId: ArtifactMetadata['artifactId']): void {
+    const leases = this.#storageLeases.get(artifactId)
+    if (!leases) return
+    this.#storageLeases.delete(artifactId)
+    for (const lease of leases) {
+      try {
+        lease.release()
+      } catch {
+        // 清理路径不能因单个 owner lease 异常而阻断其它回收。
+      }
+    }
+  }
+
+  #purgeExpiredTickets(): void {
+    const now = this.#now()
+    for (const [token, ticket] of this.#tickets) {
+      if (now >= ticket.expiresAt) this.#tickets.delete(token)
+    }
   }
 
   async #readMetadata(artifactId: ArtifactMetadata['artifactId']): Promise<ArtifactMetadata> {
@@ -297,6 +337,7 @@ export class LocalArtifactStore {
     const expired = { ...metadata, status: 'expired' as const }
     await rm(this.#dataPath(metadata.artifactId), { force: true })
     await this.#writeMetadata(expired)
+    this.#releaseStorage(metadata.artifactId)
     return expired
   }
 
@@ -331,6 +372,7 @@ export class LocalArtifactStore {
         }
         await rm(this.#dataPath(artifactId), { force: true })
         await rm(this.#metadataPath(artifactId), { force: true })
+        this.#releaseStorage(artifactId)
       })
     )
     await Promise.all(
@@ -351,6 +393,7 @@ export class LocalArtifactStore {
   }
 
   async sweepExpired(): Promise<void> {
+    this.#purgeExpiredTickets()
     if (this.#sweepInFlight) return this.#sweepInFlight
     const sweep = this.#runSweep()
     this.#sweepInFlight = sweep
@@ -408,6 +451,10 @@ export class LocalArtifactStore {
       }
       if (expectedBytes !== null && quota.bytes + expectedBytes > this.#maxTotalBytes) {
         throw artifactError('invalid-argument', 'artifact 总容量已达到 owner 上限', 413)
+      }
+      this.#purgeExpiredTickets()
+      if (this.#tickets.size >= this.#maxTickets) {
+        throw artifactError('conflict', 'artifact ticket 数量已达到 owner 上限', 409)
       }
       await this.#writeMetadata(metadata)
       const token = ticketValue()
@@ -491,6 +538,7 @@ export class LocalArtifactStore {
       if (current.sha256 !== null && current.sha256.toLowerCase() !== sha256) {
         throw artifactError('invalid-argument', 'artifact sha256 与 expectedSha256 不一致', 400)
       }
+      this.#reserveStorage(artifactId, sizeBytes)
       await rename(temporaryPath, this.#dataPath(artifactId))
       const ready: ArtifactMetadata = { ...current, status: 'ready', sizeBytes, sha256 }
       await this.#writeMetadata(ready)
@@ -502,6 +550,7 @@ export class LocalArtifactStore {
       const terminalStatus = error instanceof ArtifactStoreError && error.code === 'timeout' ? 'expired' : 'failed'
       const failed: ArtifactMetadata = { ...uploading, status: terminalStatus, sizeBytes: null, sha256: null }
       await this.#writeMetadata(failed).catch(() => undefined)
+      this.#releaseStorage(artifactId)
       throw error
     } finally {
       this.#activeUploads.delete(artifactId)
@@ -511,25 +560,31 @@ export class LocalArtifactStore {
   }
 
   async createDownloadTicket(artifactId: ArtifactMetadata['artifactId']): Promise<ArtifactDownloadTicket> {
-    const artifact = await this.#expireIfNeeded(await this.#readMetadata(artifactId))
-    if (artifact.status !== 'ready') {
-      throw artifactError('conflict', 'artifact 尚未准备好下载', 409)
-    }
-    const token = ticketValue()
-    this.#tickets.set(token, {
-      kind: 'download',
-      artifactId,
-      expiresAt: artifact.expiresAt
+    return this.#withQuotaLock(async () => {
+      const artifact = await this.#expireIfNeeded(await this.#readMetadata(artifactId))
+      if (artifact.status !== 'ready') {
+        throw artifactError('conflict', 'artifact 尚未准备好下载', 409)
+      }
+      this.#purgeExpiredTickets()
+      if (this.#tickets.size >= this.#maxTickets) {
+        throw artifactError('conflict', 'artifact ticket 数量已达到 owner 上限', 409)
+      }
+      const token = ticketValue()
+      this.#tickets.set(token, {
+        kind: 'download',
+        artifactId,
+        expiresAt: artifact.expiresAt
+      })
+      return {
+        artifact,
+        method: 'GET',
+        downloadUrl: `/artifacts/downloads/${artifactId}`,
+        headers: {
+          [ARTIFACT_TICKET_HEADER]: `Bearer ${token}`
+        },
+        expiresAt: artifact.expiresAt
+      }
     })
-    return {
-      artifact,
-      method: 'GET',
-      downloadUrl: `/artifacts/downloads/${artifactId}`,
-      headers: {
-        [ARTIFACT_TICKET_HEADER]: `Bearer ${token}`
-      },
-      expiresAt: artifact.expiresAt
-    }
   }
 
   async openDownload(
@@ -559,17 +614,24 @@ export class LocalArtifactStore {
 
   async deleteArtifact(artifactId: ArtifactMetadata['artifactId']): Promise<void> {
     await this.#withArtifactLock(artifactId, async () => {
-      const metadata = await this.#readMetadata(artifactId)
-      for (const [token, ticket] of this.#tickets) {
-        if (ticket.artifactId === artifactId) this.#tickets.delete(token)
+      try {
+        const metadata = await this.#readMetadata(artifactId)
+        for (const [token, ticket] of this.#tickets) {
+          if (ticket.artifactId === artifactId) this.#tickets.delete(token)
+        }
+        await this.#writeMetadata({ ...metadata, status: 'deleted' })
+        await rm(this.#dataPath(artifactId), { force: true })
+      } finally {
+        this.#releaseStorage(artifactId)
       }
-      await this.#writeMetadata({ ...metadata, status: 'deleted' })
-      await rm(this.#dataPath(artifactId), { force: true })
     })
   }
 
   dispose(): void {
     this.stopSweep()
     this.#tickets.clear()
+    for (const artifactId of this.#storageLeases.keys()) {
+      this.#releaseStorage(artifactId as ArtifactMetadata['artifactId'])
+    }
   }
 }

@@ -36,7 +36,20 @@ const outDir = await mkdtemp(join(tmpdir(), 'dbstudio-remote-contract-'))
   )
   assert.equal(accepted.ok, true)
 
-  for (const field of ['path', 'file', 'sourcePath', 'destinationPath', 'socketPath']) {
+  const formDefaults = remote.validateRemoteConnectionConfig(
+    {
+      dialectId: 'postgresql',
+      name: 'form-defaults',
+      options: {
+        host: 'db.example.test', port: 5432, sshPort: 22,
+        sshHost: '', sshTargetHost: '', sshPrivateKey: '', sslrootcert: ''
+      }
+    },
+    policy
+  )
+  assert.equal(formDefaults.ok, true)
+
+  for (const field of ['path', 'file', 'sourcePath', 'destinationPath', 'socketPath', 'sslrootcert', 'sshPrivateKey']) {
     const result = remote.validateRemoteConnectionConfig(
       { dialectId: 'sqlite', name: 'remote', options: { [field]: '/server/private.db' } },
       policy
@@ -44,6 +57,26 @@ const outDir = await mkdtemp(join(tmpdir(), 'dbstudio-remote-contract-'))
     assert.equal(result.ok, false, field)
     assert.ok(result.issues.some((issue) => issue.code === 'forbidden-path'), field)
   }
+
+  const multiTarget = remote.validateRemoteConnectionConfig(
+    {
+      dialectId: 'postgresql',
+      name: 'ssh',
+      options: {
+        host: 'db.example.test', port: 5432,
+        sshHost: 'jump.example.test', sshPort: 22,
+        sshTargetHost: 'db.example.test', sshTargetPort: 5432
+      }
+    },
+    { allowedHosts: ['db.example.test', 'jump.example.test'], allowedPorts: [22, 5432] }
+  )
+  assert.equal(multiTarget.ok, true)
+  const deniedSsh = remote.validateRemoteConnectionConfig(
+    { dialectId: 'postgresql', name: 'ssh', options: { host: 'db.example.test', port: 5432, sshHost: 'evil.example.test', sshPort: 22 } },
+    { allowedHosts: ['db.example.test'], allowedPorts: [5432] }
+  )
+  assert.equal(deniedSsh.ok, false)
+  assert.ok(deniedSsh.issues.some((issue) => issue.field === 'options.sshHost'))
 
   const badShape = remote.validateRemoteConnectionConfig(
     { dialectId: 'postgresql', name: 'remote', options: { host: 'db.example.test', port: 5432, secret: { value: 'x' } } },

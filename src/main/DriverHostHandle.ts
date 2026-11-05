@@ -251,6 +251,7 @@ export class DriverHostHandle {
   readonly #onExit: (error: Error) => void
   readonly #exited: Promise<void>
   #nextId = 1
+  #nextSignalId = 1
   #stdoutBuffer = ''
   #stdoutBytes = 0
   #stderrTail = ''
@@ -676,21 +677,33 @@ export class DriverHostHandle {
 
   /** 执行 SQL，返回第一页与游标；signal 取消时同时请求驱动取消查询。 */
   query(sql: string, options?: QueryOptions, signal?: AbortSignal): Promise<QueryResult> {
+    const effectiveOptions = signal && options?.signalId === undefined
+      ? { ...options, signalId: `query-${this.#nextSignalId++}` }
+      : options
     return this.#requestWithAbort<QueryResult>(
       'query',
-      { sql, options },
+      { sql, options: effectiveOptions },
       RESULT_SET_TIMEOUT_MS,
       signal,
-      options?.signalId
+      effectiveOptions?.signalId
     )
   }
 
-  /** 执行语句（查询、DML 或 DDL）。 */
-  executeStatement(sql: string, options?: QueryOptions): Promise<StatementResult> {
-    return this.#requestWithTimeout<StatementResult>(
+  /** 执行语句（查询、DML 或 DDL）；signal 取消时精确取消本次执行。 */
+  executeStatement(
+    sql: string,
+    options?: QueryOptions,
+    signal?: AbortSignal
+  ): Promise<StatementResult> {
+    const effectiveOptions = signal && options?.signalId === undefined
+      ? { ...options, signalId: `statement-${this.#nextSignalId++}` }
+      : options
+    return this.#requestWithAbort<StatementResult>(
       'executeStatement',
-      { sql, options },
-      RESULT_SET_TIMEOUT_MS
+      { sql, options: effectiveOptions },
+      RESULT_SET_TIMEOUT_MS,
+      signal,
+      effectiveOptions?.signalId
     )
   }
 

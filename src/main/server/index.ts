@@ -16,6 +16,7 @@ export type {
   HttpServerOwnerScope
 } from './http-server-composition'
 export {
+  DEFAULT_OWNER_QUOTA,
   OwnerGovernance,
   OwnerQuotaError
 } from './owner-governance'
@@ -26,6 +27,7 @@ export type {
   OwnerQuota
 } from './owner-governance'
 export {
+  createHttpRequestLimiter,
   createHttpServerHandler,
   DEFAULT_HTTP_MAX_BODY_BYTES,
   DEFAULT_HTTP_MAX_RESPONSE_BYTES,
@@ -33,6 +35,8 @@ export {
   DEFAULT_HTTP_MAX_REQUEST_ID_LENGTH
 } from './http-server-handler'
 export type {
+  HttpRequestAuditSink,
+  HttpRequestLimiter,
   HttpServerHandler,
   HttpServerHandlerOptions
 } from './http-server-handler'
@@ -46,11 +50,13 @@ export type {
 export {
   ArtifactStoreError,
   DEFAULT_ARTIFACT_MAX_BYTES,
+  DEFAULT_ARTIFACT_MAX_TICKETS,
   DEFAULT_ARTIFACT_TTL_MS,
   LocalArtifactStore
 } from './artifact-store'
 export type {
   ArtifactStoreOptions,
+  ArtifactStorageLease,
   OpenArtifactDownload
 } from './artifact-store'
 export {

@@ -202,9 +202,11 @@ export function createBackendDispatcher(
 
     try {
       const handlerArgs =
-        method === 'runQuery'
-          ? [...decoded.args, context.signal]
-          : decoded.args
+        method === 'runQuery' || method === 'executeStatement'
+          ? [...decoded.args, ...(decoded.args.length < 3 ? [undefined] : []), context.signal]
+          : method === 'previewTable'
+            ? [...decoded.args, ...(decoded.args.length < 2 ? [undefined] : []), context.signal]
+            : decoded.args
       const value = await (handler as (...args: unknown[]) => unknown).apply(
         api,
         handlerArgs as unknown[]

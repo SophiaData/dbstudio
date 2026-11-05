@@ -85,6 +85,13 @@ try {
       if (request.id === 'large-response') {
         return { id: request.id, ok: true, value: 'x'.repeat(400) }
       }
+      if (request.id === 'quota') {
+        return {
+          id: request.id,
+          ok: false,
+          error: { code: 'conflict', message: '连接配额已满', details: { resource: 'connections' }, retryable: true }
+        }
+      }
       return {
         id: request.id,
         ok: true,
@@ -196,6 +203,16 @@ try {
       assert.equal(response.status, 400)
       const payload = await readJson(response)
       assert.equal(payload.error.code, 'invalid-argument')
+    })
+
+    await check('owner 配额冲突返回 429 而非 500', async () => {
+      const response = await fetch(active.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-owner-id': 'owner-a' },
+        body: JSON.stringify({ id: 'quota', method: 'connectConnection', args: [] })
+      })
+      assert.equal(response.status, 429)
+      assert.equal((await readJson(response)).error.code, 'conflict')
     })
 
     await check('超过 response 上限时返回受控 internal error', async () => {

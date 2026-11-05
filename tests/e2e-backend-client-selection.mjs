@@ -77,6 +77,52 @@ await check('HTTP 断线后刷新认证头并只重试一次', async () => {
   assert.equal(selected.status.state, 'connected')
 })
 
+await check('非幂等写操作断线后不自动重试', async () => {
+  let attempts = 0
+  let reconnects = 0
+  const selected = createBackendClientSelection({
+    mode: 'http',
+    http: {
+      endpoint: 'http://backend.test/rpc',
+      fetch: async () => {
+        attempts += 1
+        throw new Error('socket closed after write')
+      },
+      requestId: () => `selection-write-${attempts + 1}`
+    },
+    reconnect: async () => { reconnects += 1 }
+  })
+  await assert.rejects(
+    () => selected.client.executeStatement('connection:c1', 'INSERT INTO t VALUES (1)'),
+    /socket closed after write/
+  )
+  assert.equal(attempts, 1)
+  assert.equal(reconnects, 0)
+})
+
+await check('HTTP selection 的低层 invoke 保留单次取消选项', async () => {
+  const controller = new AbortController()
+  let observedSignal
+  const selected = createBackendClientSelection({
+    mode: 'http',
+    http: {
+      endpoint: 'http://backend.test/rpc',
+      fetch: async (_url, init) => {
+        observedSignal = init.signal
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('aborted by caller')), { once: true })
+        })
+      },
+      requestId: () => 'selection-signal'
+    }
+  })
+  const pending = selected.client.invoke?.('listDialects', [], { signal: controller.signal, timeoutMs: 1000 })
+  assert.ok(pending)
+  controller.abort()
+  await assert.rejects(pending, /后端调用已取消/)
+  assert.equal(typeof observedSignal?.aborted, 'boolean')
+})
+
 await check('认证失败进入 unauthorized 状态且不自动重试', async () => {
   let attempts = 0
   let reconnects = 0

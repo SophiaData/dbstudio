@@ -14,6 +14,8 @@ import {
   type HttpArtifactRouter
 } from './http-artifact-routes'
 import {
+  createHttpRequestLimiter,
+  DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS,
   createHttpServerHandler,
   type HttpServerHandler,
   type HttpServerHandlerOptions
@@ -111,15 +113,28 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
   }
   validateListenOptions(options.listen)
   const closeGraceMs = positiveLimit(options.closeGraceMs, DEFAULT_HTTP_CLOSE_GRACE_MS, 'closeGraceMs')
+  const maxConcurrentRequests = positiveLimit(
+    options.maxConcurrentRequests,
+    DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS,
+    'maxConcurrentRequests'
+  )
 
+  const requestLimiter = options.requestLimiter ?? createHttpRequestLimiter(maxConcurrentRequests)
   const handler = createHttpServerHandler({
     ...options,
-    composition: options.composition
+    composition: options.composition,
+    requestLimiter
   })
   const artifactRouter: HttpArtifactRouter = createHttpArtifactRouter({
     composition: options.composition,
     resolvePrincipal: options.resolvePrincipal,
-    maxMetadataBodyBytes: options.maxArtifactMetadataBodyBytes
+    maxMetadataBodyBytes: options.maxArtifactMetadataBodyBytes,
+    maxConcurrentRequests: options.maxConcurrentRequests,
+    maxRequestIdLength: options.maxRequestIdLength,
+    requestLimiter,
+    governance: options.governance,
+    auditSink: options.auditSink,
+    metricsSink: options.metricsSink
   })
   const server = createServer((request, response) => {
     void (async () => {

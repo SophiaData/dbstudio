@@ -21,6 +21,13 @@ export type RemotePathOption =
   | 'cwd'
   | 'workingDirectory'
   | 'socketPath'
+  | 'sslrootcert'
+  | 'sshPrivateKey'
+  | 'caFile'
+  | 'certFile'
+  | 'keyFile'
+  | 'credentialsFile'
+  | 'configFile'
 
 /** 编译期拒绝常见 server-local 路径字段；运行时仍必须调用 validateRemoteConnectionConfig。 */
 export type RemoteConnectionOptions = Readonly<
@@ -54,6 +61,15 @@ export interface RemoteValidationResult {
 }
 
 const PATH_FIELD_PATTERN = /^(?:source|destination|working|directory|socket)?path$|^(?:file|filename|filepath|directory|cwd|socket)$/i
+const PATH_FIELD_NAMES = new Set([
+  'sslrootcert',
+  'sshprivatekey',
+  'cafile',
+  'certfile',
+  'keyfile',
+  'credentialsfile',
+  'configfile'
+])
 const HOST_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i
 const IPV4_PATTERN = /^(?:\d{1,3}\.){3}\d{1,3}$/
 
@@ -96,7 +112,53 @@ export function isRemoteOutboundTargetAllowed(
   return allowedHosts.includes(host) && allowedPorts.includes(target.port)
 }
 
-/** 校验远程连接 DTO，并在配置包含 host/port 时验证出站目标策略。 */
+function isPathField(key: string): boolean {
+  return PATH_FIELD_PATTERN.test(key) || PATH_FIELD_NAMES.has(key.toLowerCase())
+}
+
+interface OutboundTargetCandidate {
+  readonly field: string
+  readonly host: unknown
+  readonly port: unknown
+}
+
+function outboundTargetCandidates(optionRecord: Record<string, unknown>): readonly OutboundTargetCandidate[] {
+  const candidates: OutboundTargetCandidate[] = []
+  if (optionRecord.host !== undefined || optionRecord.port !== undefined) {
+    candidates.push({ field: 'options.host', host: optionRecord.host, port: optionRecord.port })
+  }
+  const hasText = (value: unknown): value is string =>
+    typeof value === 'string' && value.trim() !== ''
+  const optionalValue = (value: unknown): unknown =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value
+  if (hasText(optionRecord.sshHost)) {
+    candidates.push({ field: 'options.sshHost', host: optionRecord.sshHost, port: optionalValue(optionRecord.sshPort) ?? 22 })
+  }
+  if (hasText(optionRecord.sshTargetHost)) {
+    candidates.push({
+      field: 'options.sshTargetHost',
+      host: optionRecord.sshTargetHost,
+      port: optionalValue(optionRecord.sshTargetPort) ?? optionRecord.port
+    })
+  }
+  if (typeof optionRecord.brokers === 'string') {
+    for (const [index, broker] of optionRecord.brokers.split(',').map((value) => value.trim()).entries()) {
+      const separator = broker.lastIndexOf(':')
+      if (separator <= 0) {
+        candidates.push({ field: `options.brokers[${index}]`, host: broker, port: undefined })
+        continue
+      }
+      candidates.push({
+        field: `options.brokers[${index}]`,
+        host: broker.slice(0, separator),
+        port: Number(broker.slice(separator + 1))
+      })
+    }
+  }
+  return candidates
+}
+
+/** 校验远程连接 DTO，并验证所有驱动实际会访问的出站目标。 */
 export function validateRemoteConnectionConfig(
   config: unknown,
   policy: RemoteOutboundPolicy
@@ -121,7 +183,7 @@ export function validateRemoteConnectionConfig(
 
   const optionRecord = options as Record<string, unknown>
   for (const [key, value] of Object.entries(optionRecord)) {
-    if (PATH_FIELD_PATTERN.test(key) || key.toLowerCase() === 'path') {
+    if (isPathField(key) && !(typeof value === 'string' && value.trim() === '')) {
       issues.push({ field: `options.${key}`, code: 'forbidden-path', message: '远程连接配置禁止 server-local 路径字段' })
     }
     if (!['string', 'number', 'boolean'].includes(typeof value)) {
@@ -129,13 +191,11 @@ export function validateRemoteConnectionConfig(
     }
   }
 
-  const host = optionRecord.host
-  const port = optionRecord.port
-  if (host !== undefined || port !== undefined) {
-    if (typeof host !== 'string' || typeof port !== 'number') {
-      issues.push({ field: 'options.host', code: 'invalid', message: 'host 与 port 必须成对提供' })
-    } else if (!isRemoteOutboundTargetAllowed({ host, port }, policy)) {
-      issues.push({ field: 'options.host', code: 'outbound-denied', message: '出站目标未命中允许的主机与端口策略' })
+  for (const candidate of outboundTargetCandidates(optionRecord)) {
+    if (typeof candidate.host !== 'string' || typeof candidate.port !== 'number') {
+      issues.push({ field: candidate.field, code: 'invalid', message: '出站 host 与 port 必须成对提供' })
+    } else if (!isRemoteOutboundTargetAllowed({ host: candidate.host, port: candidate.port }, policy)) {
+      issues.push({ field: candidate.field, code: 'outbound-denied', message: '出站目标未命中允许的主机与端口策略' })
     }
   }
 

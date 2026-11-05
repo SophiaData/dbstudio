@@ -44,13 +44,14 @@ export function createApplicationApi(
       signal?: AbortSignal
     ) =>
       getManager().runQuery(nodeId, sql, queryOptions, signal),
-    executeStatement: async (nodeId, sql, queryOptions) =>
-      getManager().executeStatement(nodeId, sql, queryOptions),
+    executeStatement: async (nodeId, sql, queryOptions, signal?: AbortSignal) =>
+      getManager().executeStatement(nodeId, sql, queryOptions, signal),
     explain: async (nodeId, sql) => getManager().explain(nodeId, sql),
     fetchResultPage: async (cursorId, offset, limit) =>
       getManager().fetchResultPage(cursorId, offset, limit),
     closeCursor: async (cursorId) => getManager().closeCursor(cursorId),
-    previewTable: async (nodeId, limit) => getManager().previewTable(nodeId, limit),
+    previewTable: async (nodeId, limit, signal?: AbortSignal) =>
+      getManager().previewTable(nodeId, limit, signal),
     tableSelectSql: async (nodeId) => getManager().tableSelectSql(nodeId),
 
     applyEdits: async (tableNodeId, updates) =>

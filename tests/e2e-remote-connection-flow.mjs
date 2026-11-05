@@ -42,6 +42,7 @@ const manager = new ConnectionManager(listBuiltinDialects(), store, {
       handshake: Promise.resolve(),
       connect: async () => ({ supportsExplain: false, supportsInlineEdit: false, supportsServerPagination: false, supportsCancel: false }),
       testConnection: async () => ({ ok: true, latencyMs: 1 }),
+      rollbackTransaction: async () => undefined,
       close: async () => undefined,
       kill: () => undefined
     }
@@ -62,4 +63,7 @@ await assert.rejects(
   /远程连接配置被拒绝/
 )
 assert.deepEqual(manager.list()[0].options, accepted.options)
-console.log('远程连接 add/test/update 流程测试通过')
+accepted.options.host = 'evil.example.test'
+await manager.disconnectConnection('c1')
+await assert.rejects(() => manager.connectConnection('c1'), /远程连接配置被拒绝/)
+console.log('远程连接 add/test/update/connect 复验流程测试通过')

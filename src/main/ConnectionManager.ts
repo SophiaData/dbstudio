@@ -292,8 +292,13 @@ export class ConnectionManager {
    * 执行一条 SQL 语句（查询、DML 或 DDL）。
    * 若结果包含游标，同样进行连接归属作用域包装与账本登记。
    */
-  async executeStatement(nodeId: string, sql: string, options?: QueryOptions): Promise<StatementResult> {
-    return this.#services.queries.executeStatement(nodeId, sql, options)
+  async executeStatement(
+    nodeId: string,
+    sql: string,
+    options?: QueryOptions,
+    signal?: AbortSignal
+  ): Promise<StatementResult> {
+    return this.#services.queries.executeStatement(nodeId, sql, options, signal)
   }
 
   /** 按连接所属驱动生成执行计划，不在主进程拼接方言关键字。 */
@@ -330,8 +335,8 @@ export class ConnectionManager {
    * 表名限定与引号由驱动生成；行数限制经 QueryOptions.limit 交给 adapter，
    * 并在返回后兜底校验 adapter 是否真的落实了 limit。
    */
-  async previewTable(nodeId: string, limit = 200): Promise<QueryResult> {
-    return this.#services.queries.previewTable(nodeId, limit)
+  async previewTable(nodeId: string, limit = 200, signal?: AbortSignal): Promise<QueryResult> {
+    return this.#services.queries.previewTable(nodeId, limit, signal)
   }
 
   // ---- 在线编辑与事务（第三阶段） ----
