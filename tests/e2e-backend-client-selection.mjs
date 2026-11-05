@@ -38,7 +38,7 @@ async function check(name, run) {
 }
 
 await check('desktop 模式保留原 API 并标记 connected', async () => {
-  const api = { listDialects: async () => [] }
+  const api = Object.freeze({ listDialects: async () => [] })
   const selected = createBackendClientSelection({ mode: 'desktop', api })
   assert.strictEqual(selected.client, api)
   assert.deepEqual(selected.status, { mode: 'desktop', state: 'connected' })

@@ -378,31 +378,9 @@ export function createBackendClientSelection(
 
 /** Adapt the current Electron preload object to the renderer backend contract. */
 export function createElectronBackendClient(api: DbStudioApi): BackendClient {
-  const methods = createConnectionControlMethods(async (_path, _method, body) => {
-    if (_path === '/connections' && _method === 'GET') return api.listConnections()
-    if (_path === '/connections' && _method === 'POST') {
-      const request = body as RemoteConnectionCreateRequest
-      return api.addConnection(request.config, request.secret)
-    }
-    if (_path === '/connections/test' && _method === 'POST') {
-      const request = body as RemoteConnectionCreateRequest
-      return api.testConnection(request.config, request.secret)
-    }
-    const match = _path.match(/^\/connections\/([^/]+)(?:\/(connect|disconnect))?$/)
-    if (!match) throw new BackendError({ code: 'not-found', message: 'connection route 不存在' })
-    const rawId = match[1]
-    if (!rawId) throw new BackendError({ code: 'not-found', message: 'connection route 不存在' })
-    const id = decodeURIComponent(rawId)
-    if (_method === 'PATCH') {
-      const request = body as RemoteConnectionUpdateRequest
-      return api.updateConnection(id, request.config, request.secretPatch)
-    }
-    if (_method === 'POST' && match[2] === 'connect') return api.connectConnection(id)
-    if (_method === 'POST' && match[2] === 'disconnect') return api.disconnectConnection(id)
-    if (_method === 'DELETE') return api.removeConnection(id)
-    throw new BackendError({ code: 'not-found', message: 'connection route 不存在' })
-  })
-  return Object.assign(api, methods) as BackendClient
+  // Desktop preload already exposes the stable connection method names. Keep the
+  // original object untouched: contextBridge objects may be non-extensible.
+  return api as BackendClient
 }
 
 let configuredSelection: BackendClientSelection | null = null
