@@ -117,7 +117,9 @@ const json = async (path, init = {}, owner = 'owner-a') => fetch(`${origin}${pat
 try {
   const list = await json('/connections', { method: 'GET' })
   assert.equal(list.status, 200)
-  assert.equal((await list.json()).value[0].id, 'owner-a-c1')
+  const listPayload = await list.json()
+  assert.equal(listPayload.value[0].id, 'owner-a-c1')
+  assert.equal('file' in listPayload.value[0].options, false)
 
   const other = await json('/connections', { method: 'GET' }, 'owner-b')
   assert.equal((await other.json()).value[0].id, 'owner-b-c1')

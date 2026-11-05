@@ -54,11 +54,15 @@ function isSecretLikeKey(key: string): boolean {
   return /(password|secret|token|credential|authorization|cookie|privatekey|passphrase)/i.test(key)
 }
 
+function isPathLikeKey(key: string): boolean {
+  return /(path|file|directory|filename|socket|sslrootcert|cafile|certfile|keyfile|credentialsfile|configfile)/i.test(key)
+}
+
 function safeOptions(value: unknown): Readonly<Record<string, string | number | boolean>> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const output: Record<string, string | number | boolean> = {}
   for (const [key, item] of Object.entries(value)) {
-    if (isSecretLikeKey(key)) continue
+    if (isSecretLikeKey(key) || isPathLikeKey(key)) continue
     if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
       output[key] = item
     }
