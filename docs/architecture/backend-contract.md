@@ -21,7 +21,7 @@ renderer 依赖 `BackendClient`，不直接发现 `window.dbstudio`。Electron A
 
 完整 `BackendApi` 是桌面能力面，包含 `chooseImportFile`。它需要当前 Electron `WebContents` 作为父窗口，属于 shell capability。
 
-HTTP client 使用 `RemoteBackendApi`，remote projection 会排除 `chooseImportFile` 以及全部仍携带服务端本机路径语义的 import/export 方法（`startTransfer`、`previewImport` 及其任务生命周期方法）。连接配置管理仍由受信任桌面端完成。`src/backend/contract/artifact.ts` 冻结了后续文件能力的方向：上传 ticket、下载 ticket 和 opaque `artifactId` 都由 owner scope 绑定，带用途、大小、摘要与过期时间约束；远程导入只接受 `import-source` artifact，远程导出生成 `export-result` artifact。不能把绝对路径直接放进 HTTP contract。
+HTTP client 使用 `RemoteBackendApi`，remote projection 会排除 `chooseImportFile` 以及全部仍携带服务端本机路径语义的 import/export 方法（`startTransfer`、`previewImport` 及其任务生命周期方法）。连接配置管理不进入通用 remote RPC manifest，而通过 `/connections` owner-scoped HTTP routes 完成；`BackendClient` 在 HTTP 模式把现有 renderer 的连接方法映射到这些 routes，在 desktop 模式保留原 IPC API。`src/backend/contract/artifact.ts` 冻结了后续文件能力的方向：上传 ticket、下载 ticket 和 opaque `artifactId` 都由 owner scope 绑定，带用途、大小、摘要与过期时间约束；远程导入只接受 `import-source` artifact，远程导出生成 `export-result` artifact。不能把绝对路径直接放进 HTTP contract。
 
 当前 HTTP 代码提供：
 
@@ -32,7 +32,7 @@ HTTP client 使用 `RemoteBackendApi`，remote projection 会排除 `chooseImpor
 - 结构化成功/失败 envelope；
 - client 侧 request id、取消和超时。
 
-当前 HTTP transport 已具备可验证的 server slice；server composition 的 owner 隔离、治理和资源边界已经落地：`createHttpServerComposition` 接收认证后的 principal，通过 request context 选择 owner-bound application scope；每个 owner 使用独立的 ConnectionStore、SqlLibraryStore、ConnectionManager、cursor 和任务状态，server 端 cipher 与 driver-host factory 也由组合根注入。`createHttpServerHandler` 提供 Node HTTP 入口的第一层防护：只接受 JSON POST、限制 body/response 大小、限制并发、校验 request id，并把客户端断连映射到 request context 的 `AbortSignal`；`createHttpServer` 在此基础上提供默认 loopback 绑定、真实 localhost listener、优雅关闭和 composition 生命周期管理。主进程入口通过 `HttpServerPrincipalResolver` 注入认证 resolver；未注入时只允许 loopback 固定 owner 本地模式，远程 host 必须由调用方提供 resolver，当前不绑定 JWT 或任何外部认证服务。`OwnerGovernance` 作为可替换的 owner 资源边界，提供请求、连接和存储租约配额、owner scope 生命周期与结构化审计事件；连接业务和 artifact store 必须显式申请租约，治理层不实现具体认证 provider 或 Artifact 存储。文件内容走独立的 artifact routes：owner scope 内的本地 store 提供短时效 upload/download ticket、大小与 sha256 校验、一次性 ticket 和二进制流传输，artifact id 不承载路径语义；bearer ticket 通过 `X-DBStudio-Artifact-Ticket: Bearer <ticket>` 专用请求头传输，upload/download URL 不包含 ticket query，旧 query 形式不兼容并返回 401。这样 ticket 不进入访问日志、Referer 或缓存键。wire decode 另有深度与节点数上限。正式入口默认构造 owner governance、console audit/metrics sinks 和 fail-closed 的出站 allowlist；`DBSTUDIO_HTTP_ALLOWED_HOSTS` / `DBSTUDIO_HTTP_ALLOWED_PORTS` 与 owner 配额环境变量提供部署配置。生产认证 provider、TLS/反向代理部署、持久化 job store 与 import/export job 编排仍由部署与后续 server slice 提供。
+当前 HTTP transport 已具备可验证的 server slice；server composition 的 owner 隔离、治理和资源边界已经落地：`createHttpServerComposition` 接收认证后的 principal，通过 request context 选择 owner-bound application scope；每个 owner 使用独立的 ConnectionStore、SqlLibraryStore、ConnectionManager、cursor 和任务状态，server 端 cipher 与 driver-host factory 也由组合根注入。`createHttpServerHandler` 提供 Node HTTP 入口的第一层防护：只接受 JSON POST、限制 body/response 大小、限制并发、校验 request id，并把客户端断连映射到 request context 的 `AbortSignal`；`createHttpConnectionRouter` 提供连接配置/测试/更新/连接/断开/删除的 owner-scoped JSON routes，并与 artifact、RPC 入口共享 limiter、governance、audit 和 metrics；`createHttpServer` 在此基础上提供默认 loopback 绑定、真实 localhost listener、优雅关闭和 composition 生命周期管理。主进程入口通过 `HttpServerPrincipalResolver` 或 `HttpAuthProvider` 注入认证 resolver；`createBearerTokenPrincipalResolver` 只负责 Bearer 格式解析和 verifier 委托，不保存或记录 token。未注入时只允许 loopback 固定 owner 本地模式，远程 host 必须由调用方提供 resolver，当前不绑定 JWT 或任何外部认证服务。`OwnerGovernance` 作为可替换的 owner 资源边界，提供请求、连接和存储租约配额、owner scope 生命周期与结构化审计事件；连接业务和 artifact store 必须显式申请租约，治理层不实现具体认证 provider 或 Artifact 存储。文件内容走独立的 artifact routes：owner scope 内的本地 store 提供短时效 upload/download ticket、大小与 sha256 校验、一次性 ticket 和二进制流传输，artifact id 不承载路径语义；bearer ticket 通过 `X-DBStudio-Artifact-Ticket: Bearer <ticket>` 专用请求头传输，upload/download URL 不包含 ticket query，旧 query 形式不兼容并返回 401。这样 ticket 不进入访问日志、Referer 或缓存键。wire decode 另有深度与节点数上限。正式入口默认构造 owner governance、console audit/metrics sinks 和 fail-closed 的出站 allowlist；`DBSTUDIO_HTTP_ALLOWED_HOSTS` / `DBSTUDIO_HTTP_ALLOWED_PORTS` 与 owner 配额环境变量提供部署配置。生产认证 provider、TLS/反向代理部署、持久化 job store 与 import/export job 编排仍由部署与后续 server slice 提供。
 
 ## 远程安全验证边界
 
@@ -78,6 +78,9 @@ HTTP wire codec 使用 `$dbstudio` 标记包装二进制和特殊值；业务对
 - `pnpm run test:http-transport`：wire codec、remote capability、dispatcher、取消/超时和真实 Node HTTP 往返。
 - `pnpm run test:http-server-composition`：principal、owner scope、remote manifest 和 owner 存储隔离。
 - `pnpm run test:http-server-handler`：HTTP body/response 限制、并发额度、request id 与断连 signal。
+- `pnpm run test:http-connection-routes`：owner-scoped connection routes、生命周期、隔离与 secret-safe audit。
+- `pnpm run test:remote-connection-contract`：connection route DTO、路径编码和 summary 脱敏。
+- `pnpm run test:http-auth`：Bearer auth boundary、token 不进入 principal/错误。
 - `pnpm run test:http-server`：真实 localhost listener、JSON 往返、认证拒绝与优雅关闭。
 - `node tests/e2e-http-owner-governance.mjs`：owner 请求/连接/存储租约、生命周期和审计事件。
 - `pnpm run test:http-artifacts`：artifact ticket、二进制上传/下载、摘要校验、删除与 owner 隔离。

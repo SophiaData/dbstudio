@@ -63,7 +63,7 @@ await check('HTTP connection facade 使用 owner route 且不走 RPC manifest', 
       }
     }
   })
-  const result = await selected.client.createRemoteConnection({
+  const result = await selected.client.addConnection({
     config: { dialectId: 'sqlite', name: 'remote', options: { file: ':memory:' } },
     secret: { dbPassword: 'opaque-test-secret' }
   })

@@ -27,6 +27,21 @@ HTTP 服务默认关闭。staging 需要显式设置 `DBSTUDIO_HTTP_PORT`，并�
 
 ## 认证 provider
 
+应用组合根通过 `HttpAuthProvider` 或 `createBearerTokenPrincipalResolver` 注入认证实现。renderer shell 在加载 bundle 前注入 `window.__DBSTUDIO_BACKEND_CONFIG__`，连接表单继续使用现有 `BackendClient` API；HTTP 模式下这些方法会调用 owner-scoped `/connections` routes。注入内容只包含 endpoint、认证头刷新回调和非敏感 transport 参数，禁止把 token 写入 HTML、静态 JSON 或仓库。
+
+示例配置形状：
+
+```ts
+window.__DBSTUDIO_BACKEND_CONFIG__ = {
+  mode: 'http',
+  http: {
+    endpoint: 'https://staging.example.test/rpc',
+    headers: {},
+    reconnect: async () => ({ /* 从受信任 session provider 刷新 headers */ })
+  }
+}
+```
+
 应用组合根通过 `HttpAuthProvider` 或 `createBearerTokenPrincipalResolver` 注入认证实现。provider 的输出只有：
 
 ```ts

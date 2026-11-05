@@ -346,6 +346,15 @@ export function createBackendClientSelection(
     }
   }
   const connectionMethods = createConnectionControlMethods(invokeRoute)
+  const connectionAliases: Record<string, unknown> = {
+    listConnections: connectionMethods.listRemoteConnections,
+    addConnection: connectionMethods.createRemoteConnection,
+    testConnection: connectionMethods.testRemoteConnection,
+    updateConnection: connectionMethods.updateRemoteConnection,
+    connectConnection: connectionMethods.connectRemoteConnection,
+    disconnectConnection: connectionMethods.disconnectRemoteConnection,
+    removeConnection: connectionMethods.removeRemoteConnection
+  }
   const target = Object.create(null) as Record<string, unknown>
   const client = new Proxy(target, {
     get(_target, property): unknown {
@@ -353,13 +362,14 @@ export function createBackendClientSelection(
       if (typeof property !== 'string') return undefined
       if (property === 'status') return status
       if (property === 'reconnect') return reconnect
+      if (property in connectionAliases) return connectionAliases[property]
       if (property in connectionMethods) return connectionMethods[property as keyof typeof connectionMethods]
       if (typeof current[property as keyof HttpBackendClient] !== 'function') return undefined
       return (...args: readonly unknown[]) => invoke(property, args)
     },
     has(_target, property): boolean {
       return property === 'invoke' || property === 'status' || property === 'reconnect' ||
-        property in connectionMethods ||
+        property in connectionAliases || property in connectionMethods ||
         (typeof property === 'string' && typeof current[property as keyof HttpBackendClient] === 'function')
     }
   }) as unknown as BackendClient
