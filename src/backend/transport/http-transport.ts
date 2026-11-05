@@ -69,7 +69,7 @@ export type HttpHeaders = Readonly<Record<string, string>>
 export interface HttpRequestInit {
   readonly method: string
   readonly headers: HttpHeaders
-  readonly body: string
+  readonly body?: string
   readonly signal?: AbortSignal
 }
 
@@ -109,6 +109,13 @@ export const DEFAULT_HTTP_TIMEOUT_MS = 75_000
  * 服务器仍然只接受 manifest 里的方法名。
  */
 export interface HttpBackendClient extends RemoteBackendApi {
+  /** 访问 owner-scoped JSON route；route 不进入 RPC manifest。 */
+  requestJson(
+    path: string,
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    body?: unknown,
+    options?: BackendCallOptions
+  ): Promise<unknown>
   invoke<K extends RemoteBackendMethod>(
     method: K,
     args: RemoteBackendArgs<K>,
@@ -230,6 +237,84 @@ export function createHttpBackendClient(
     REMOTE_BACKEND_METHOD_MANIFEST.map((entry) => entry.method)
   )
   const methodCache = new Map<string, (...args: unknown[]) => Promise<unknown>>()
+
+  async function requestJson(
+    path: string,
+    requestMethod: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    bodyValue?: unknown,
+    callOptions?: BackendCallOptions
+  ): Promise<unknown> {
+    if (!path.startsWith('/')) {
+      throw makeError('invalid-argument', 'HTTP route path 必须以 / 开头', { callId: nextRequestId() })
+    }
+    const callId = nextRequestId()
+    if (callOptions?.signal?.aborted === true) {
+      throw makeError('cancelled', '后端调用已取消', { callId, retryable: false })
+    }
+    const timeoutMs = callOptions?.timeoutMs ?? defaultTimeoutMs
+    const scope = createAbortScope(callOptions?.signal, timeoutMs)
+    const transportFailure = (error: unknown): BackendError => {
+      if (scope.didTimeOut()) return makeError('timeout', `后端调用超时（${timeoutMs}ms）`, { callId, retryable: true, details: { timeoutMs } })
+      if (callOptions?.signal?.aborted === true) return makeError('cancelled', '后端调用已取消', { callId, retryable: false })
+      if (error instanceof BackendError) return error
+      return makeError('transport-failed', errorMessage(error), { callId, retryable: true })
+    }
+    try {
+      let response: HttpResponseLike
+      try {
+        response = await fetchImpl(new URL(path, endpoint).toString(), {
+          method: requestMethod,
+          headers: {
+            ...options.headers,
+            'content-type': 'application/json',
+            accept: 'application/json',
+            'x-dbstudio-request-id': callId
+          },
+          body: bodyValue === undefined ? undefined : JSON.stringify(bodyValue),
+          signal: scope.signal
+        })
+      } catch (error) {
+        throw transportFailure(error)
+      }
+      let text: string
+      try {
+        text = await response.text()
+      } catch (error) {
+        throw transportFailure(error)
+      }
+      let payload: unknown
+      try {
+        payload = JSON.parse(text)
+      } catch (error) {
+        throw makeError('transport-failed', `HTTP 响应不是合法 JSON（status ${response.status}）`, {
+          callId, retryable: true, details: { status: response.status, reason: errorMessage(error) }
+        })
+      }
+      if (!payload || typeof payload !== 'object' || !('ok' in payload) || typeof payload.ok !== 'boolean') {
+        throw makeError('transport-failed', 'HTTP route 响应不符合后端契约', {
+          callId, retryable: false, details: { status: response.status }
+        })
+      }
+      const routePayload = payload as Record<string, unknown>
+      if (!routePayload.ok) {
+        const errorPayload = routePayload.error
+        if (!isBackendErrorPayload(errorPayload)) {
+          throw makeError('transport-failed', 'HTTP route 错误响应不符合后端契约', {
+            callId, retryable: false, details: { status: response.status }
+          })
+        }
+        throw backendErrorFromPayload({ ...errorPayload, callId: errorPayload.callId ?? callId })
+      }
+      if (!response.ok) {
+        throw makeError('transport-failed', `HTTP ${response.status}：route 返回了成功信封但状态码非 2xx`, {
+          callId, retryable: false, details: { status: response.status }
+        })
+      }
+      return routePayload.value
+    } finally {
+      scope.cleanup()
+    }
+  }
 
   async function invoke<K extends RemoteBackendMethod>(
     method: K,
@@ -397,12 +482,13 @@ export function createHttpBackendClient(
     get(current, property, receiver): unknown {
       if (typeof property !== 'string') return Reflect.get(current, property, receiver)
       if (property === 'invoke') return invoke
+      if (property === 'requestJson') return requestJson
       if (!methodNames.has(property)) return undefined
       return methodFunction(property)
     },
     has(current, property): boolean {
       if (typeof property !== 'string') return Reflect.has(current, property)
-      return property === 'invoke' || methodNames.has(property)
+      return property === 'invoke' || property === 'requestJson' || methodNames.has(property)
     }
   })
 

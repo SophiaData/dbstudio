@@ -14,6 +14,10 @@ import {
   type HttpArtifactRouter
 } from './http-artifact-routes'
 import {
+  createHttpConnectionRouter,
+  type HttpConnectionRouter
+} from './http-connection-routes'
+import {
   createHttpRequestLimiter,
   DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS,
   createHttpServerHandler,
@@ -136,9 +140,21 @@ export function createHttpServer(options: HttpServerOptions): HttpServer {
     auditSink: options.auditSink,
     metricsSink: options.metricsSink
   })
+  const connectionRouter: HttpConnectionRouter = createHttpConnectionRouter({
+    composition: options.composition,
+    resolvePrincipal: options.resolvePrincipal,
+    requestLimiter,
+    maxConcurrentRequests: options.maxConcurrentRequests,
+    maxBodyBytes: options.maxBodyBytes,
+    maxRequestIdLength: options.maxRequestIdLength,
+    governance: options.governance,
+    auditSink: options.auditSink,
+    metricsSink: options.metricsSink
+  })
   const server = createServer((request, response) => {
     void (async () => {
       if (await artifactRouter(request, response)) return
+      if (await connectionRouter(request, response)) return
       await handler(request, response)
     })().catch(() => {
       // handler 已经把可预期的错误转换成 envelope；这个兜底只处理

@@ -44,6 +44,36 @@ await check('desktop 模式保留原 API 并标记 connected', async () => {
   assert.deepEqual(selected.status, { mode: 'desktop', state: 'connected' })
 })
 
+await check('HTTP connection facade 使用 owner route 且不走 RPC manifest', async () => {
+  const requests = []
+  const selected = createBackendClientSelection({
+    mode: 'http',
+    http: {
+      endpoint: 'http://backend.test/rpc',
+      fetch: async (url, init) => {
+        requests.push({ url, method: init.method, body: JSON.parse(init.body) })
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            ok: true,
+            value: { id: 'c1', name: 'remote', dialectId: 'sqlite', connected: true, persisted: true, secretStored: false, capabilities: null, options: {} }
+          })
+        }
+      }
+    }
+  })
+  const result = await selected.client.createRemoteConnection({
+    config: { dialectId: 'sqlite', name: 'remote', options: { file: ':memory:' } },
+    secret: { dbPassword: 'opaque-test-secret' }
+  })
+  assert.equal(result.id, 'c1')
+  assert.equal(requests[0].url, 'http://backend.test/connections')
+  assert.equal(requests[0].method, 'POST')
+  assert.equal(requests[0].body.config.name, 'remote')
+  assert.equal(requests[0].body.secret.dbPassword, 'opaque-test-secret')
+})
+
 await check('HTTP 断线后刷新认证头并只重试一次', async () => {
   let attempts = 0
   let reconnects = 0

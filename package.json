@@ -55,6 +55,8 @@
     "test:http-artifacts": "node tests/e2e-http-artifacts.mjs",
     "test:artifact-contract": "node tests/e2e-artifact-contract.mjs",
     "test:remote-contract": "node tests/e2e-remote-contract.mjs",
+    "test:remote-connection-contract": "node tests/e2e-remote-connection-contract.mjs",
+    "test:http-connection-routes": "node tests/e2e-http-connection-routes.mjs",
     "test:remote-connection-flow": "node tests/e2e-remote-connection-flow.mjs",
     "test:owner-connection-lease": "node tests/e2e-owner-connection-lease.mjs",
     "test:api-surface": "node tests/e2e-api-surface.mjs",

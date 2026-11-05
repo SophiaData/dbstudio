@@ -41,6 +41,15 @@ export type {
   HttpServerHandlerOptions
 } from './http-server-handler'
 export { createHttpServer } from './http-server'
+export {
+  CONNECTION_ROUTE_PREFIX,
+  createHttpConnectionRouter,
+  remoteConnectionPathForRoute
+} from './http-connection-routes'
+export type {
+  HttpConnectionRouter,
+  HttpConnectionRouterOptions
+} from './http-connection-routes'
 export type {
   HttpServer,
   HttpServerAddress,
