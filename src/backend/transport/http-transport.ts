@@ -98,7 +98,9 @@ export interface HttpBackendClientOptions {
 }
 
 /** 默认超时。查询类调用可通过 `invoke` 的 `timeoutMs` 覆盖。 */
-export const DEFAULT_HTTP_TIMEOUT_MS = 30_000
+// 高于 driver host 的 60s 结果集上限，让服务端先决定超时并终止宿主，
+// 避免客户端先放弃后把同一条非幂等请求误认为可重试。
+export const DEFAULT_HTTP_TIMEOUT_MS = 75_000
 
 /**
  * 在 `BackendApi` 之上增加一个低层入口，用于单次调用的取消/超时。

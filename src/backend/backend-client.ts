@@ -14,7 +14,13 @@
  */
 
 import type { DbStudioApi } from '../core/api'
-import type { BackendApi } from './contract/backend'
+import type {
+  BackendApi,
+  RemoteBackendArgs,
+  RemoteBackendMethod,
+  RemoteBackendValue
+} from './contract/backend'
+import type { BackendCallOptions } from './transport/transport'
 import {
   createHttpBackendClient,
   type HttpBackendClient,
@@ -145,7 +151,14 @@ export {
  * here so the next phase can split the application contract from the Electron
  * IPC contract without another renderer-wide migration.
  */
-export interface BackendClient extends BackendApi {}
+export interface BackendClient extends BackendApi {
+  /** HTTP remote client 的低层调用入口，保留单次取消与超时选项。 */
+  invoke?<K extends RemoteBackendMethod>(
+    method: K,
+    args: RemoteBackendArgs<K>,
+    options?: BackendCallOptions
+  ): Promise<RemoteBackendValue<K>>
+}
 
 export type BackendClientMode = 'desktop' | 'http'
 export type BackendConnectionState = 'connected' | 'disconnected' | 'reconnecting' | 'unauthorized'
@@ -179,8 +192,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function canRetry(error: unknown): boolean {
-  return error instanceof BackendError &&
+const RETRY_SAFE_METHODS: ReadonlySet<string> = new Set([
+  'listDialects',
+  'listConnections',
+  'listChildren',
+  'describeTable',
+  'captureSchemaSnapshot',
+  'compareTableData',
+  'explain',
+  'fetchResultPage',
+  'closeCursor',
+  'tableSelectSql',
+  'countRows',
+  'fetchCellValue',
+  'transactionState',
+  'listSqlLibrary'
+])
+
+function canRetry(method: string, error: unknown): boolean {
+  return RETRY_SAFE_METHODS.has(method) &&
+    error instanceof BackendError &&
     error.retryable &&
     (error.code === 'transport-failed' || error.code === 'timeout')
 }
@@ -219,19 +250,34 @@ export function createBackendClientSelection(
     }
   }
 
-  const invoke = async (method: string, args: readonly unknown[]): Promise<unknown> => {
+  const invoke = async (
+    method: string,
+    args: readonly unknown[],
+    callOptions?: BackendCallOptions
+  ): Promise<unknown> => {
     try {
-      const value = await current.invoke(method as never, args as never)
+      const value = await current.invoke(method as never, args as never, callOptions)
       state = 'connected'
       return value
     } catch (error) {
-      if (!canRetry(error) || !options.reconnect) {
+      if (!canRetry(method, error) || !options.reconnect) {
         state = error instanceof BackendError && error.code === 'unauthorized' ? 'unauthorized' : 'disconnected'
         lastError = errorMessage(error)
         throw error
       }
       await reconnect()
-      return current.invoke(method as never, args as never)
+      try {
+        const value = await current.invoke(method as never, args as never, callOptions)
+        state = 'connected'
+        lastError = undefined
+        return value
+      } catch (retryError) {
+        state = retryError instanceof BackendError && retryError.code === 'unauthorized'
+          ? 'unauthorized'
+          : 'disconnected'
+        lastError = errorMessage(retryError)
+        throw retryError
+      }
     }
   }
 

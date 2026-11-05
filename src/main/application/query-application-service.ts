@@ -101,12 +101,17 @@ export class QueryApplicationService {
    * `assertNoActiveImport` + `beginWrite` 必须在首个 await 之前完成：
    * 该入口可能执行 DML/DDL 并复用导入事务，导入期间一律拒绝（只读查询走 runQuery）。
    */
-  async executeStatement(nodeId: string, sql: string, options?: QueryOptions): Promise<StatementResult> {
+  async executeStatement(
+    nodeId: string,
+    sql: string,
+    options?: QueryOptions,
+    signal?: AbortSignal
+  ): Promise<StatementResult> {
     const { conn } = this.#ctx.resolver.resolveConnection(nodeId)
     this.#ctx.activity.assertNoActiveImport(conn.id, '执行 SQL 语句')
     this.#ctx.activity.beginWrite(conn.id)
     try {
-      const result = await conn.host.executeStatement(sql, options)
+      const result = await conn.host.executeStatement(sql, options, signal)
       this.#assertSameSession(conn, `语句执行所属的会话已断开: ${conn.id}`)
 
       if (result.kind === 'rows') {
@@ -191,7 +196,7 @@ export class QueryApplicationService {
    * 多库/多 schema 下会拼出 `"public.users"` 这种错误表名、静默读错库。
    * 行数限制仍通过 QueryOptions.limit 交给 adapter（分页语法是方言知识）。
    */
-  async previewTable(nodeId: string, limit = 200): Promise<QueryResult> {
+  async previewTable(nodeId: string, limit = 200, signal?: AbortSignal): Promise<QueryResult> {
     const { conn, adapterId } = this.#ctx.resolver.resolveConnection(nodeId)
     if (adapterId === null) {
       throw new Error('连接节点不能预览，请选择具体的表或视图')
@@ -210,7 +215,7 @@ export class QueryApplicationService {
     if (name === '') throw new Error(`对象名为空，无法预览: ${adapterId}`)
 
     const sql = await conn.host.tableSelectSql(adapterId)
-    const result = await this.runQuery(nodeId, sql, { limit })
+    const result = await this.runQuery(nodeId, sql, { limit }, signal)
 
     // ===== 兜底校验：确认 adapter 真的落实了 limit =====
     //

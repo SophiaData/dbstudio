@@ -109,9 +109,17 @@ try {
       backendCalls.push({ method: 'describeTable', nodeId })
       throw { code: 'not-found', message: '表不存在', details: { nodeId } }
     },
-    runQuery: async (nodeId, sql, signal) => {
-      backendCalls.push({ method: 'runQuery', nodeId, sql, signal })
+    runQuery: async (nodeId, sql, options, signal) => {
+      backendCalls.push({ method: 'runQuery', nodeId, sql, options, signal })
       return new Uint8Array([0, 1, 2, 255])
+    },
+    executeStatement: async (nodeId, sql, options, signal) => {
+      backendCalls.push({ method: 'executeStatement', nodeId, sql, options, signal })
+      return { kind: 'affected', affected: 1 }
+    },
+    previewTable: async (nodeId, limit, options, signal) => {
+      backendCalls.push({ method: 'previewTable', nodeId, limit, options, signal })
+      return { cursorId: null, columns: [], rows: [], returned: 0, hasMore: false, executedSql: 'select 1', elapsedMs: 1 }
     },
     removeConnection: async (connectionId) => {
       backendCalls.push({ method: 'removeConnection', connectionId })
@@ -235,14 +243,19 @@ try {
 
   const dispatch = createBackendDispatcher({ api: fakeApi })
 
-  await check('runQuery 收到 request context AbortSignal', async () => {
+  await check('查询与语句/预览都收到 request context AbortSignal', async () => {
     const controller = new AbortController()
-    const response = await dispatch(
-      { id: 'query-signal', method: 'runQuery', args: ['connection:c1', 'select 1'] },
-      { requestId: 'query-signal', signal: controller.signal, receivedAt: Date.now() }
-    )
-    assert.equal(response.ok, true)
-    assert.equal(backendCalls.at(-1).signal, controller.signal)
+    const context = { requestId: 'query-signal', signal: controller.signal, receivedAt: Date.now() }
+    for (const [method, args] of [
+      ['runQuery', ['connection:c1', 'select 1']],
+      ['executeStatement', ['connection:c1', 'update t set x = 1']],
+      ['previewTable', ['connection:c1|table:t', 20]]
+    ]) {
+      const response = await dispatch({ id: `${method}-signal`, method, args }, context)
+      assert.equal(response.ok, true)
+      assert.equal(backendCalls.at(-1).method, method)
+      assert.equal(backendCalls.at(-1).signal, controller.signal, method)
+    }
   })
 
   await check('已知方法按 manifest 路由并回带请求 id', async () => {
