@@ -55,6 +55,7 @@
  */
 
 import type { ConnectionSummary } from '../../core/api'
+import { BackendError } from '../../backend/contract/errors'
 import type { ConnectionConfig } from '../../core/dialect'
 import {
   validateRemoteConnectionConfig,
@@ -224,7 +225,7 @@ export class ConnectionApplicationService {
     const { catalog, sessions } = this.#ctx
     if (sessions.disposed) throw new Error('连接管理器已关闭')
     const saved = catalog.get(connectionId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) throw new BackendError({ code: 'not-found', message: '连接不存在' })
     // 配置可能在启动时从磁盘载入，也可能由受信任桌面端预置；远程 scope
     // 必须在每次真正建立宿主前重新执行出站策略校验，不能只信任落盘时的结果。
     this.#validateRemoteConfig(saved.config)
@@ -235,7 +236,7 @@ export class ConnectionApplicationService {
   async disconnectConnection(connectionId: string): Promise<ConnectionSummary> {
     const { catalog, sessions } = this.#ctx
     const saved = catalog.get(connectionId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) throw new BackendError({ code: 'not-found', message: '连接不存在' })
     await sessions.stopSession(connectionId)
     return this.#toSummary(catalog.get(connectionId) ?? saved, undefined)
   }

@@ -59,6 +59,10 @@ const added = await manager.add(accepted)
 assert.equal(added.connected, true, '允许的出站目标应完成 add/connect 流程')
 assert.equal(manager.list().length, 1)
 await assert.rejects(
+  () => manager.connectConnection('missing'),
+  (error) => error?.code === 'not-found'
+)
+await assert.rejects(
   () => manager.updateConnection('c1', { options: { host: 'db.example.test', port: 5432, file: '/server/private.db' } }),
   /远程连接配置被拒绝/
 )
