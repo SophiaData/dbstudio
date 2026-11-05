@@ -69,7 +69,7 @@ export type HttpHeaders = Readonly<Record<string, string>>
 export interface HttpRequestInit {
   readonly method: string
   readonly headers: HttpHeaders
-  readonly body: string
+  readonly body?: string
   readonly signal?: AbortSignal
 }
 
@@ -91,6 +91,8 @@ export interface HttpBackendClientOptions {
   readonly fetch: HttpFetch
   /** 额外请求头（认证等），不会覆盖 content-type / request id。 */
   readonly headers?: HttpHeaders
+  /** 每次发送前由受信任 session provider 提供最新认证头；不保存 token，不重放请求。 */
+  readonly getHeaders?: () => HttpHeaders | Promise<HttpHeaders>
   /** 默认超时毫秒数；`0` 或非有限值表示不设超时。缺省 30s。 */
   readonly timeoutMs?: number
   /** 请求 id 生成器；并发调用必须唯一。缺省用 crypto.randomUUID 或回退实现。 */
@@ -109,6 +111,13 @@ export const DEFAULT_HTTP_TIMEOUT_MS = 75_000
  * 服务器仍然只接受 manifest 里的方法名。
  */
 export interface HttpBackendClient extends RemoteBackendApi {
+  /** 访问 owner-scoped JSON route；route 不进入 RPC manifest。 */
+  requestJson(
+    path: string,
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    body?: unknown,
+    options?: BackendCallOptions
+  ): Promise<unknown>
   invoke<K extends RemoteBackendMethod>(
     method: K,
     args: RemoteBackendArgs<K>,
@@ -231,6 +240,105 @@ export function createHttpBackendClient(
   )
   const methodCache = new Map<string, (...args: unknown[]) => Promise<unknown>>()
 
+  async function requestHeaders(signal: AbortSignal, callId: string): Promise<HttpHeaders> {
+    if (!options.getHeaders) return options.headers ?? {}
+    let onAbort: () => void = () => undefined
+    try {
+      const dynamic = await new Promise<HttpHeaders>((resolve, reject) => {
+        onAbort = () => reject(new Error('aborted'))
+        if (signal.aborted) return onAbort()
+        signal.addEventListener('abort', onAbort, { once: true })
+        Promise.resolve().then(() => options.getHeaders!()).then(resolve, reject)
+      })
+      return { ...options.headers, ...dynamic }
+    } catch {
+      // Session providers may include token/claims in errors. Never forward their message.
+      throw makeError('unauthorized', '获取认证信息失败', { callId, retryable: false })
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  async function requestJson(
+    path: string,
+    requestMethod: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    bodyValue?: unknown,
+    callOptions?: BackendCallOptions
+  ): Promise<unknown> {
+    if (!path.startsWith('/') || new URL(path, endpoint).origin !== new URL(endpoint).origin) {
+      throw makeError('invalid-argument', 'HTTP route path 必须位于后端同一 origin', { callId: nextRequestId() })
+    }
+    const callId = nextRequestId()
+    if (callOptions?.signal?.aborted === true) {
+      throw makeError('cancelled', '后端调用已取消', { callId, retryable: false })
+    }
+    const timeoutMs = callOptions?.timeoutMs ?? defaultTimeoutMs
+    const scope = createAbortScope(callOptions?.signal, timeoutMs)
+    const transportFailure = (error: unknown): BackendError => {
+      if (scope.didTimeOut()) return makeError('timeout', `后端调用超时（${timeoutMs}ms）`, { callId, retryable: true, details: { timeoutMs } })
+      if (callOptions?.signal?.aborted === true) return makeError('cancelled', '后端调用已取消', { callId, retryable: false })
+      if (error instanceof BackendError) return error
+      return makeError('transport-failed', errorMessage(error), { callId, retryable: true })
+    }
+    try {
+      let response: HttpResponseLike
+      try {
+        const headers = await requestHeaders(scope.signal, callId)
+        if (scope.signal.aborted) throw new Error('aborted')
+        response = await fetchImpl(new URL(path, endpoint).toString(), {
+          method: requestMethod,
+          headers: {
+            ...headers,
+            'content-type': 'application/json',
+            accept: 'application/json',
+            'x-dbstudio-request-id': callId
+          },
+          body: bodyValue === undefined ? undefined : JSON.stringify(bodyValue),
+          signal: scope.signal
+        })
+      } catch (error) {
+        throw transportFailure(error)
+      }
+      let text: string
+      try {
+        text = await response.text()
+      } catch (error) {
+        throw transportFailure(error)
+      }
+      let payload: unknown
+      try {
+        payload = JSON.parse(text)
+      } catch (error) {
+        throw makeError('transport-failed', `HTTP 响应不是合法 JSON（status ${response.status}）`, {
+          callId, retryable: true, details: { status: response.status, reason: errorMessage(error) }
+        })
+      }
+      if (!payload || typeof payload !== 'object' || !('ok' in payload) || typeof payload.ok !== 'boolean') {
+        throw makeError('transport-failed', 'HTTP route 响应不符合后端契约', {
+          callId, retryable: false, details: { status: response.status }
+        })
+      }
+      const routePayload = payload as Record<string, unknown>
+      if (!routePayload.ok) {
+        const errorPayload = routePayload.error
+        if (!isBackendErrorPayload(errorPayload)) {
+          throw makeError('transport-failed', 'HTTP route 错误响应不符合后端契约', {
+            callId, retryable: false, details: { status: response.status }
+          })
+        }
+        throw backendErrorFromPayload({ ...errorPayload, callId: errorPayload.callId ?? callId })
+      }
+      if (!response.ok) {
+        throw makeError('transport-failed', `HTTP ${response.status}：route 返回了成功信封但状态码非 2xx`, {
+          callId, retryable: false, details: { status: response.status }
+        })
+      }
+      return routePayload.value
+    } finally {
+      scope.cleanup()
+    }
+  }
+
   async function invoke<K extends RemoteBackendMethod>(
     method: K,
     args: RemoteBackendArgs<K>,
@@ -290,10 +398,12 @@ export function createHttpBackendClient(
 
       let response: HttpResponseLike
       try {
+        const headers = await requestHeaders(scope.signal, callId)
+        if (scope.signal.aborted) throw new Error('aborted')
         response = await fetchImpl(endpoint, {
           method: 'POST',
           headers: {
-            ...options.headers,
+            ...headers,
             // 顺序刻意放在用户头之后：这些是 wire 契约的一部分，不允许被覆盖。
             'content-type': 'application/json',
             accept: 'application/json',
@@ -397,12 +507,13 @@ export function createHttpBackendClient(
     get(current, property, receiver): unknown {
       if (typeof property !== 'string') return Reflect.get(current, property, receiver)
       if (property === 'invoke') return invoke
+      if (property === 'requestJson') return requestJson
       if (!methodNames.has(property)) return undefined
       return methodFunction(property)
     },
     has(current, property): boolean {
       if (typeof property !== 'string') return Reflect.has(current, property)
-      return property === 'invoke' || methodNames.has(property)
+      return property === 'invoke' || property === 'requestJson' || methodNames.has(property)
     }
   })
 

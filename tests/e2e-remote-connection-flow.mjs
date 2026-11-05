@@ -12,7 +12,7 @@ await build({
   logLevel: 'error',
   build: {
     outDir,
-    emptyOutDir: true,
+    emptyOutDir: false,
     target: 'node22',
     minify: false,
     ssr: true,
@@ -59,6 +59,10 @@ const added = await manager.add(accepted)
 assert.equal(added.connected, true, '允许的出站目标应完成 add/connect 流程')
 assert.equal(manager.list().length, 1)
 await assert.rejects(
+  () => manager.connectConnection('missing'),
+  (error) => error?.code === 'not-found'
+)
+await assert.rejects(
   () => manager.updateConnection('c1', { options: { host: 'db.example.test', port: 5432, file: '/server/private.db' } }),
   /远程连接配置被拒绝/
 )
@@ -66,4 +70,24 @@ assert.deepEqual(manager.list()[0].options, accepted.options)
 accepted.options.host = 'evil.example.test'
 await manager.disconnectConnection('c1')
 await assert.rejects(() => manager.connectConnection('c1'), /远程连接配置被拒绝/)
-console.log('远程连接 add/test/update/connect 复验流程测试通过')
+await manager.disposeAll()
+const desktop = new ConnectionManager(listBuiltinDialects(), new ConnectionStore({
+  baseDir: mkdtempSync(join(tmpdir(), 'dbstudio-desktop-saved-limit-')), cipher: null
+}), {
+  onLog: () => undefined,
+  createDriverHost: () => ({
+    handshake: Promise.resolve(),
+    connect: async () => ({ supportsInlineEdit: false, supportsServerPagination: false, supportsCancel: false }),
+    rollbackTransaction: async () => undefined,
+    close: async () => undefined,
+    kill: () => undefined
+  })
+})
+try {
+  for (let index = 0; index < 101; index += 1) {
+    const added = await desktop.add({ dialectId: 'sqlite', name: `desktop-${index}`, options: { file: ':memory:' } })
+    await desktop.disconnectConnection(added.id)
+  }
+  assert.equal(desktop.list().length, 101, '桌面模式仍支持本机配置且不受远程默认100条限制')
+} finally { await desktop.disposeAll() }
+console.log('远程连接 add/test/update/connect 复验与桌面保存额度兼容测试通过')

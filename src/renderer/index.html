@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      安全基线：只允许加载本地资源；connect-src 放开 ws/http 是为了 vite 的 HMR，
-      生产构建下不会用到。不加载任何远程脚本。
+      脚本和资源只从本地加载。远程 backend 使用 HTTPS；loopback HTTP 与 ws
+      用于本地服务和开发 HMR。preload 另行校验显式配置的 backend endpoint。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: ws: http://localhost:* http://127.0.0.1:* http://[::1]:*"
     />
     <title>dbstudio</title>
     <link rel="stylesheet" href="./style.css" />

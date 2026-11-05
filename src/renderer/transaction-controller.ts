@@ -116,7 +116,7 @@ export class TransactionController {
           ? await api.commitTransaction(participant.transactionNodeId)
           : { active: false, pendingAffected: 0 }
         this.#broadcastState(next)
-        this.#broadcastRefresh()
+        await this.#broadcastRefresh()
         participant.reportTransactionControllerStatus('已提交（当前连接）')
         return true
       } catch (e) {
@@ -141,7 +141,7 @@ export class TransactionController {
           ? await this.#requireApi().rollbackTransaction(participant.transactionNodeId)
           : { active: false, pendingAffected: 0 }
         this.#broadcastState(next)
-        this.#broadcastRefresh()
+        await this.#broadcastRefresh()
         participant.reportTransactionControllerStatus('已回滚（当前连接）')
         return true
       } catch (e) {
@@ -284,7 +284,7 @@ export class TransactionController {
         try {
           const next = await this.#requireApi().commitTransaction(nodeId)
           this.#broadcastState(next)
-          if (refresh) this.#broadcastRefresh()
+          if (refresh) await this.#broadcastRefresh()
           return true
         } catch (e) {
           participant?.reportTransactionControllerStatus(`提交失败：${errText(e)}`, true)
@@ -302,7 +302,7 @@ export class TransactionController {
         }
       }
       for (const item of dirty) item.discardLocalEditsFromController()
-      if (refresh) this.#broadcastRefresh()
+      if (refresh) await this.#broadcastRefresh()
       return true
     } catch (e) {
       this.#firstParticipant()?.reportTransactionControllerStatus(`检查事务失败：${errText(e)}`, true)
@@ -332,7 +332,7 @@ export class TransactionController {
         const state = await activeApi.transactionState(nodeId).catch(() => null)
         if (state) this.#broadcastState(state)
       }
-      this.#broadcastRefresh()
+      await this.#broadcastRefresh()
     })
   }
 
@@ -352,7 +352,7 @@ export class TransactionController {
   async #broadcast(options: { reload: boolean; source: TransactionParticipant }): Promise<void> {
     const state = await this.#readState(options.source)
     this.#broadcastState(state)
-    if (options.reload) this.#broadcastRefresh()
+    if (options.reload) await this.#broadcastRefresh()
   }
 
   #broadcastState(state: TransactionState): void {
@@ -362,11 +362,15 @@ export class TransactionController {
     }
   }
 
-  #broadcastRefresh(): void {
-    for (const participant of this.#participants.values()) {
-      void participant.refreshFromTransactionController().catch((e) => {
+  async #broadcastRefresh(): Promise<void> {
+    // 一个 driver host 对同一连接只允许一个执行中的查询。串行刷新避免同连接
+    // 多个标签同时 previewTable，后发请求被拒绝后恢复旧快照，造成跨标签数据不同步。
+    for (const participant of [...this.#participants.values()]) {
+      try {
+        await participant.refreshFromTransactionController()
+      } catch (e) {
         participant.reportTransactionControllerStatus(`刷新结果失败：${errText(e)}`, true)
-      })
+      }
     }
   }
 

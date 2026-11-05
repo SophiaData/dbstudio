@@ -2,6 +2,18 @@ export {
   createHttpServerComposition
 } from './http-server-composition'
 export {
+  createBearerTokenPrincipalResolver,
+  createHttpAuthResolver
+} from './http-auth'
+export type {
+  BearerTokenVerifier,
+  HttpAuthProvider
+} from './http-auth'
+export { createJwtPrincipalResolver } from './http-jwt-auth'
+export type { HttpJwtAuthConfig } from './http-jwt-auth'
+export { createConfiguredHttpServer } from './http-server-runtime'
+export type { HttpServerRuntimeDependencies } from './http-server-runtime'
+export {
   createHttpServerPrincipalResolver,
   readHttpServerStartupConfig
 } from './http-server-config'
@@ -41,6 +53,15 @@ export type {
   HttpServerHandlerOptions
 } from './http-server-handler'
 export { createHttpServer } from './http-server'
+export {
+  CONNECTION_ROUTE_PREFIX,
+  createHttpConnectionRouter,
+  remoteConnectionPathForRoute
+} from './http-connection-routes'
+export type {
+  HttpConnectionRouter,
+  HttpConnectionRouterOptions
+} from './http-connection-routes'
 export type {
   HttpServer,
   HttpServerAddress,

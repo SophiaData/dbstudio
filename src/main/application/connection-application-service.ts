@@ -55,9 +55,12 @@
  */
 
 import type { ConnectionSummary } from '../../core/api'
+import { BackendError } from '../../backend/contract/errors'
 import type { ConnectionConfig } from '../../core/dialect'
 import {
   validateRemoteConnectionConfig,
+  isRemoteConnectionConfigShape,
+  isRemoteSecretInput,
   type RemoteOutboundPolicy
 } from '../../backend/contract/remote'
 import type { DialectInfo, SecretInput, TestConnectionResult } from '../../core/driver'
@@ -102,12 +105,18 @@ export interface ConnectionApplicationContext {
   readonly reserveConnection?: (connectionId: string) => { release(): void }
   /** 远程组合根显式注入后才启用连接目标校验；桌面端未配置时保持历史语义。 */
   readonly remoteOutboundPolicy?: RemoteOutboundPolicy
+  /** 远程模式默认最多保存100条；桌面未配置时不限制。 */
+  readonly maxSavedConnections?: number
 }
 
 export class ConnectionApplicationService {
   readonly #ctx: ConnectionApplicationContext
 
   constructor(context: ConnectionApplicationContext) {
+    if (context.maxSavedConnections !== undefined &&
+        (!Number.isSafeInteger(context.maxSavedConnections) || context.maxSavedConnections < 1)) {
+      throw new Error('maxSavedConnections 必须是正整数')
+    }
     this.#ctx = context
   }
 
@@ -153,7 +162,12 @@ export class ConnectionApplicationService {
    */
   async add(config: ConnectionConfig, secret?: SecretInput): Promise<ConnectionSummary> {
     this.#validateRemoteConfig(config)
+    this.#validateRemoteSecret(secret)
     const { catalog, sessions } = this.#ctx
+    const maxSaved = this.#ctx.maxSavedConnections ?? (this.#ctx.remoteOutboundPolicy ? 100 : undefined)
+    if (maxSaved !== undefined && [...catalog.keys()].length >= maxSaved) {
+      throw new BackendError({ code: 'conflict', message: '已保存连接数量已达上限', details: { resource: 'saved-connections' } })
+    }
     if (sessions.disposed) throw new Error('连接管理器已关闭')
     const info = catalog.findDialect(config.dialectId)
     if (!info) {
@@ -224,7 +238,7 @@ export class ConnectionApplicationService {
     const { catalog, sessions } = this.#ctx
     if (sessions.disposed) throw new Error('连接管理器已关闭')
     const saved = catalog.get(connectionId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) throw new BackendError({ code: 'not-found', message: '连接不存在' })
     // 配置可能在启动时从磁盘载入，也可能由受信任桌面端预置；远程 scope
     // 必须在每次真正建立宿主前重新执行出站策略校验，不能只信任落盘时的结果。
     this.#validateRemoteConfig(saved.config)
@@ -235,7 +249,7 @@ export class ConnectionApplicationService {
   async disconnectConnection(connectionId: string): Promise<ConnectionSummary> {
     const { catalog, sessions } = this.#ctx
     const saved = catalog.get(connectionId)
-    if (!saved) throw new Error(`连接不存在: ${connectionId}`)
+    if (!saved) throw new BackendError({ code: 'not-found', message: '连接不存在' })
     await sessions.stopSession(connectionId)
     return this.#toSummary(catalog.get(connectionId) ?? saved, undefined)
   }
@@ -249,6 +263,7 @@ export class ConnectionApplicationService {
    */
   async remove(connectionId: string): Promise<void> {
     const { catalog, sessions } = this.#ctx
+    if (!catalog.get(connectionId)) throw new BackendError({ code: 'not-found', message: '连接不存在' })
     const closing = sessions.stopSession(connectionId)
     // 先撤销可连接的配置，避免清理期间被另一个 connect 重新拉起。
     catalog.delete(connectionId)
@@ -269,6 +284,7 @@ export class ConnectionApplicationService {
     secret?: SecretInput
   ): Promise<TestConnectionResult> {
     this.#validateRemoteConfig(config)
+    this.#validateRemoteSecret(secret)
     const lease = this.#ctx.reserveConnection?.('__test__')
     let host: DriverHostHandle
     try {
@@ -318,8 +334,14 @@ export class ConnectionApplicationService {
     config: Partial<ConnectionConfig>,
     secret?: SecretInput
   ): Promise<ConnectionSummary> {
+    if (this.#ctx.remoteOutboundPolicy && !isRemoteConnectionConfigShape(config, true)) {
+      throw new BackendError({ code: 'invalid-argument', message: '远程连接配置被拒绝: config 格式不合法' })
+    }
+    this.#validateRemoteSecret(secret)
     const { catalog } = this.#ctx
     const { conn, saved } = this.#ctx.resolver.resolveSaved(connectionId)
+    // resolver 接受节点别名，后续写入和重连必须统一使用已保存连接的真实 id。
+    connectionId = saved.id
     const wasConnected = conn !== undefined
 
     // ---- 合并配置 ----
@@ -403,7 +425,13 @@ export class ConnectionApplicationService {
     const result = validateRemoteConnectionConfig(config, policy)
     if (!result.ok) {
       const details = result.issues.map((issue) => `${issue.field || 'config'}: ${issue.message}`).join('; ')
-      throw new Error(`远程连接配置被拒绝: ${details}`)
+      throw new BackendError({ code: 'invalid-argument', message: `远程连接配置被拒绝: ${details}` })
+    }
+  }
+
+  #validateRemoteSecret(secret: unknown): void {
+    if (this.#ctx.remoteOutboundPolicy && !isRemoteSecretInput(secret)) {
+      throw new BackendError({ code: 'invalid-argument', message: '远程连接 secret 格式不合法' })
     }
   }
 

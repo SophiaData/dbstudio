@@ -1,5 +1,4 @@
-/** HTTP 主进程启动配置的默认行为与 loopback 安全边界。 */
-
+/** HTTP 环境配置、local 兼容边界与默认 JWT 接线。 */
 import assert from 'node:assert/strict'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,113 +6,70 @@ import { build } from 'vite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const result = await build({
-  configFile: false,
-  root,
-  logLevel: 'warn',
-  build: {
-    write: false,
-    target: 'node22',
-    ssr: true,
-    lib: {
-      entry: resolve(root, 'src/main/server/http-server-config.ts'),
-      formats: ['es']
-    }
-  }
+  configFile: false, root, logLevel: 'warn', ssr: { noExternal: ['jose'] },
+  build: { write: false, target: 'node22', ssr: true,
+    lib: { entry: resolve(root, 'src/main/server/http-server-config.ts'), formats: ['es'] } }
 })
 const output = Array.isArray(result) ? result[0].output : result.output
 const code = output.find((item) => item.type === 'chunk')?.code
 assert.equal(typeof code, 'string')
-const {
-  createHttpServerPrincipalResolver,
-  readHttpServerStartupConfig
-} = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`)
-
-let pass = 0
-let fail = 0
-async function check(name, run) {
-  try {
-    await run()
-    pass += 1
-    console.log(`  ✅ ${name}`)
-  } catch (error) {
-    fail += 1
-    console.log(`  ❌ ${name} — ${error instanceof Error ? error.message : String(error)}`)
-  }
+const { createHttpServerPrincipalResolver, readHttpServerStartupConfig: read } = await import(
+  `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+)
+assert.equal(read({}), null)
+assert.equal(read({ DBSTUDIO_HTTP_PORT: ' ' }), null)
+const legacy = read({ DBSTUDIO_HTTP_PORT: '0', DBSTUDIO_HTTP_OWNER_ID: 'desktop' })
+assert.deepEqual(legacy, {
+  host: '127.0.0.1', port: 0, ownerId: 'desktop', remoteOutboundPolicy: { allowedHosts: [], allowedPorts: [] }
+})
+assert.deepEqual(await createHttpServerPrincipalResolver(legacy)({}), { id: 'desktop' })
+const local = read({ DBSTUDIO_HTTP_PORT: '0', DBSTUDIO_HTTP_AUTH_MODE: 'local', DBSTUDIO_HTTP_OWNER_ID: 'desktop' })
+assert.deepEqual(await createHttpServerPrincipalResolver(local)({}), { id: 'desktop' })
+const config = read({ DBSTUDIO_HTTP_PORT: '8123', DBSTUDIO_HTTP_HOST: '0.0.0.0', DBSTUDIO_HTTP_ALLOWED_HOSTS: 'db.example.test, jump.example.test', DBSTUDIO_HTTP_ALLOWED_PORTS: '5432,22' })
+assert.deepEqual(config.remoteOutboundPolicy, { allowedHosts: ['db.example.test', 'jump.example.test'], allowedPorts: [5432, 22] })
+assert.throws(() => createHttpServerPrincipalResolver(config), /必须配置 JWT 或注入 resolvePrincipal/)
+const request = { headers: {} }
+let observed
+const injected = createHttpServerPrincipalResolver(config, async (value) => {
+  observed = value
+  return { id: ' owner ', roles: ['reader'], token: 'synthetic-must-not-project' }
+})
+assert.deepEqual(await injected(request), { id: 'owner', roles: ['reader'] })
+assert.strictEqual(observed, request)
+await assert.rejects(
+  () => createHttpServerPrincipalResolver(config, () => { throw new Error('synthetic-private-error') })(request),
+  (error) => error.code === 'unauthorized' && error.message === '认证失败' && error.cause === undefined
+)
+for (const env of [
+  { DBSTUDIO_HTTP_HOST: '0.0.0.0', DBSTUDIO_HTTP_OWNER_ID: 'desktop' },
+  { DBSTUDIO_HTTP_AUTH_MODE: 'local' },
+  { DBSTUDIO_HTTP_AUTH_MODE: 'local', DBSTUDIO_HTTP_OWNER_ID: 'desktop', DBSTUDIO_HTTP_REQUIRE_AUTH: '1' },
+  { DBSTUDIO_HTTP_OWNER_ID: 'desktop', DBSTUDIO_HTTP_REQUIRE_AUTH: 'true' },
+  { DBSTUDIO_HTTP_AUTH_MODE: 'unknown' }, { DBSTUDIO_HTTP_REQUIRE_AUTH: 'unknown' },
+  { DBSTUDIO_HTTP_AUTH_MODE: 'jwt' }, { DBSTUDIO_HTTP_JWT_ISSUER: 'https://issuer.example.test' },
+  { DBSTUDIO_HTTP_ALLOWED_PORTS: '5432,bad' }, { DBSTUDIO_HTTP_ALLOWED_PORTS: '0' },
+  { DBSTUDIO_HTTP_PORT: '-1' }, { DBSTUDIO_HTTP_PORT: '65536' }, { DBSTUDIO_HTTP_PORT: 'NaN' }
+]) assert.throws(() => read({ DBSTUDIO_HTTP_PORT: '0', ...env }))
+const required = read({ DBSTUDIO_HTTP_PORT: '0', DBSTUDIO_HTTP_REQUIRE_AUTH: '1' })
+assert.throws(() => createHttpServerPrincipalResolver(required), /必须配置 JWT/)
+assert.deepEqual(await createHttpServerPrincipalResolver(required, () => ({ id: 'verified' }))(request), { id: 'verified' })
+const jwtEnv = {
+  DBSTUDIO_HTTP_PORT: '0', DBSTUDIO_HTTP_AUTH_MODE: 'jwt', DBSTUDIO_HTTP_REQUIRE_AUTH: '1',
+  DBSTUDIO_HTTP_JWT_ISSUER: 'https://issuer.example.test', DBSTUDIO_HTTP_JWT_AUDIENCE: 'dbstudio-test',
+  DBSTUDIO_HTTP_JWT_JWKS_URL: 'https://issuer.example.test/keys'
 }
-
-await check('未配置端口时完全禁用 HTTP 服务', () => {
-  assert.equal(readHttpServerStartupConfig({}), null)
-  assert.equal(readHttpServerStartupConfig({ DBSTUDIO_HTTP_PORT: '  ' }), null)
-})
-
-await check('合法 loopback 配置使用默认 host 与固定 owner resolver', async () => {
-  const config = readHttpServerStartupConfig({
-    DBSTUDIO_HTTP_PORT: '0',
-    DBSTUDIO_HTTP_OWNER_ID: 'desktop'
-  })
-  assert.deepEqual(config, {
-    host: '127.0.0.1',
-    port: 0,
-    ownerId: 'desktop',
-    remoteOutboundPolicy: { allowedHosts: [], allowedPorts: [] }
-  })
-  assert.deepEqual(await createHttpServerPrincipalResolver(config)({}), { id: 'desktop' })
-})
-
-await check('启动配置解析显式出站 allowlist', () => {
-  const config = readHttpServerStartupConfig({
-    DBSTUDIO_HTTP_PORT: '8123',
-    DBSTUDIO_HTTP_ALLOWED_HOSTS: 'db.example.test, jump.example.test',
-    DBSTUDIO_HTTP_ALLOWED_PORTS: '5432,22'
-  })
-  assert.deepEqual(config.remoteOutboundPolicy, {
-    allowedHosts: ['db.example.test', 'jump.example.test'],
-    allowedPorts: [5432, 22]
-  })
-})
-
-await check('注入 resolver 接收原始请求并返回认证 principal', async () => {
-  const config = readHttpServerStartupConfig({
-    DBSTUDIO_HTTP_PORT: '8123',
-    DBSTUDIO_HTTP_HOST: '127.0.0.1'
-  })
-  const request = { headers: { authorization: 'opaque-test-token' } }
-  let observed
-  const injected = async (value) => {
-    observed = value
-    return { id: 'owner-a' }
-  }
-  const resolver = createHttpServerPrincipalResolver(config, injected)
-  assert.deepEqual(await resolver(request), { id: 'owner-a' })
-  assert.strictEqual(observed, request)
-})
-
-await check('非 loopback 模式要求注入 resolver，拒绝固定 owner', async () => {
-  const config = readHttpServerStartupConfig({
-    DBSTUDIO_HTTP_PORT: '8123',
-    DBSTUDIO_HTTP_HOST: '0.0.0.0'
-  })
-  assert.deepEqual(config, {
-    host: '0.0.0.0',
-    port: 8123,
-    remoteOutboundPolicy: { allowedHosts: [], allowedPorts: [] }
-  })
-  assert.throws(() => createHttpServerPrincipalResolver(config), /必须注入 resolvePrincipal/)
-  const injected = async () => ({ id: 'remote-owner' })
-  assert.strictEqual(createHttpServerPrincipalResolver(config, injected), injected)
-})
-
-await check('非 loopback 配置不能携带固定 owner', () => {
-  const config = readHttpServerStartupConfig({
-    DBSTUDIO_HTTP_PORT: '8123',
-    DBSTUDIO_HTTP_HOST: '0.0.0.0',
-    DBSTUDIO_HTTP_OWNER_ID: 'desktop'
-  })
-  assert.throws(
-    () => createHttpServerPrincipalResolver(config),
-    /OWNER_ID 仅允许 loopback host/
-  )
-})
-
-console.log(`\n===== HTTP server 启动配置：${pass} 通过 / ${fail} 失败 =====`)
-if (fail > 0) process.exitCode = 1
+const jwt = read(jwtEnv)
+assert.equal(jwt.authMode, 'jwt')
+assert.equal(jwt.jwt.issuer, jwtEnv.DBSTUDIO_HTTP_JWT_ISSUER)
+const defaultJwtResolver = createHttpServerPrincipalResolver(jwt)
+await assert.rejects(() => defaultJwtResolver(request), (error) => error.code === 'unauthorized' && error.message === '认证失败')
+for (const env of [
+  { DBSTUDIO_HTTP_OWNER_ID: 'desktop' },
+  { DBSTUDIO_HTTP_JWT_AUDIENCE: '' },
+  { DBSTUDIO_HTTP_JWT_JWKS_FILE: '/synthetic/public.jwks.json' },
+  { DBSTUDIO_HTTP_JWT_JWKS_URL: 'http://issuer.example.test/keys' },
+  { DBSTUDIO_HTTP_JWT_JWKS_URL: 'https://issuer.example.test/keys?secret=synthetic' },
+  { DBSTUDIO_HTTP_AUTH_MODE: 'local', DBSTUDIO_HTTP_OWNER_ID: 'desktop' }
+]) assert.throws(() => read({ ...jwtEnv, ...env }))
+assert.equal(read({ ...jwtEnv, DBSTUDIO_HTTP_AUTH_MODE: undefined }).authMode, 'jwt')
+console.log('HTTP startup config：local兼容、REQUIRE_AUTH、防错误配置及默认JWT接线测试通过')

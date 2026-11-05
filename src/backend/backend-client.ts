@@ -13,7 +13,8 @@
  *   - 运行时行为（resolve / require / create）保持原样，第一切片不引入包装层。
  */
 
-import type { DbStudioApi } from '../core/api'
+import type { ConnectionSummary, DbStudioApi } from '../core/api'
+import type { TestConnectionResult } from '../core/driver'
 import type {
   BackendApi,
   RemoteBackendArgs,
@@ -28,6 +29,11 @@ import {
   type HttpHeaders
 } from './transport/http-transport'
 import { BackendError } from './contract/errors'
+import {
+  remoteConnectionPath,
+  type RemoteConnectionCreateRequest,
+  type RemoteConnectionUpdateRequest
+} from './contract/remote-connection'
 
 export type {
   ArtifactApi,
@@ -47,6 +53,19 @@ export {
   isArtifactReference,
   isSha256
 } from './contract/artifact'
+
+export type {
+  RemoteConnectionCreateRequest,
+  RemoteConnectionMethod,
+  RemoteConnectionRouteDescription,
+  RemoteConnectionUpdateRequest
+} from './contract/remote-connection'
+export {
+  REMOTE_CONNECTION_ROUTES,
+  isRemoteConnectionMethod,
+  remoteConnectionPath,
+  toRemoteConnectionSummary
+} from './contract/remote-connection'
 
 export type {
   BackendApi,
@@ -151,7 +170,17 @@ export {
  * here so the next phase can split the application contract from the Electron
  * IPC contract without another renderer-wide migration.
  */
-export interface BackendClient extends BackendApi {
+export interface RemoteConnectionControlClient {
+  listRemoteConnections(): Promise<readonly ConnectionSummary[]>
+  createRemoteConnection(request: RemoteConnectionCreateRequest): Promise<ConnectionSummary>
+  testRemoteConnection(request: RemoteConnectionCreateRequest): Promise<TestConnectionResult>
+  updateRemoteConnection(connectionId: string, request: RemoteConnectionUpdateRequest): Promise<ConnectionSummary>
+  connectRemoteConnection(connectionId: string): Promise<ConnectionSummary>
+  disconnectRemoteConnection(connectionId: string): Promise<ConnectionSummary>
+  removeRemoteConnection(connectionId: string): Promise<void>
+}
+
+export interface BackendClient extends BackendApi, Partial<RemoteConnectionControlClient> {
   /** HTTP remote client 的低层调用入口，保留单次取消与超时选项。 */
   invoke?<K extends RemoteBackendMethod>(
     method: K,
@@ -214,6 +243,29 @@ function canRetry(method: string, error: unknown): boolean {
     error instanceof BackendError &&
     error.retryable &&
     (error.code === 'transport-failed' || error.code === 'timeout')
+}
+
+type RemoteRouteRequest = (
+  path: string,
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  body?: unknown
+) => Promise<unknown>
+
+function createConnectionControlMethods(request: RemoteRouteRequest): RemoteConnectionControlClient {
+  return {
+    listRemoteConnections: async () => request('/connections', 'GET') as Promise<readonly ConnectionSummary[]>,
+    createRemoteConnection: async (body) => request('/connections', 'POST', body) as Promise<ConnectionSummary>,
+    testRemoteConnection: async (body) => request('/connections/test', 'POST', body) as Promise<TestConnectionResult>,
+    updateRemoteConnection: async (connectionId, body) =>
+      request(remoteConnectionPath(connectionId), 'PATCH', body) as Promise<ConnectionSummary>,
+    connectRemoteConnection: async (connectionId) =>
+      request(remoteConnectionPath(connectionId, 'connect'), 'POST') as Promise<ConnectionSummary>,
+    disconnectRemoteConnection: async (connectionId) =>
+      request(remoteConnectionPath(connectionId, 'disconnect'), 'POST') as Promise<ConnectionSummary>,
+    removeRemoteConnection: async (connectionId) => {
+      await request(remoteConnectionPath(connectionId), 'DELETE')
+    }
+  }
 }
 
 /** 创建可在 desktop IPC 与 HTTP 间切换的 renderer backend facade。 */
@@ -281,6 +333,30 @@ export function createBackendClientSelection(
     }
   }
 
+  const invokeRoute: RemoteRouteRequest = async (path, method, body) => {
+    try {
+      const value = await current.requestJson(path, method, body)
+      state = 'connected'
+      lastError = undefined
+      return value
+    } catch (error) {
+      state = error instanceof BackendError && error.code === 'unauthorized' ? 'unauthorized' : 'disconnected'
+      lastError = errorMessage(error)
+      throw error
+    }
+  }
+  const connectionMethods = createConnectionControlMethods(invokeRoute)
+  const connectionAliases: Pick<BackendApi,
+    'listConnections' | 'addConnection' | 'testConnection' | 'updateConnection' |
+    'connectConnection' | 'disconnectConnection' | 'removeConnection'> = {
+    listConnections: async () => [...await connectionMethods.listRemoteConnections()],
+    addConnection: (config, secret) => connectionMethods.createRemoteConnection({ config, secret }),
+    testConnection: (config, secret) => connectionMethods.testRemoteConnection({ config, secret }),
+    updateConnection: (id, config, secretPatch) => connectionMethods.updateRemoteConnection(id, { config, secretPatch }),
+    connectConnection: connectionMethods.connectRemoteConnection,
+    disconnectConnection: connectionMethods.disconnectRemoteConnection,
+    removeConnection: connectionMethods.removeRemoteConnection
+  }
   const target = Object.create(null) as Record<string, unknown>
   const client = new Proxy(target, {
     get(_target, property): unknown {
@@ -288,12 +364,15 @@ export function createBackendClientSelection(
       if (typeof property !== 'string') return undefined
       if (property === 'status') return status
       if (property === 'reconnect') return reconnect
-      if (typeof current[property as keyof HttpBackendClient] !== 'function') return undefined
+      if (Object.hasOwn(connectionAliases, property)) return connectionAliases[property as keyof typeof connectionAliases]
+      if (Object.hasOwn(connectionMethods, property)) return connectionMethods[property as keyof typeof connectionMethods]
+      if (property === 'requestJson' || typeof current[property as keyof HttpBackendClient] !== 'function') return undefined
       return (...args: readonly unknown[]) => invoke(property, args)
     },
     has(_target, property): boolean {
       return property === 'invoke' || property === 'status' || property === 'reconnect' ||
-        (typeof property === 'string' && typeof current[property as keyof HttpBackendClient] === 'function')
+        Object.hasOwn(connectionAliases, property) || Object.hasOwn(connectionMethods, property) ||
+        (typeof property === 'string' && property !== 'requestJson' && typeof current[property as keyof HttpBackendClient] === 'function')
     }
   }) as unknown as BackendClient
   return { client, status, reconnect }
@@ -301,6 +380,8 @@ export function createBackendClientSelection(
 
 /** Adapt the current Electron preload object to the renderer backend contract. */
 export function createElectronBackendClient(api: DbStudioApi): BackendClient {
+  // Desktop preload already exposes the stable connection method names. Keep the
+  // original object untouched: contextBridge objects may be non-extensible.
   return api
 }
 
