@@ -40,3 +40,11 @@ pnpm typecheck:desktop
 ```
 
 workflow 文件的本地 YAML 解析、固定命令检查或上述两项通过不等于 GitHub macOS/Linux runner 已通过；只有真实 workflow 执行结果能确认平台门禁。
+
+## 首轮 tag CI 记录
+
+2026-11-06 推送的 `v0.8.0` 固定引用迁移提交 `30ea604b04bbcb5bc09bb9441be78141b90f0e1e`；[首次候选包运行](https://github.com/SophiaData/dbstudio/actions/runs/42221460748)中，macOS 原生 WebView/生产构建和 Linux 单测/桌面编译均通过。真实 PostgreSQL/MySQL 与 Redis TLS/Kafka TLS SASL 已通过；SQL TLS/SSH 四个用例中三个通过，MySQL 的错误主机名可达性对照失败，因而安装包构建被门禁阻止。
+
+该对照保留 `localhost` 原主机名和完整证书拒绝断言。锁定的 MySQL 客户端默认 TCP 路径在第一个 DNS 地址连接失败时提前返回；IPv6 优先的 runner 无法回退到夹具发布的 IPv4 地址。修复须覆盖正常建连和独立取消通道，保留 TLS 的原始主机名，不用放宽校验、跳过用例或覆盖已有 tag 来取得通过。后续验证以新的提交及对应运行 SHA 为准。
+
+MySQL 修复保持原始 `ip_or_hostname`、端口、TLS 配置和超时，通过库的 bind-address 路径逐地址族尝试；只有 TCP 连接建立失败或连接超时可进入下一地址族，TLS/认证/协议错误立即返回。正常连接和独立取消通道共用该 helper。修复后本地 88 项原生回归及四项真实 SQL TLS/SSH 均通过。原 tag 不移动，修复提交使用 `workflow_dispatch` 验证完整候选包流水线，清单中的 SHA 为实际构建提交。

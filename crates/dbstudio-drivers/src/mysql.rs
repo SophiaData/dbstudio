@@ -4,7 +4,7 @@ use mysql::{Conn,Opts,OptsBuilder,Params,Row,SslOpts,Value as MValue,prelude::Qu
 use serde_json::{json,Value};
 use base64::{engine::general_purpose::STANDARD,Engine};
 use crate::{network as n,tls::{self,TlsMode},tunnel::{self,SshTunnel}};
-use std::{collections::HashMap,sync::{Arc,atomic::{AtomicBool,Ordering}},time::Instant};
+use std::{collections::HashMap,net::{IpAddr,Ipv4Addr,Ipv6Addr,SocketAddr,ToSocketAddrs},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Instant};
 
 fn error(error:mysql::Error)->DriverError{
     match error {
@@ -13,6 +13,32 @@ fn error(error:mysql::Error)->DriverError{
             DriverError::new("driver-error",format!("MySQL操作失败(SQLSTATE {}, code {})",e.state,e.code))
         },_=>DriverError::new("connection_failed","MySQL连接或协议操作失败")
     }
+}
+fn retryable_connect_error(error:&mysql::Error)->bool{
+    matches!(error,mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(_)|mysql::DriverError::ConnectTimeout))
+}
+fn family_binds(addresses:impl IntoIterator<Item=SocketAddr>)->Vec<SocketAddr>{
+    let mut binds=vec![];
+    for address in addresses{
+        let bind=SocketAddr::new(if address.is_ipv4(){IpAddr::V4(Ipv4Addr::UNSPECIFIED)}else{IpAddr::V6(Ipv6Addr::UNSPECIFIED)},0);
+        if !binds.contains(&bind){binds.push(bind);}
+    }
+    binds
+}
+fn connect_options(opts:&Opts)->mysql::Result<Conn>{
+    let host_cow=opts.get_ip_or_hostname();let host=host_cow.as_ref();
+    let host=host.strip_prefix('[').and_then(|value|value.strip_suffix(']')).unwrap_or(host);
+    let addresses=(host,opts.get_tcp_port()).to_socket_addrs()?.collect::<Vec<_>>();
+    let mut last_error=None;
+    for bind in family_binds(addresses){
+        let candidate=OptsBuilder::from_opts(opts.clone()).bind_address(Some(bind));
+        match Conn::new(candidate){
+            Ok(conn)=>return Ok(conn),
+            Err(error)if retryable_connect_error(&error)=>last_error=Some(error),
+            Err(error)=>return Err(error)
+        }
+    }
+    match last_error{Some(error)=>Err(error),None=>Conn::new(opts.clone())}
 }
 fn param(value:&Value)->DriverResult<MValue>{
     Ok(match value {
@@ -51,10 +77,10 @@ pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dy
     let opts=Opts::from(OptsBuilder::default().ip_or_hostname(Some(if tunnel.is_some(){"127.0.0.1".into()}else{host})).tcp_port(tunnel.as_ref().map(|t|t.port).unwrap_or(port))
         .user(Some(n::option(config,"user","root"))).pass(secrets.get("dbPassword").and_then(Value::as_str).map(str::to_owned))
         .db_name(Some(database)).ssl_opts(ssl).tcp_connect_timeout(Some(n::timeout())).read_timeout(Some(n::timeout())).write_timeout(Some(n::timeout())).prefer_socket(false));
-    let mut conn=Conn::new(opts.clone()).map_err(error)?;conn.query_drop("SET NAMES utf8mb4").map_err(error)?;
+    let mut conn=connect_options(&opts).map_err(error)?;conn.query_drop("SET NAMES utf8mb4").map_err(error)?;
     let id=conn.connection_id();let running=Arc::new(AtomicBool::new(false));let flag=running.clone();
     let cancel:CancelHandle=Arc::new(move||{
-        if !flag.load(Ordering::SeqCst){return Ok(false);}let mut control=Conn::new(opts.clone()).map_err(error)?;
+        if !flag.load(Ordering::SeqCst){return Ok(false);}let mut control=connect_options(&opts).map_err(error)?;
         control.query_drop(format!("KILL QUERY {id}")).map_err(error)?;Ok(true)
     });
     Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel}))
@@ -234,6 +260,35 @@ impl MysqlDriver {
             }}
         }
         self.pending+=total;Ok(json!({"affected":total,"ok":outcomes.iter().all(|v|v["error"].is_null()),"outcomes":outcomes,"inTransaction":self.active}))
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    fn address(value:&str)->SocketAddr{value.parse().unwrap()}
+    #[test]
+    fn address_family_binds_follow_resolver_order_and_dedupe(){
+        assert_eq!(family_binds([address("[::1]:3306"),address("127.0.0.1:3306"),address("[::2]:3306"),address("127.0.0.2:3306")]),vec![address("[::]:0"),address("0.0.0.0:0")]);
+        assert_eq!(family_binds([address("127.0.0.1:3306"),address("[::1]:3306")]),vec![address("0.0.0.0:0"),address("[::]:0")]);
+        assert_eq!(family_binds([address("[::1]:3306"),address("[::2]:3306")]),vec![address("[::]:0")]);
+    }
+    #[test]
+    fn only_tcp_connect_failures_are_retryable(){
+        assert!(retryable_connect_error(&mysql::Error::DriverError(mysql::DriverError::ConnectTimeout)));
+        assert!(retryable_connect_error(&mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(Some(("localhost:3306".into(),"refused".into(),std::io::ErrorKind::ConnectionRefused))))));
+        assert!(!retryable_connect_error(&mysql::Error::DriverError(mysql::DriverError::TlsNotSupported)));
+        assert!(!retryable_connect_error(&mysql::Error::MySqlError(mysql::MySqlError{state:"28000".into(),code:1045,message:"access denied".into()})));
+        assert!(!retryable_connect_error(&mysql::Error::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData,"handshake failed"))));
+    }
+    #[test]
+    fn family_binds_preserve_original_hostname_and_port(){
+        let opts=Opts::from(OptsBuilder::default().ip_or_hostname(Some("db.fixture")).tcp_port(3306));
+        for bind in family_binds([address("[::1]:3306"),address("127.0.0.1:3306")]){
+            let candidate=Opts::from(OptsBuilder::from_opts(opts.clone()).bind_address(Some(bind)));
+            assert_eq!(candidate.get_ip_or_hostname().as_ref(),"db.fixture");
+            assert_eq!(candidate.get_tcp_port(),3306);
+        }
     }
 }
 impl Driver for MysqlDriver {
