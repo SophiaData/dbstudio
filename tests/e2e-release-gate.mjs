@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rename, lstat, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, basename, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { checkReleaseVersion } from '../scripts/check-release-version.mjs'
 import { TARGETS, artifactNames, createManifest, aggregateRelease } from '../scripts/release-gate.mjs'
 import { publishRelease } from '../scripts/publish-release.mjs'
+import { RELEASE_TARGETS as NATIVE_RELEASE_TARGETS } from '../scripts/native-release-gate.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const { version } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -15,6 +16,21 @@ const env = { ...process.env, GITHUB_SHA: identity.sha, GITHUB_RUN_ID: '123', GI
 let passed = 0
 const test = async (name, run) => { await run(); console.log(`PASS ${name}`); passed++ }
 const work = await mkdtemp(join(tmpdir(), 'dbstudio-release-gate-'))
+async function withholdCandidate(path) {
+  const source = resolve(path)
+  assert.ok(source.startsWith(`${work}${sep}`), 'Only this test run may be moved')
+  const info = await lstat(source)
+  assert.ok(!info.isSymbolicLink() && (info.isFile() || info.isDirectory()))
+  const files = info.isDirectory() ? (await readdir(source)).map((name) => join(source, name)) : [source]
+  for (const file of files) {
+    const stat = await lstat(file)
+    assert.ok(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, 'Only ordinary synthetic files may be moved')
+  }
+  const retained = await mkdtemp(join(work, 'withheld-'))
+  const destination = resolve(retained, basename(source))
+  assert.ok(destination.startsWith(`${retained}${sep}`), 'Retained destination must stay inside this test run')
+  await rename(source, destination)
+}
 async function fixture() {
   const dir = await mkdtemp(join(work, 'bundles-'))
   for (const target of TARGETS) {
@@ -84,8 +100,8 @@ try {
       // 按平台名查，不要用固定下标：矩阵增删平台时下标会整体错位。
       const winTarget = TARGETS.find((target) => target.platform === 'win')
       const file = join(folder, artifactNames(identity, winTarget)[0])
-      if (mode === 'missing platform') await rm(folder, { recursive: true })
-      else if (mode === 'missing file') await rm(file)
+      if (mode === 'missing platform') await withholdCandidate(folder)
+      else if (mode === 'missing file') await withholdCandidate(file)
       else await writeFile(file, mode === 'empty file' ? '' : 'changed-content')
       await assert.rejects(aggregateRelease(dir, identity))
     })
@@ -136,15 +152,18 @@ try {
     assert.deepEqual(f.events.map(([event]) => event), ['create', 'update'])
     assert.equal(f.events[1][1].draft, false)
   })
-  await test('workflow graph confines publication to aggregate-success job', async () => {
+  await test('native workflow requires verification and aggregates scoped candidates without automatic publication', async () => {
     const workflow = await readFile(join(root, '.github/workflows/release.yml'), 'utf8')
+    assert.match(workflow, /uses:\s*\.\/\.github\/workflows\/native-verify\.yml/)
+    assert.match(workflow, /build:\s*\n\s*needs: verify/)
     assert.match(workflow, /gate:\s*\n\s*needs: build/)
-    assert.match(workflow, /publish:\s*\n\s*needs: gate/)
-    assert.match(workflow, /if: needs\.gate\.outputs\.publish == 'true'/)
-    assert.equal((workflow.match(/contents: write/g) ?? []).length, 1)
-    assert.ok(!workflow.includes('--publish always') && !workflow.includes('action-gh-release'))
-    assert.match(workflow, /smoke-packaged-app\.mjs/)
-    for (const target of TARGETS) assert.ok(workflow.includes(`platform: ${target.platform}`))
+    assert.match(workflow, /native-release-gate\.mjs aggregate candidates/)
+    assert.match(workflow, /contents:\s*read/)
+    assert.doesNotMatch(workflow, /^\s*publish:\s*$/m)
+    assert.doesNotMatch(workflow, /contents:\s*write/)
+    assert.ok(!workflow.includes('--publish always') && !workflow.includes('action-gh-release') && !workflow.includes('publish-release.mjs'))
+    assert.equal((workflow.match(/^\s*- os:/gm) ?? []).length, NATIVE_RELEASE_TARGETS.length)
+    for (const target of NATIVE_RELEASE_TARGETS) assert.ok(workflow.includes(`name: ${target}`))
   })
-} finally { await rm(work, { recursive: true, force: true }) }
+} finally { console.log('Synthetic release-gate fixtures retained; no deletion performed') }
 console.log(`Release gate: ${passed} tests passed (synthetic bundles/API; no remote release)`)
