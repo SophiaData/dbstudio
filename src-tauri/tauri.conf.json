@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "dbstudio",
+  "version": "0.8.0",
+  "identifier": "io.dbstudio.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev:desktop",
+    "frontendDist": "../dist/desktop",
+    "devUrl": "http://127.0.0.1:1420"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      { "label": "main", "title": "dbstudio", "width": 1180, "height": 760, "minWidth": 820, "minHeight": 520 }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"] }
+}

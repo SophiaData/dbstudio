@@ -37,14 +37,14 @@
 /** @type {Step[]} */
 export const STEPS = [
   // ---- 准备 ----
-  { id: 'typecheck', title: 'TypeScript 类型检查', group: 'node' },
+  { id: 'legacy:typecheck', title: '旧版参照：TypeScript 类型检查', group: 'node' },
   { id: 'test:architecture', title: '架构护栏：跨层 import 与 renderer 后端直连', group: 'node' },
-  { id: 'build', title: '构建宿主 + main/preload/renderer', group: 'node' },
+  { id: 'legacy:build', title: '旧版参照：构建宿主 + main/preload/renderer', group: 'node' },
   { id: 'check:bundle-boundaries', title: '构建产物边界：驱动实现与 Node 运行时隔离', group: 'node' },
   { id: 'fixture', title: '生成测试夹具', group: 'node' },
 
   // ---- 纯 Node e2e ----
-  { id: 'test', title: '元数据 / 连接 e2e', group: 'node' },
+  { id: 'legacy:test', title: '旧版参照：元数据 / 连接 e2e', group: 'node' },
   { id: 'test:resultset', title: '结果集 e2e（查询/分页/游标）', group: 'node' },
   { id: 'test:edit', title: '在线编辑与事务 e2e', group: 'node' },
   { id: 'test:persist', title: '持久化与凭据 e2e', group: 'node' },

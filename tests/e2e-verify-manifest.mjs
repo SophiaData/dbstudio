@@ -52,6 +52,12 @@ const notSteps = new Set([
   'verify:ci',
   'verify:headless',
   'test:gui:headless',
+  // Native desktop checks are registered in native-verify.yml; this manifest preserves the legacy reference suite.
+  'test:native',
+  'test:native-architecture',
+  'test:native-desktop',
+  'test:native-release',
+  'test:native-ui-models',
   'dev',
   'preview',
   'build',

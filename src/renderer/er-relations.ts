@@ -151,16 +151,19 @@ export interface ErTableInput {
  * **只读、不猜**的事：从 id 里解析出 schema 段，解析不出来就返回 null。
  *
  * 已知编码：
- *   SQLite  `table:<name>`            → 无 schema 概念
- *   PG      `table:<schema>.<name>`    → schema = 第一段
+ *   SQLite  `table:<name>`            → 无 schema 概念，表名中的点不是分隔符
+ *   PG      `table:<schema>.<name>`    → schema = 第一个未转义的 `.` 之前
  *
  * 主进程会把连接归属前缀加到 id 上（`connection:<id>|table:...`），
- * 所以要先切掉 `|` 之后的部分。
+ * 所以要先切掉 `|` 之后的部分。标识符片段里的 `\.` 是字面点，`\\` 是
+ * 字面反斜杠；不能拿未转义的首个 `.` 直接切。
  *
  * 为什么"解析不出就是 null"而不是"抛错"：渲染层拿到的 id 可能有第三种格式
  * （未来新增的方言），此时画图应当降级为"按名字匹配"而不是整张图失败。
  */
-export function inferSchemaFromObjectId(objectId: string): string | null {
+export function inferSchemaFromObjectId(objectId: string, dialectId: string | null = null): string | null {
+  // SQLite 没有 schema；`table:with.dot` 里的点是表名的一部分，不能猜成 schema。
+  if (dialectId === 'sqlite') return null
   const bar = objectId.indexOf('|')
   const afterScope = bar === -1 ? objectId : objectId.slice(bar + 1)
   const separator = afterScope.indexOf(':')
@@ -170,11 +173,22 @@ export function inferSchemaFromObjectId(objectId: string): string | null {
   const payload = afterScope.slice(separator + 1)
   if (payload === '') return null
 
-  // PG：`table:<schema>.<name>`；SQLite：`table:<name>`（无点号）。
-  const dot = payload.indexOf('.')
+  const dot = firstUnescapedDot(payload)
   if (dot <= 0) return null
   const schema = unescapeIdPart(payload.slice(0, dot))
   return schema === '' ? null : schema
+}
+
+function firstUnescapedDot(value: string): number {
+  for (let index = 0; index < value.length; index += 1) {
+    const ch = value.charAt(index)
+    if (ch === '\\') {
+      index += 1
+      continue
+    }
+    if (ch === '.') return index
+  }
+  return -1
 }
 
 /** 反转义 id 片段里的 `\.` / `\\`（与各驱动的 `escapePart` 对称）。 */
@@ -225,7 +239,10 @@ function schemaMatches(candidateSchema: string | null, targetSchema: string | nu
  *
  * @param tables 图上的表（含已读到的结构描述）。顺序决定边的稳定顺序。
  */
-export function computeErRelations(tables: readonly ErTableInput[]): ErRelationSummary {
+export function computeErRelations(
+  tables: readonly ErTableInput[],
+  options: { readonly dialectId?: string | null } = {}
+): ErRelationSummary {
   const relations: ErRelation[] = []
   const skipped: ErRelationSkip[] = []
   let totalForeignKeys = 0
@@ -233,7 +250,7 @@ export function computeErRelations(tables: readonly ErTableInput[]): ErRelationS
 
   const candidates: Candidate[] = tables.map((table) => ({
     table,
-    schema: inferSchemaFromObjectId(table.ref.id)
+    schema: inferSchemaFromObjectId(table.ref.id, options.dialectId ?? null)
   }))
 
   for (const table of tables) {
@@ -247,7 +264,7 @@ export function computeErRelations(tables: readonly ErTableInput[]): ErRelationS
       continue
     }
 
-    const sourceSchema = inferSchemaFromObjectId(table.ref.id)
+    const sourceSchema = inferSchemaFromObjectId(table.ref.id, options.dialectId ?? null)
     for (const foreignKey of foreignKeys ?? []) {
       totalForeignKeys += 1
       const built = buildRelation(table, foreignKey, sourceSchema, candidates)

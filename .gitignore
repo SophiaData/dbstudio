@@ -1,5 +1,6 @@
 # 依赖
 node_modules/
+.pnpm-store/
 
 # 构建产物
 out/
@@ -47,3 +48,8 @@ tmp-*/
 verify-*/
 # electron-builder 会把 renderer 入口复制到项目根，属构建产物
 /index.html
+
+# Native Rust/Tauri build outputs
+/target/
+/src-tauri/target/
+/src-tauri/gen/

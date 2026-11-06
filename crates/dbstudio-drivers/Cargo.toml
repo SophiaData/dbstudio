@@ -1,0 +1,26 @@
+[package]
+name = "dbstudio-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dbstudio-protocol = { path = "../dbstudio-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+rusqlite = { version = "0.37", features = ["bundled", "column_decltype", "backup", "functions", "hooks"] }
+postgres = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
+bytes = "1"
+chrono = "0.4"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+mysql = { version = "26", default-features = false, features = ["minimal-rust", "native-tls"] }
+ssh2 = "0.9"
+sha2 = "0.10"
+redis = { version = "0.27.6", features = ["tls-rustls"] }
+kafka = { version = "0.10", default-features = false }
+rskafka = { version = "=0.6.0", default-features = false, features = ["transport-tls"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"

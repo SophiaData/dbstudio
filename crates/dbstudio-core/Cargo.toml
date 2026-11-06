@@ -1,0 +1,16 @@
+[package]
+name = "dbstudio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+fixture-memory-secrets = []
+
+[dependencies]
+dbstudio-protocol = { path = "../dbstudio-protocol" }
+dbstudio-drivers = { path = "../dbstudio-drivers" }
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization = "0.1"
+uuid.workspace = true

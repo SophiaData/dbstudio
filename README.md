@@ -1,6 +1,22 @@
 # dbstudio
 
-数据库客户端的第一块地基：**元数据/方言抽象 + 连接管理**，用 Node/TypeScript + Electron 实现。
+**默认桌面入口已迁移为 Tauri 2 + Vue 3 + Rust（0.8.0）。** 本地桌面通过 typed invoke 调用宿主无关的 Rust 业务核心及原生数据库驱动，参考 dbx 的共享核心与独立宿主边界。详见[目标架构](docs/architecture/tauri-vue-rust.md)、[验收台账](docs/support/native-migration-matrix.md)与[迁移计划](docs/superpowers/plans/2026-11-06-tauri-vue-rust-migration.md)。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm dev                # Tauri + Vue 开发桌面
+pnpm verify             # 原生依赖边界、Vue 类型检查、Rust 回归
+pnpm build --no-bundle   # 全新无测试 hook 的前端目录 + Rust release 可执行文件
+pnpm build:app          # 当前平台 Tauri 安装包/应用包
+```
+
+需要 Rust stable、Node.js 与 pnpm；macOS 需要 Xcode Command Line Tools，Linux 需要 WebKitGTK 4.1 等[原生构建依赖](docs/architecture/native-ci.md)。真实桌面测试通过显式 test-hooks 构建访问独立临时 SQLite；当前已通过 64 项真实 Tauri WebView 检查。发布候选包与各平台安装验收分别记录，不把构建成功称为安装验收通过。
+
+旧配置、历史与收藏只读导入独立 v2 文件；旧 Electron safeStorage 密文保持原样，密码需要重新录入。新凭据使用 OS keyring，无明文回退。旧实现的构建与测试通过 `legacy:dev`、`legacy:build`、`legacy:test`、`legacy:verify` 保留为参照；以下历史说明中的旧进程模型不适用于当前 Rust 运行时。
+
+## 0.7.0 参照实现与历史说明
+
+旧版本数据库客户端的地基：**元数据/方言抽象 + 连接管理**，用 Node/TypeScript + Electron 实现。
 
 架构不是凭空设计的，而是从对 DBeaver 源码的剖析结论里提炼的——剖析报告在
 `../dbeaver-analysis/`（证据版本 `devel@cf0f184e`）。

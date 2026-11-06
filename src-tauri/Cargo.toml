@@ -1,0 +1,28 @@
+[package]
+name = "dbstudio-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "dbstudio_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+# Explicit opt-in only; release builds must not enable this feature.
+test-hooks = ["dep:rusqlite"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dbstudio-core = { path = "../crates/dbstudio-core" }
+dbstudio-protocol = { path = "../crates/dbstudio-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }

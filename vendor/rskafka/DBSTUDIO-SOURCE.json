@@ -1,0 +1,8 @@
+{
+  "crate": "rskafka",
+  "version": "0.6.0",
+  "archive": "https://static.crates.io/crates/rskafka/rskafka-0.6.0.crate",
+  "checksum_api": "https://crates.io/api/v1/crates/rskafka/0.6.0",
+  "sha256": "849b87417a191e37e16b8893eba8928bbd10e1989e6b57c4f8531549eaa29bdc",
+  "patch": "Named Metadata requests set allow_auto_topic_creation=false; old protocol serialization rejects that field. Partition retries treat Connection::Metadata(RequestError::WriteError) as fatal because reconnecting cannot fix local encoding incompatibility. Protocol regression tests cover the flag and pre-v4 rejection; application loopback tests cover production constructor and prompt rejection without named Metadata/ListOffsets on the wire."
+}

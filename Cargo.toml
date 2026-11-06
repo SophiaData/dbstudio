@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/dbstudio-protocol", "crates/dbstudio-drivers", "crates/dbstudio-core", "src-tauri"]
+exclude = ["vendor/rskafka"]
+
+[workspace.package]
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+# Fixed upstream 0.6.0 plus a named-Metadata no-auto-create guard; see vendor provenance.
+rskafka = { path = "vendor/rskafka" }

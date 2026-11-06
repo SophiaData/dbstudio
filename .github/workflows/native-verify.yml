@@ -1,0 +1,137 @@
+name: native-verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+  # Native checks do not use the legacy Electron runtime.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+jobs:
+  desktop-macos:
+    name: macOS native desktop and production build
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build dependencies
+        run: brew install pkg-config openssl@3 libssh2
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check native architecture boundaries
+        run: pnpm test:native-architecture
+      - name: Test native candidate integrity and tamper rejection
+        run: pnpm test:native-release
+      - name: Test Vue parameter and data precision regressions
+        run: pnpm test:native-ui-models
+      - name: Test portable Rust workspace
+        run: cargo test --locked --workspace --exclude dbstudio-desktop
+      - name: Build Vue with explicit desktop test controller
+        env:
+          VITE_DBSTUDIO_TEST_HOOKS: '1'
+        run: pnpm build:desktop
+      - name: Build actual Tauri host with test hooks
+        run: pnpm exec tauri build --debug --features test-hooks --no-bundle --ci
+      - name: Exercise actual macOS WebView and Rust backend
+        run: pnpm test:native-desktop
+      - name: Build fresh production desktop without test hooks
+        # The root wrapper uses a new frontend directory and rejects test-hooks.
+        # No signing/publishing credentials are required for --no-bundle.
+        run: pnpm build --no-bundle
+      - name: Require the native production executable
+        run: |
+          test -x target/release/dbstudio-desktop
+          file target/release/dbstudio-desktop
+
+  native-linux:
+    name: Linux Rust units, Vue and desktop compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux native desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential pkg-config libssl-dev libssh2-1-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check native architecture boundaries
+        run: pnpm test:native-architecture
+      - name: Test native candidate integrity and tamper rejection
+        run: pnpm test:native-release
+      - name: Test Vue parameter and data precision regressions
+        run: pnpm test:native-ui-models
+      - name: Test portable Rust workspace
+        run: cargo test --locked --workspace --exclude dbstudio-desktop
+      - name: Typecheck Vue desktop
+        run: pnpm typecheck:desktop
+      - name: Build production Vue assets for Tauri compile check
+        run: pnpm build:desktop
+      - name: Check Linux Tauri production host
+        # No display server or OS keyring is used; the actual WebView gate is macOS above.
+        run: cargo check --locked -p dbstudio-desktop
+
+  native-databases:
+    name: Dedicated real database and TLS fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # Leave capacity for database containers while compiling native clients.
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native driver and fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential pkg-config libssl-dev libssh2-1-dev openssl openssh-client
+      - name: Require Docker engine
+        run: docker info --format '{{.ServerVersion}}'
+      - name: Compile locked native driver integration tests
+        run: cargo test --locked -p dbstudio-drivers --tests --no-run
+      - name: Verify real PostgreSQL and MySQL native drivers
+        # Creates random private fixture credentials, runs ignored live tests, then stops
+        # only containers whose immutable IDs and per-run labels have been checked.
+        run: node scripts/native-database-fixture.mjs
+      - name: Verify real Redis TLS and Kafka TLS SASL
+        # Sequential with SQL fixtures to bound memory. Never use --prepare-only as a gate.
+        # Private backups/, certificates, env files and container logs are not uploaded.
+        run: node scripts/native-secure-fixture.mjs
+      - name: Verify real SQL TLS and pinned SSH with independent cancellation
+        # Includes trusted-CA hostname failures and explicit MySQL SSH verify-full limitation.
+        run: node scripts/native-sql-secure-fixture.mjs
