@@ -20,9 +20,9 @@ pnpm build:app:mac
 
 ## CI 候选包
 
-release workflow 由版本 tag 或手动操作启动，先复用原生质量门，再构建 macOS arm64 DMG、Windows x64 MSI/NSIS、Linux x64 DEB/AppImage。各平台使用全新生产前端与原生 Rust 宿主。
+当前发布范围由用户确认为两个目标：**macOS arm64 DMG** 和 **Windows x64 EXE（NSIS）**。release workflow 由版本 tag 或手动操作启动，先复用原生质量门，再分别使用全新生产前端与原生 Rust 宿主生成这两个安装包。Linux 安装包、Linux 桌面编译和额外 MSI 不参与本次发布；Ubuntu 仅用于专用数据库测试与清单校验。
 
-每个目标必须具有非空安装包，并附清单：源码 SHA、版本、workflow run ID/attempt、目标平台、文件大小与 SHA-256。清单生成时核对 package/Cargo/Tauri 版本。下载后的聚合步骤要求三个目标来自同一次运行及 attempt，重新验证大小和哈希，拒绝缺平台、路径穿越、符号链接、额外文件和来源不匹配。Artifact 名包含 run ID/attempt，保留旧运行证据；失败后需使用“重新运行所有作业”，生成同一新 attempt 的完整三平台候选包。完整版本 token 校验拒绝将 `10.8.0` 或 `0.8.0-rc.1` 文件声明为 `0.8.0`。
+每个目标必须具有非空安装包，并附清单：源码 SHA、版本、workflow run ID/attempt、目标平台、文件大小与 SHA-256。清单生成时核对 package/Cargo/Tauri 版本。下载后的聚合步骤只要求 macOS 和 Windows 两个目标来自同一次运行及 attempt，重新验证大小和哈希；缺少任一目标、路径穿越、符号链接、额外文件和来源不匹配均会失败。Artifact 名包含 run ID/attempt，保留旧运行证据；失败后需使用“重新运行所有作业”，生成同一新 attempt 的双平台候选包。完整版本 token 校验拒绝将 `10.8.0` 或 `0.8.0-rc.1` 文件声明为 `0.8.0`。
 
 候选包以 GitHub Actions artifacts 保留。清单固定标记 `installerAcceptance: unverified`；不能靠修改清单将安装验收提升为已通过。当前工作流不自动发布 GitHub Release，避免把尚未完成各平台安装验收的原生候选包分发为正式版本。
 
@@ -31,7 +31,7 @@ release workflow 由版本 tag 或手动操作启动，先复用原生质量门�
 - macOS 真实 Tauri WebView 的业务检查、原生工作区/宿主单测，以及 OS keyring 合成凭据往返均在本机执行。
 - 原生 PostgreSQL/MySQL、Redis TLS/Kafka TLS SASL、SQL TLS/固定指纹 SSH 已使用专用服务夹具实测；错误 CA、证书名称与取消通道有独立反例。
 - 安装包内部完整性、来源及传输后哈希校验通过合成负例验证；这不替代安装/升级/卸载测试。
-- macOS DMG 安装、Developer ID 签名/公证、Windows MSI/NSIS 安装及 Linux DEB/AppImage 实际运行尚需对应平台验收。本次会话未触发远端 CI 或正式发布。
+- macOS DMG 安装、Developer ID 签名/公证及 Windows EXE 安装尚需对应平台验收。此前已进行远端 CI 试跑，结果见[CI 记录](native-ci.md)；双平台配置与候选包门禁回归已在本地通过，后续执行以该配置提交的远端 CI 和下载后哈希核验为准。工作流不自动正式发布。
 - OS 保存对话框与剪贴板的实际系统交互保留人工平台验收；自动检查覆盖组件状态、导出内容及原生文件写入保护。
 
 所有夹具仅访问专用临时数据。容器停止后保留；私有证书、环境文件、备份与原始日志不上传为 artifacts。钥匙串验收保留一个唯一命名的公开合成条目，不访问已有用户凭据。

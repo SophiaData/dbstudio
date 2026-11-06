@@ -5,7 +5,8 @@ import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/pr
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export const TARGETS = Object.freeze({ 'mac-arm64': ['.dmg'], 'win-x64': ['.msi', '.exe'], 'linux-x64': ['.deb', '.appimage'] })
+export const RELEASE_TARGETS = Object.freeze(['mac-arm64', 'win-x64'])
+export const TARGETS = Object.freeze({ 'mac-arm64': ['.dmg'], 'win-x64': ['.exe'], 'linux-x64': ['.deb', '.appimage'] })
 export function validateIdentity(identity) {
   assert.match(identity.sha, /^[a-f0-9]{40}$/)
   assert.match(identity.runId, /^[1-9][0-9]*$/)
@@ -101,7 +102,7 @@ export async function verifyCandidate(directory, target, identity) {
 }
 export async function aggregateCandidates(directory, identity) {
   const manifests = []
-  for (const target of Object.keys(TARGETS)) manifests.push(await verifyCandidate(join(directory, target), target, identity))
+  for (const target of RELEASE_TARGETS) manifests.push(await verifyCandidate(join(directory, target), target, identity))
   return { schemaVersion: 1, kind: 'verified-native-candidates', ...identity, installerAcceptance: 'unverified', manifests }
 }
 async function currentIdentity() {

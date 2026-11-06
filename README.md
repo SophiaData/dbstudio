@@ -10,7 +10,7 @@ pnpm build --no-bundle   # 全新无测试 hook 的前端目录 + Rust release �
 pnpm build:app          # 当前平台 Tauri 安装包/应用包
 ```
 
-需要 Rust stable、Node.js 与 pnpm；macOS 需要 Xcode Command Line Tools，Linux 需要 WebKitGTK 4.1 等[原生构建依赖](docs/architecture/native-ci.md)。真实桌面测试通过显式 test-hooks 构建访问独立临时 SQLite；当前已通过 64 项真实 Tauri WebView 检查。发布候选包与各平台安装验收分别记录，不把构建成功称为安装验收通过。
+当前发布目标为 **macOS arm64 DMG** 和 **Windows x64 EXE**，分别使用 `pnpm build:app:mac`、`pnpm build:app:win` 在对应平台构建。需要 Rust stable、Node.js 与 pnpm；macOS 还需 Xcode Command Line Tools，详见[原生构建与 CI 说明](docs/architecture/native-ci.md)。Ubuntu 仅用于专用数据库测试，不生成 Linux 安装包。真实桌面测试通过显式 test-hooks 构建访问独立临时 SQLite，已有 64 项真实 Tauri WebView 检查通过；安装、签名与公证仍按实际结果另行验收。
 
 旧配置、历史与收藏只读导入独立 v2 文件；旧 Electron safeStorage 密文保持原样，密码需要重新录入。新凭据使用 OS keyring，无明文回退。旧实现的构建与测试通过 `legacy:dev`、`legacy:build`、`legacy:test`、`legacy:verify` 保留为参照；以下历史说明中的旧进程模型不适用于当前 Rust 运行时。
 

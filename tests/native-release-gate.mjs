@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { TARGETS, createCandidate, verifyCandidate, aggregateCandidates } from '../scripts/native-release-gate.mjs'
+import { TARGETS, RELEASE_TARGETS, createCandidate, verifyCandidate, aggregateCandidates } from '../scripts/native-release-gate.mjs'
 
 const identity = { sha: 'a'.repeat(40), version: '0.8.0', runId: '123', runAttempt: '1' }
 const work = await mkdtemp(join(tmpdir(), 'dbstudio-native-release-'))
 let passed = 0
 async function test(name, run) { await run(); passed++; console.log(`PASS ${name}`) }
-async function fixture(targets = Object.keys(TARGETS)) {
+async function fixture(targets = RELEASE_TARGETS) {
   const root = await mkdtemp(join(work, 'candidate-'))
   for (const target of targets) {
     const source = await mkdtemp(join(work, 'source-'))
@@ -17,10 +18,21 @@ async function fixture(targets = Object.keys(TARGETS)) {
   }
   return root
 }
-await test('all three exact targets aggregate with identity and hashes', async () => {
+await test('macOS DMG and Windows EXE aggregate without a Linux candidate', async () => {
   const gate = await aggregateCandidates(await fixture(), identity)
-  assert.equal(gate.manifests.length, 3)
+  assert.deepEqual(gate.manifests.map((manifest) => manifest.target), ['mac-arm64', 'win-x64'])
+  assert.deepEqual(gate.manifests.flatMap((manifest) => manifest.files.map((file) => file.name.split('.').at(-1))), ['dmg', 'exe'])
   assert.equal(gate.installerAcceptance, 'unverified')
+})
+await test('the actual aggregate CLI requires only the two configured release targets', async () => {
+  const directory = await fixture()
+  const result = spawnSync(process.execPath, ['scripts/native-release-gate.mjs', 'aggregate', directory], {
+    cwd: process.cwd(), encoding: 'utf8',
+    env: { ...process.env, GITHUB_SHA: identity.sha, GITHUB_RUN_ID: identity.runId, GITHUB_RUN_ATTEMPT: identity.runAttempt }
+  })
+  assert.equal(result.status, 0, 'Two-target release CLI must succeed without Linux or MSI')
+  const gate = JSON.parse(await readFile(join(directory, 'native-gate.json'), 'utf8'))
+  assert.deepEqual(gate.manifests.map((manifest) => manifest.target), ['mac-arm64', 'win-x64'])
 })
 await test('tampered installer is rejected after transport', async () => {
   const root = await fixture(['mac-arm64'])
@@ -36,7 +48,8 @@ for (const [field, value] of [['sha', 'b'.repeat(40)], ['version', '9.9.9'], ['r
   })
 }
 await test('missing platform cannot aggregate', async () => {
-  await assert.rejects(aggregateCandidates(await fixture(['mac-arm64', 'win-x64']), identity))
+  await assert.rejects(aggregateCandidates(await fixture(['mac-arm64']), identity))
+  await assert.rejects(aggregateCandidates(await fixture(['win-x64']), identity))
 })
 await test('manifest path traversal is rejected', async () => {
   const root = await fixture(['mac-arm64'])

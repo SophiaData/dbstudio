@@ -19,9 +19,9 @@
 | 结构与数据比较 | 10 项双 SQLite＋4 项类型/故障回归；比较只读，只生成 SQL | Vue 结构比较/数据比较、目标绑定、SQL 预览和不写目标检查已通过；跨方言组合未全量穷举 |
 | Vue 核心与工具 | 已通过类型检查、构建及 64 项真实 Tauri WebView：连接、SQL、分页、编辑、事务、guard、ER、传输、历史/收藏、EXPLAIN、DDL、完整值、当前页导出 | 独立审查的参数跨语句、标签连接归属、大整数、secret 空格、导出重试、翻页和树偏好边界已修复；18 项纯回归及增强后的 64 项真实 WK 全通过，含两条匿名参数更新、805 行第三页编辑后跳第四页、大整数精确写入和跨连接标签关闭/异步打开 |
 | 生产构建 | 新目录构建 Vue，强制关闭测试标志；Rust release 禁 test-hooks，生产入口限制参数 | 最终源码 macOS arm64 `.app` 已实际构建（未签名），静态链接检查确认只依赖系统库；保留权限的 ZIP 已生成并核对二进制哈希，静态链接后的四项 SQL TLS/SSH 再次实跑通过 |
-| CI / 候选包 | macOS 原生 WK＋生产构建，Linux 原生单测/编译，专用服务安全夹具；候选包版本/来源/哈希门禁 13 项正反例通过；artifact 按 run/attempt 隔离，完整版本 token 校验拒绝近似版本 | 当前会话未触发远端 CI；Windows/Linux 安装、签名、公证及 OS 对话框/剪贴板实际交互保留平台验收；候选包不自动正式发布 |
+| CI / 候选包 | 发布目标仅 macOS arm64 DMG、Windows x64 EXE；保留 macOS 原生 WK/单测与专用数据库安全夹具，移除 Linux 桌面编译和安装包；artifact 按 run/attempt 隔离，完整版本、来源和哈希均校验 | 远端 CI 试跑结果与定点修复见 CI 记录；双平台配置与 18 项候选包门禁回归本地通过，后续以同源 CI 产物及下载后哈希核验为准；安装、签名/公证和 OS 保存框/剪贴板交互仍单独验收，候选包不自动正式发布 |
 
-本轮最终原生工作区：**85 passed / 8 explicit ignored / 0 failed**；宿主：**4 passed / 1 explicit ignored / 0 failed**。工作区 8 个 ignored 均已另以专用真实服务执行通过（普通 SQL 2、NoSQL TLS 2、SQL TLS/SSH 4）；宿主 ignored 的 OS keyring 也已单独通过。不同验证层分别报告，避免重复合计。
+本轮最终原生工作区：**88 passed / 8 explicit ignored / 0 failed**；宿主：**4 passed / 1 explicit ignored / 0 failed**。工作区 8 个 ignored 均已另以专用真实服务执行通过（普通 SQL 2、NoSQL TLS 2、SQL TLS/SSH 4）；宿主 ignored 的 OS keyring 也已单独通过。不同验证层分别报告，避免重复合计。
 
 ## 独立审查与定点修复
 

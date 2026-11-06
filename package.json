@@ -46,7 +46,7 @@
     "build:app": "node scripts/build-native-desktop.mjs",
     "build:app:mac": "node scripts/build-native-desktop.mjs --bundles app,dmg --target aarch64-apple-darwin",
     "build:app:linux": "node scripts/build-native-desktop.mjs --bundles deb,appimage",
-    "build:app:win": "node scripts/build-native-desktop.mjs --bundles nsis,msi",
+    "build:app:win": "node scripts/build-native-desktop.mjs --bundles nsis --target x86_64-pc-windows-msvc",
     "legacy:build:app": "pnpm legacy:build && electron-builder --config electron-builder.config.mjs",
     "legacy:build:app:mac": "pnpm legacy:build && electron-builder --config electron-builder.config.mjs --mac --arm64",
     "legacy:build:app:linux": "pnpm legacy:build && electron-builder --config electron-builder.config.mjs --linux",

@@ -64,44 +64,6 @@ jobs:
           test -x target/release/dbstudio-desktop
           file target/release/dbstudio-desktop
 
-  native-linux:
-    name: Linux Rust units, Vue and desktop compile
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux native desktop build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential pkg-config libssl-dev libssh2-1-dev \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Check native architecture boundaries
-        run: pnpm test:native-architecture
-      - name: Test native candidate integrity and tamper rejection
-        run: pnpm test:native-release
-      - name: Test Vue parameter and data precision regressions
-        run: pnpm test:native-ui-models
-      - name: Test portable Rust workspace
-        run: cargo test --locked --workspace --exclude dbstudio-desktop
-      - name: Typecheck Vue desktop
-        run: pnpm typecheck:desktop
-      - name: Build production Vue assets for Tauri compile check
-        run: pnpm build:desktop
-      - name: Check Linux Tauri production host
-        # No display server or OS keyring is used; the actual WebView gate is macOS above.
-        run: cargo check --locked -p dbstudio-desktop
-
   native-databases:
     name: Dedicated real database and TLS fixtures
     runs-on: ubuntu-24.04

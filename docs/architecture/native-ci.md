@@ -5,7 +5,6 @@
 | Job | 实际门禁 | 不覆盖的范围 |
 | --- | --- | --- |
 | macOS 15 desktop | Rust stable、Node 24、pnpm 11 frozen install；架构边界；portable workspace 单元/集成测试；带显式 Vue test controller 与 Rust test-hooks 的 Tauri debug 构建；真正 WebView invoke/SQLite smoke；全新生产前端与无 hooks 的 release 二进制 | 应用签名、公证、安装包发布、生产 OS keyring 交互 |
-| Ubuntu 24.04 native | portable workspace 测试、Vue 类型检查与前端构建、Tauri 生产 host 的 cargo check | 没有运行 Linux GUI；不能将编译检查作为 Linux WebView smoke |
 | Ubuntu 24.04 databases | Docker 专用随机凭据 PostgreSQL/MySQL，随后 Redis TLS/Kafka TLS SASL，最后 SQL verify-full/固定指纹 SSH 与独立取消 | 未配置的模式不计通过；MySQL SSH+verify-full 是显式 unsupported 限制断言 |
 
 macOS smoke 构建只在对应前端步骤设置 `VITE_DBSTUDIO_TEST_HOOKS=1`，再执行：
@@ -18,7 +17,7 @@ pnpm build --no-bundle
 
 测试二进制位于 `target/debug/dbstudio-desktop`。生产 wrapper 为前端创建全新输出目录、强制关闭测试环境标志并拒绝 test-hooks，最后要求 `target/release/dbstudio-desktop` 可执行。生产二进制只检查产物，不启动它访问真实用户目录或系统 keyring。CI smoke 使用测试注入的临时 SecretStore，不把测试凭据存入系统 keyring。
 
-Linux 桌面检查显式安装 build-essential、pkg-config、OpenSSL、libssh2、WebKitGTK 4.1、Ayatana appindicator、librsvg 和 patchelf。该 job 不使用 Xvfb，也不执行 macOS 的桌面 smoke 命令。
+发布范围仅为 macOS arm64 DMG 和 Windows x64 EXE。Linux 桌面编译作业已从当前质量门移除；Ubuntu 专用数据库作业只安装原生驱动和 Docker 夹具所需依赖，不构建 Linux 桌面或安装包。清单聚合也只要求 macOS、Windows 两个候选目标。下文保留范围收敛前的 CI 故障与修复记录，便于追溯。
 
 数据库 job 不安装 JavaScript backend 依赖，Node 只编排专用 Docker fixture，数据库协议由 Rust 测试执行。先运行 `cargo test --locked -p dbstudio-drivers --tests --no-run`，随后：
 
