@@ -34,8 +34,9 @@ async function installers(directory, extensions, depth = 0) {
   for (const item of await readdir(directory, { withFileTypes: true })) {
     assert.ok(!item.isSymbolicLink(), 'Candidate directory contains a symbolic link')
     const path = join(directory, item.name)
-    // .app contents are not independent installers; only the enclosing DMG is distributed.
-    if (item.isDirectory() && !item.name.endsWith('.app')) result.push(...await installers(path, extensions, depth + 1))
+    // .app and .AppDir contain application/staging links, not independent installers.
+    // Only the sibling DMG/AppImage files enter the candidate; directory symlinks remain rejected above.
+    if (item.isDirectory() && !item.name.endsWith('.app') && !item.name.endsWith('.AppDir')) result.push(...await installers(path, extensions, depth + 1))
     else if (item.isFile() && extensions.includes(extname(item.name).toLowerCase())) result.push(path)
   }
   return result

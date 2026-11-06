@@ -48,3 +48,7 @@ workflow 文件的本地 YAML 解析、固定命令检查或上述两项通过�
 该对照保留 `localhost` 原主机名和完整证书拒绝断言。锁定的 MySQL 客户端默认 TCP 路径在第一个 DNS 地址连接失败时提前返回；IPv6 优先的 runner 无法回退到夹具发布的 IPv4 地址。修复须覆盖正常建连和独立取消通道，保留 TLS 的原始主机名，不用放宽校验、跳过用例或覆盖已有 tag 来取得通过。后续验证以新的提交及对应运行 SHA 为准。
 
 MySQL 修复保持原始 `ip_or_hostname`、端口、TLS 配置和超时，通过库的 bind-address 路径逐地址族尝试；只有 TCP 连接建立失败或连接超时可进入下一地址族，TLS/认证/协议错误立即返回。正常连接和独立取消通道共用该 helper。修复后本地 88 项原生回归及四项真实 SQL TLS/SSH 均通过。原 tag 不移动，修复提交使用 `workflow_dispatch` 验证完整候选包流水线，清单中的 SHA 为实际构建提交。
+
+[修复提交的候选包运行](https://github.com/SophiaData/dbstudio/actions/runs/42224817633)在 `8150129f3ee3b8ef3169cd628cedec3886cf599f` 上通过全部三个质量门，包含真正 Linux 上的四项 SQL TLS/SSH。Windows MSI/NSIS 和 macOS DMG 已构建、生成清单并上传；Linux DEB/AppImage 已构建，但收集器误入 Tauri 保留的 `.AppDir` 中间目录，因其中合法的应用链接而拒绝生成清单。
+
+收集器按已有 `.app` 规则排除普通 `.AppDir` 内部内容，仅最终 DMG/AppImage/DEB/MSI/EXE 进入清单；目录入口或安装包自身的符号链接仍被拒绝，来源、完整版本、文件大小、SHA-256、缺平台和不覆盖检查保持有效。新增真实 AppDir 布局先复现旧故障，修复后 15 项门禁正反例通过。后续产物须在同一新提交及 workflow attempt 完整重建，不拼接不同运行的包。
