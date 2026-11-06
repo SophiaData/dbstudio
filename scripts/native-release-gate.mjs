@@ -27,18 +27,22 @@ async function digest(path) {
   for await (const chunk of createReadStream(path)) hash.update(chunk)
   return hash.digest('hex')
 }
-async function installers(directory, extensions, depth = 0) {
-  assert.ok(depth <= 8, 'Candidate directory nesting exceeded')
+async function installers(directory, extensions) {
   await ordinary(directory, true)
+  const outputDirectories = new Set(extensions.map((extension) => ({ '.dmg': 'dmg', '.msi': 'msi', '.exe': 'nsis', '.deb': 'deb', '.appimage': 'appimage' })[extension]))
   const result = []
-  for (const item of await readdir(directory, { withFileTypes: true })) {
-    assert.ok(!item.isSymbolicLink(), 'Candidate directory contains a symbolic link')
-    const path = join(directory, item.name)
-    // .app and .AppDir contain application/staging links, not independent installers.
-    // Only the sibling DMG/AppImage files enter the candidate; directory symlinks remain rejected above.
-    if (item.isDirectory() && !item.name.endsWith('.app') && !item.name.endsWith('.AppDir')) result.push(...await installers(path, extensions, depth + 1))
-    else if (item.isFile() && extensions.includes(extname(item.name).toLowerCase())) result.push(path)
+  async function readOutputs(folder, allowOutputDirectories) {
+    await ordinary(folder, true)
+    for (const item of await readdir(folder, { withFileTypes: true })) {
+      assert.ok(!item.isSymbolicLink(), 'Candidate directory contains a symbolic link')
+      const path = join(folder, item.name)
+      if (item.isFile() && extensions.includes(extname(item.name).toLowerCase())) result.push(path)
+      // Tauri keeps AppDir and DEB staging trees beside the final files. Never search
+      // those trees: only files directly in bundle/ or its known output directories qualify.
+      else if (allowOutputDirectories && item.isDirectory() && outputDirectories.has(item.name)) await readOutputs(path, false)
+    }
   }
+  await readOutputs(directory, true)
   return result
 }
 export async function createCandidate({ target, sourceDir, outputDir, identity }) {
