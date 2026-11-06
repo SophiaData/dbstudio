@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "dbstudio-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dbstudio-drivers",
  "dbstudio-protocol",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "dbstudio-desktop"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dbstudio-core",
  "dbstudio-protocol",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "dbstudio-drivers"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "dbstudio-protocol"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
  "serde_json",

@@ -9,12 +9,12 @@ const identity = { sha: 'a'.repeat(40), version: '0.8.0', runId: '123', runAttem
 const work = await mkdtemp(join(tmpdir(), 'dbstudio-native-release-'))
 let passed = 0
 async function test(name, run) { await run(); passed++; console.log(`PASS ${name}`) }
-async function fixture(targets = RELEASE_TARGETS) {
+async function fixture(targets = RELEASE_TARGETS, candidateIdentity = identity) {
   const root = await mkdtemp(join(work, 'candidate-'))
   for (const target of targets) {
     const source = await mkdtemp(join(work, 'source-'))
-    for (const extension of TARGETS[target]) await writeFile(join(source, `dbstudio_${identity.version}_${target}${extension}`), `synthetic installer only: ${target}${extension}`)
-    await createCandidate({ target, sourceDir: source, outputDir: join(root, target), identity })
+    for (const extension of TARGETS[target]) await writeFile(join(source, `dbstudio_${candidateIdentity.version}_${target}${extension}`), `synthetic installer only: ${target}${extension}`)
+    await createCandidate({ target, sourceDir: source, outputDir: join(root, target), identity: candidateIdentity })
   }
   return root
 }
@@ -25,13 +25,15 @@ await test('macOS DMG and Windows EXE aggregate without a Linux candidate', asyn
   assert.equal(gate.installerAcceptance, 'unverified')
 })
 await test('the actual aggregate CLI requires only the two configured release targets', async () => {
-  const directory = await fixture()
+  const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const directory = await fixture(RELEASE_TARGETS, { ...identity, version })
   const result = spawnSync(process.execPath, ['scripts/native-release-gate.mjs', 'aggregate', directory], {
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...process.env, GITHUB_SHA: identity.sha, GITHUB_RUN_ID: identity.runId, GITHUB_RUN_ATTEMPT: identity.runAttempt }
   })
   assert.equal(result.status, 0, 'Two-target release CLI must succeed without Linux or MSI')
   const gate = JSON.parse(await readFile(join(directory, 'native-gate.json'), 'utf8'))
+  assert.equal(gate.version, version)
   assert.deepEqual(gate.manifests.map((manifest) => manifest.target), ['mac-arm64', 'win-x64'])
 })
 await test('tampered installer is rejected after transport', async () => {

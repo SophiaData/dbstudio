@@ -1,6 +1,6 @@
 {
   "name": "dbstudio",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "本地数据库客户端（Tauri + Vue + Rust）：独立业务核心、原生数据库驱动、元数据浏览、SQL、事务编辑与数据传输。",
   "main": "out/main/index.js",
   "scripts": {
