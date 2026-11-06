@@ -41,7 +41,11 @@ try {
       ? { POSTGRES_USER: fixture.user, POSTGRES_DB: fixture.database, POSTGRES_PASSWORD: fixture.password }
       : { MYSQL_USER: fixture.user, MYSQL_DATABASE: fixture.database, MYSQL_PASSWORD: fixture.password, MYSQL_ROOT_PASSWORD: dbPassword() }
     writeFileSync(envPath, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''), { mode: 0o600, flag: 'wx' })
-    const health = fixture.kind === 'pg' ? 'pg_isready -U fixture -d fixture' : 'mysqladmin ping --silent'
+    // Init-only Unix sockets can answer ping before the published TCP service is ready.
+    // Authenticate over TCP and run SQL; credentials stay in container environment, never argv.
+    const health = fixture.kind === 'pg'
+      ? 'PGPASSWORD="$POSTGRES_PASSWORD" psql --host=127.0.0.1 --username=fixture --dbname=fixture --no-password --tuples-only --no-align --command="SELECT 1"'
+      : 'MYSQL_PWD="$MYSQL_PASSWORD" mysql --protocol=TCP --host=127.0.0.1 --user=fixture --database=fixture --ssl-mode=DISABLED --get-server-public-key --connect-timeout=2 --batch --skip-column-names --execute="SELECT 1"'
     fixture.attempted = true
     docker(['run', '--detach', '--name', fixture.name, '--label', `io.dbstudio.native-fixture=${runId}`,
       '--memory', fixture.kind === 'pg' ? '512m' : '1g', '--publish', `127.0.0.1::${fixture.port}`,

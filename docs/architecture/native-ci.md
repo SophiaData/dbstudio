@@ -52,3 +52,5 @@ MySQL 修复保持原始 `ip_or_hostname`、端口、TLS 配置和超时，通�
 [修复提交的候选包运行](https://github.com/SophiaData/dbstudio/actions/runs/42224817633)在 `8150129f3ee3b8ef3169cd628cedec3886cf599f` 上通过全部三个质量门，包含真正 Linux 上的四项 SQL TLS/SSH。Windows MSI/NSIS 和 macOS DMG 已构建、生成清单并上传；Linux DEB/AppImage 已构建，但收集器误入 Tauri 保留的 `.AppDir` 中间目录，因其中合法的应用链接而拒绝生成清单。
 
 收集器按已有 `.app` 规则排除普通 `.AppDir` 内部内容，仅最终 DMG/AppImage/DEB/MSI/EXE 进入清单；目录入口或安装包自身的符号链接仍被拒绝，来源、完整版本、文件大小、SHA-256、缺平台和不覆盖检查保持有效。新增真实 AppDir 布局先复现旧故障，修复后 15 项门禁正反例通过。后续产物须在同一新提交及 workflow attempt 完整重建，不拼接不同运行的包。
+
+[清单修复后的运行](https://github.com/SophiaData/dbstudio/actions/runs/42229035779)通过 macOS 和 Linux 质量门，但普通 MySQL 用例在首次建连失败。普通夹具原先用 Unix socket ping 判定健康，不能证明发布的 TCP 服务、测试用户和数据库已可用。健康检查改为 PostgreSQL/MySQL 均使用合成凭据在 `127.0.0.1` 执行 `SELECT 1`；凭据只在容器环境传递。MySQL plain TCP CLI 还需 `--get-server-public-key` 完成 caching_sha2 认证。修复后本地两个真实 SQL 生命周期用例通过，容器继续按归属检查停止保留。
