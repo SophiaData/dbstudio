@@ -1,0 +1,38 @@
+{
+  "scope": "actual-ui-harness-json-type-assumption-failure-not-product-red",
+  "runId": "4521e48798ae48ccbc4385e598480422",
+  "pid": 20203,
+  "classification": "INFRA_ERROR",
+  "uiFailureCode": "WITNESS_FAILED",
+  "baselineActualJsonType": "UNSIGNED INTEGER",
+  "assertedJsonTypeWas": "INTEGER",
+  "actualAppliedFullValuesMatchOracle": true,
+  "normalGridCommitExecuted": false,
+  "setupCommitSuccess": 1,
+  "uiExitCode": 1,
+  "timedOut": false,
+  "serverTransactionEnded": true,
+  "externalAfterExitStillBaseline": [
+    "1610",
+    "5610",
+    "ec1fead7cb466ff77da7db8e48be22e38e690341093e0cd35e6a90526b8d5522",
+    "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+    "9007199254740993",
+    "UNSIGNED INTEGER",
+    "E4BDA0E5A5BDF09F9880",
+    "0"
+  ],
+  "sourceReportSha256": {
+    "gui-text-type-infra-initial-4521e487.json": "d6f3c5c84169e2fbd8ee6a525b8483d494c4a40a137e0d74c8431fe5112f4094",
+    "gui-text-type-infra-initial-ui-4521e487.json": "2abbd354a2bc500be1d898ff57f1e5ab1ee4aa3395d8cf1609a568577e73d9c5",
+    "gui-text-type-infra-joint-20203.json": "3c4cf72ada62472eca2743855b7ffd510c99ba18530a8d6e3f35aa9b1277f3b2",
+    "gui-text-type-infra-ui-20203.json": "a75ce31cff5fc2fe6a42dcd64f8532249eb77f6fa583e860993dc61bd26b8126",
+    "gui-text-type-infra-checkpoint-20203-baseline.json": "50239530c83d26cf0ce58861e4080367f04af8e59d48bf58f8f5f65940bc01d7",
+    "gui-text-type-infra-ack-20203-baseline.json": "e5b02ff36b0d7829f7e6264678f0b546d9169f25b110dc6e149dc7357486389c",
+    "gui-text-type-infra-checkpoint-20203-draft.json": "f1884e97cfb694d802c7d47e11aba2bf81ffad2405bb5d3f660fa611ae1804c9",
+    "gui-text-type-infra-ack-20203-draft.json": "cadfd0bbdf0f159976ab6c8d8e764eec826fd0eeda96f5a85ae749958c2ee0d9",
+    "gui-text-type-infra-checkpoint-20203-applied.json": "d43cf373e9d19bbcae6c3a4b8e89f1d2bed8a5a7a7280dbcbae7f163680290fb",
+    "gui-text-type-infra-ack-20203-applied.json": "ee3a3a101e16be4e5f718312f2155fcef40a4e73345aedbf195a41155e225eda"
+  },
+  "businessImplementationChanged": false
+}

@@ -1,0 +1,795 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-session-timezone-real-ui-chain",
+  "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+  "phase": "session-timezone",
+  "classification": "KNOWN_GAP_RED",
+  "failureCode": "SET_REJECTED",
+  "chainPassed": false,
+  "productionReady": false,
+  "sessionTimezoneVerified": false,
+  "typedTemporalGridVerified": false,
+  "osTrustedKeyboardVerified": false,
+  "crossBuildCredentialVerified": false,
+  "ui": {
+    "schemaVersion": 1,
+    "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+    "phase": "session-timezone",
+    "actionDriver": "native-dom-synthetic",
+    "checks": {
+      "storage_marker": true,
+      "persisted_connection": true,
+      "credential_reconnect": true,
+      "baseline_observed": true,
+      "offset_set": false,
+      "offset_readback": false,
+      "restored_set": false,
+      "restored_readback": false,
+      "same_connection": true,
+      "transaction_unchanged": true
+    },
+    "proof": {
+      "rowCount": 1,
+      "baseline": {
+        "connectionId": 5207,
+        "sessionTimezone": "+00:00",
+        "systemTimezone": "UTC",
+        "autocommit": true,
+        "epochText": "1709210096.123456",
+        "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+        "setFailed": false,
+        "uiActive": false,
+        "uiPendingAffected": 0
+      },
+      "offset": {
+        "connectionId": 5207,
+        "sessionTimezone": "+00:00",
+        "systemTimezone": "UTC",
+        "autocommit": true,
+        "epochText": "1709210096.123456",
+        "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+        "setFailed": true,
+        "uiActive": false,
+        "uiPendingAffected": 0
+      },
+      "restored": null
+    },
+    "actions": {
+      "click": 5,
+      "input": 3,
+      "keydown": 0,
+      "dblclick": 0
+    },
+    "elapsedMs": 2122,
+    "failureCode": "SET_REJECTED"
+  },
+  "native": {
+    "scope": "test-host-observation-only",
+    "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+    "phase": "session-timezone",
+    "methods": {
+      "connectConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 42
+      },
+      "executeStatement": {
+        "success": 2,
+        "failure": 1,
+        "totalElapsedMs": 27
+      },
+      "listChildren": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 63
+      },
+      "listConnections": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 46
+      },
+      "listDialects": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 7
+      },
+      "migrationStatus": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 5
+      },
+      "recordSqlHistory": {
+        "success": 3,
+        "failure": 0,
+        "totalElapsedMs": 36
+      },
+      "transactionState": {
+        "success": 3,
+        "failure": 0,
+        "totalElapsedMs": 20
+      }
+    },
+    "keyringGets": 6,
+    "keyringHits": 6,
+    "keyringSets": 0,
+    "guiVerified": false,
+    "mysqlVerified": false,
+    "storePersistenceVerified": false,
+    "sessionTimezone": {
+      "lastObservedTransactionState": {
+        "active": false,
+        "pendingAffected": 0
+      }
+    }
+  },
+  "lifecycle": {
+    "pid": 81965,
+    "progress": {
+      "steps": [
+        {
+          "step": "baseline",
+          "checkpointSha256": "54c67c0283cd5fdff1deb64a51038009a7cb684200c1d80ae110c9f2a81b747d",
+          "checkpoint": {
+            "schemaVersion": 1,
+            "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+            "phase": "session-timezone",
+            "pid": 81965,
+            "report": {
+              "schemaVersion": 1,
+              "step": "baseline",
+              "uiActive": false,
+              "uiPendingAffected": 0,
+              "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+              "connectionId": 5207,
+              "setFailed": false,
+              "autocommit": true
+            },
+            "observations": {
+              "scope": "test-host-observation-only",
+              "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+              "phase": "session-timezone",
+              "methods": {
+                "connectConnection": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 42
+                },
+                "executeStatement": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 9
+                },
+                "listChildren": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 63
+                },
+                "listConnections": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 46
+                },
+                "listDialects": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 7
+                },
+                "migrationStatus": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 5
+                },
+                "recordSqlHistory": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 12
+                },
+                "transactionState": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 6
+                }
+              },
+              "keyringGets": 6,
+              "keyringHits": 6,
+              "keyringSets": 0,
+              "guiVerified": false,
+              "mysqlVerified": false,
+              "storePersistenceVerified": false,
+              "sessionTimezone": {
+                "lastObservedTransactionState": {
+                  "active": false,
+                  "pendingAffected": 0
+                }
+              }
+            }
+          },
+          "reference": {
+            "connectionId": 5207,
+            "sessionTimezone": "+00:00",
+            "systemTimezone": "UTC",
+            "autocommit": true,
+            "autocommitVariable": "ON",
+            "transactionCount": 0,
+            "ownedDatabaseVerified": true
+          },
+          "ack": {
+            "schemaVersion": 1,
+            "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+            "phase": "session-timezone",
+            "pid": 81965,
+            "step": "baseline",
+            "proof": {
+              "schemaVersion": 1,
+              "step": "baseline",
+              "uiActive": false,
+              "uiPendingAffected": 0,
+              "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+              "connectionId": 5207,
+              "setFailed": false,
+              "autocommit": true
+            },
+            "verified": true
+          }
+        },
+        {
+          "step": "offset",
+          "checkpointSha256": "c694994ef730c9ee3bf37977085e7170acb0cdfdb470298b5a90d07f05c25e7a",
+          "checkpoint": {
+            "schemaVersion": 1,
+            "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+            "phase": "session-timezone",
+            "pid": 81965,
+            "report": {
+              "schemaVersion": 1,
+              "step": "offset",
+              "uiActive": false,
+              "uiPendingAffected": 0,
+              "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+              "connectionId": 5207,
+              "setFailed": true,
+              "autocommit": true
+            },
+            "observations": {
+              "scope": "test-host-observation-only",
+              "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+              "phase": "session-timezone",
+              "methods": {
+                "connectConnection": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 42
+                },
+                "executeStatement": {
+                  "success": 2,
+                  "failure": 1,
+                  "totalElapsedMs": 27
+                },
+                "listChildren": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 63
+                },
+                "listConnections": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 46
+                },
+                "listDialects": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 7
+                },
+                "migrationStatus": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 5
+                },
+                "recordSqlHistory": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 36
+                },
+                "transactionState": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 20
+                }
+              },
+              "keyringGets": 6,
+              "keyringHits": 6,
+              "keyringSets": 0,
+              "guiVerified": false,
+              "mysqlVerified": false,
+              "storePersistenceVerified": false,
+              "sessionTimezone": {
+                "lastObservedTransactionState": {
+                  "active": false,
+                  "pendingAffected": 0
+                }
+              }
+            }
+          },
+          "reference": {
+            "connectionId": 5207,
+            "sessionTimezone": "+00:00",
+            "systemTimezone": "UTC",
+            "autocommit": true,
+            "autocommitVariable": "ON",
+            "transactionCount": 0,
+            "ownedDatabaseVerified": true
+          },
+          "ack": {
+            "schemaVersion": 1,
+            "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+            "phase": "session-timezone",
+            "pid": 81965,
+            "step": "offset",
+            "proof": {
+              "schemaVersion": 1,
+              "step": "offset",
+              "uiActive": false,
+              "uiPendingAffected": 0,
+              "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+              "connectionId": 5207,
+              "setFailed": true,
+              "autocommit": true
+            },
+            "verified": true
+          }
+        }
+      ],
+      "failureCode": "PARTIAL_UI_FAILURE"
+    },
+    "exitCode": 1,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": false
+  },
+  "trace": {
+    "records": [
+      {
+        "schemaVersion": 1,
+        "seq": 1,
+        "stage": "main_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 2,
+        "stage": "preflight_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 3,
+        "stage": "app_import_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 4,
+        "stage": "app_import_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 5,
+        "stage": "app_mount_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 6,
+        "stage": "app_mounted",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 7,
+        "stage": "listener_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 8,
+        "stage": "listener_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 9,
+        "stage": "boot_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 10,
+        "stage": "native_enter",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 11,
+        "stage": "native_returned",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 12,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 13,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 14,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 15,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 16,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 17,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 18,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 19,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 20,
+        "stage": "native_enter",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 21,
+        "stage": "native_returned",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 22,
+        "stage": "boot_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 23,
+        "stage": "dom_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 24,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 25,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 26,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 27,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 28,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 29,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 30,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 31,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 32,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 33,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 34,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 35,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 36,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 37,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 38,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 39,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 40,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 41,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 42,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 43,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 44,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 45,
+        "stage": "native_failed",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 46,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 47,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 48,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 49,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 50,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 51,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 52,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 53,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 54,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 55,
+        "stage": "native_returned",
+        "method": "other"
+      }
+    ],
+    "sha256": "65db411c655131de78f0e4ccfae99e9e1e701eced3c74d4cd0dd1e09c7e767c1"
+  },
+  "oracle": {
+    "globalTimezone": "+00:00",
+    "globalAutocommit": true,
+    "baseline": [
+      "+00:00",
+      "UTC",
+      "1",
+      "1709210096.123456"
+    ],
+    "offset": [
+      "+08:00",
+      "UTC",
+      "1",
+      "1709181296.123456"
+    ],
+    "restored": [
+      "+00:00",
+      "UTC",
+      "1",
+      "1709210096.123456"
+    ],
+    "readOnly": true,
+    "offsetSetVerified": true,
+    "restoreSetVerified": true
+  },
+  "comparisons": [
+    {
+      "sessionVariableMatches": true,
+      "systemVariableMatches": true,
+      "autocommitVariableMatches": true,
+      "epochMatchesKnownOffset": true,
+      "knownOffset": true
+    },
+    {
+      "sessionVariableMatches": true,
+      "systemVariableMatches": true,
+      "autocommitVariableMatches": true,
+      "epochMatchesKnownOffset": true,
+      "knownOffset": true
+    }
+  ],
+  "observer": {
+    "status": "OBSERVER_READBACK_OK",
+    "runId": "59ba845c44c94e8a8d7bc05d80ad7756",
+    "counts": {
+      "paging": 805,
+      "precision": 1,
+      "composite": 2,
+      "import": 0
+    },
+    "autocommit": true,
+    "readOnly": true,
+    "precisionChecks": 11,
+    "pagingChecks": 9,
+    "independentConnections": 3,
+    "guiPassed": false
+  },
+  "finalSessionCleanup": {
+    "knownConnectionIds": [
+      5207
+    ],
+    "threadCount": 0,
+    "transactionCount": 0,
+    "ended": true
+  },
+  "materialsPreserved": true,
+  "provenance": {
+    "runnerSourceSha256": "8b907711fd26c45675700012d0b10e340b283b2f8d6ea203e861ed001e55ace9",
+    "fixturePinSha256": "c22a41d3d78e3f16382828160c285d0317cb3ec1b77f38268163b7e09395e58f",
+    "artifactReceiptSha256": "ed1157f79aac9609dbef90fd67c0b8322c47a4e1943eaa931fc9e8ca355ec9b3",
+    "manifestSha256": "6d78ca0c2d1d5ffbfd42414b0388fa50e72a7868e96cf52430b4dff2dd06eb2e",
+    "containerId": "f71ead19e71c566011af668e3e697c4f537e1c78c86d72ca86c7bf4d473be550",
+    "imageSha256": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+    "fixtureSourceSha256": "cc946c63a5a51f391bac46b2fe740fbe4b421b0fe381be7b2a233dbed076e34d",
+    "hostManifestSha256": "e60a370da43b1b18d0f9afb02f39ed4f1b053bbbe24250290cb0783cdb4243b1",
+    "initialReportSha256": "e036418bbf4f475c2e23f41a7bd20fd7e513707bd21c585b4dfbca636d20527c",
+    "initialUiSha256": "f69fdd9ca5e353ac8eb3f1fe745af445126613aafc8489578608367ee8e99eac",
+    "failedRestartSha256": null,
+    "binarySha256": "0281ec3a2435ef3fc90e1c31622bb9097b0ba72f483717fe6ffec925cb722509",
+    "frontendIndexSha256": "eea3abdbaa237ba0afc58bb5bef902e8d3cf58e35e748034677d3a0beda6ffbe",
+    "frontendAssetsSha256": "30b60bec74fefe2c52713b7300b813879634fd0eaa696dc2c2f4b467d0659f32",
+    "source": {
+      "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+      "files": {
+        "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+        "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+        "apps/desktop/src/mysql-parity-dom.ts": "a8d01b3eb72366ce8344a9c5d156779d913ba76ef697ab6cf64c47db257002f1",
+        "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+        "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+        "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+        "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+        "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+        "src-tauri/src/lib.rs": "7f39d705e692570f41909928708244ef8f0b489b5cf66d03194facdd4337912e",
+        "src-tauri/src/mysql_acceptance.rs": "a8b62fe09e0308776b1ce8a2465f661853e73f86a8dfe3cfbc4ebbe2e776022e",
+        "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+        "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+        "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+        "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+        "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+        "scripts/build-mysql-acceptance.mjs": "41e568a96c82db8cd9774ef71e07d823d646dd22460850e85cda594b8a26028d",
+        "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+        "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+        "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534",
+        "apps/desktop/src/components/CellViewer.vue": "ad42a8e0dfe07b381b82828a2586cd39adf4be130ba00eae643e829df1415328",
+        "apps/desktop/src/result-export.ts": "3b1fa77567f320cf6076c37fb0ef47d23a9e6a92118dca24197666c5596d4331",
+        "crates/dbstudio-drivers/src/network.rs": "fb058fe9f1bf6ff516030f93fe08c9df08addd8cd4409f0501bd9681ddbf04b3"
+      },
+      "diffSha256": "e309e6d7c162fe5be039e017c0305457852ee7744032e997e0d06ae224453bea",
+      "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+    }
+  }
+}

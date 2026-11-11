@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "scope": "real-gui-deadlock-confirmed-red",
+  "runId": "dd57df9a7d4242fbaef34fabdac1c64c",
+  "pid": 61745,
+  "classification": "KNOWN_GAP_RED",
+  "failureCode": "MYSQL_ERROR_DETAILS_LOST",
+  "serverError": {
+    "code": 1213,
+    "sqlState": "40001"
+  },
+  "guiErrorClass": "other",
+  "transactionStateStale": true,
+  "uiActiveAfterError": true,
+  "uiPendingAffectedAfterError": 1,
+  "dirtyRowsPreserved": 1,
+  "actorRolledBack": true,
+  "serverGuiTransactionEnded": true,
+  "freshRowsRestored": 132,
+  "nativeTransactionReadAddedAfterFault": false,
+  "greenRecoveryVerified": false,
+  "productionReady": false,
+  "actions": {
+    "click": 15,
+    "input": 4,
+    "keydown": 0,
+    "dblclick": 3
+  },
+  "flowWithObserverWaitElapsedMs": 4881,
+  "source": {
+    "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+    "files": {
+      "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+      "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+      "apps/desktop/src/mysql-parity-dom.ts": "cd66607e54decfb5e6635c153c7ec4c588d3e9039bd28b42eb35327d787f8771",
+      "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+      "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+      "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+      "apps/desktop/src/workbench.ts": "635b020785663ceea26cb31433549dfd435ebc4e44b94cc55967667ab33e2428",
+      "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+      "src-tauri/src/lib.rs": "72508765a163a39660dbc0558926b28a792ea7a50d9fd8771a2d9b2d725f1486",
+      "src-tauri/src/mysql_acceptance.rs": "52f2d223682bdeee94b6eb3a453e997120db3d43f5df4c8ad30bf3fc06f6130e",
+      "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+      "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+      "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+      "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+      "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+      "scripts/build-mysql-acceptance.mjs": "e8f6eefa17d0981c59a8a79470115994adfd36208d513087772c74adf77c36a1",
+      "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+      "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+      "crates/dbstudio-core/src/lib.rs": "538375466e6929de795f355431b2a0ad1f4044958c3d98c6cbfb95e68d4a6258"
+    },
+    "diffSha256": "903e2750713f8eaf629ca7ce29f426cd1396653ea187994fbdc35bbf7b034768",
+    "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+  },
+  "binarySha256": "40b2e5b14a160d6f0f56edc8975737053d96bc06a6d0c99b782dbc9286429eb4",
+  "sourceReportSha256": {
+    "gui-deadlock-red-initial-dd57df9a.json": "74cfbaab45ebcb833fe6e893281e25045a5e022cec1e0d15b238de86ef80d351",
+    "gui-deadlock-red-initial-ui-dd57df9a.json": "bdf189a8bd3c04c77b2035f87aa19a050156b8751f7a71e0cddba88ba42ad070",
+    "gui-deadlock-red-ui-61745.json": "0e1794a46ae1ed4f793285bf0c213f2e284e231b7868f1cb281fb83cffd12d42",
+    "gui-deadlock-red-joint-61745.json": "92e3e8d45cdfbdae2659a28c8eeaf6179525215464b7a154f35cd0b3548d2d9a",
+    "gui-deadlock-red-checkpoint-61745-baseline.json": "a4087725d1a59257eb38e9ec6dd18bea018381a3985dfa3cbf11d9cbca8a8a04",
+    "gui-deadlock-red-ack-61745-baseline.json": "abd590eb3f8b85c9a312744980b57b1b2c269e3fdbd2c809b261c7639817385e",
+    "gui-deadlock-red-checkpoint-61745-marker.json": "c5b7c1b23da03060c03552b58773db06b5343ad2c90a25b13d643cf15c987bbd",
+    "gui-deadlock-red-ack-61745-marker.json": "d5f7b27a60a7c4ec9a48abb81ac1217d0a71ea493dd2bcf91ea7e826133b2b50",
+    "gui-deadlock-red-checkpoint-61745-observed.json": "4f3dc985f1af3ed59f80a5f885e420c138154673a64e82c5e852fef182a71525",
+    "gui-deadlock-red-ack-61745-observed.json": "20d155c20e79db95779a24e1de1b1e58df0b4c4e96485b433f1c1cc5f031eaa5"
+  }
+}

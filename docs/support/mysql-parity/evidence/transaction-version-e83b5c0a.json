@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scope": "current-transaction-run-version-proof",
+  "attemptId": "e83b5c0ae08442c38063fa029e3f8894",
+  "selectedCasesThisRun": 3,
+  "totalDefinedCases": 11,
+  "allDefinedCasesRunTogether": false,
+  "nativeOnly": true,
+  "guiPassed": false,
+  "sourceHashesVerifiedBeforeAndAfter": true,
+  "sourceHashes": {
+    "runner": "047cb75f26aa4a9a1f5ae2e52e8072a0e129ee5a36afce277fcf2063e51776b4",
+    "test": "46d84b6de9b2a53ff1db025713846dc8640375c11719f7e52589a87657f99fa9",
+    "driver": "3fc1085f9cfb3dfbd63b00b149c9c10351490a7bf07a1cdff528a126be5c9261"
+  },
+  "leaseRetainedAtCompletion": true,
+  "fixedLeaseReleasedAtCompletion": true,
+  "concurrentContentionTested": false,
+  "parentSigkillRecoveryVerified": false,
+  "sourceReportSha256": {
+    "transaction-summary-e83b5c0a.json": "3e4d2f4bd4fa84c9d415156f41a5230545dacf2b238d538051c4869696875cc0",
+    "transaction-timeout-before-e83b5c0a.json": "1b8748b596359eff3f11aaeada2a9a80f84b7488a81592baa6854de7ae95e531",
+    "transaction-timeout-restored-e83b5c0a.json": "a942ca4c048d006650274f0346fe6826934a5c3b4d59c4d5b1bfe1b57b3d88b2"
+  }
+}

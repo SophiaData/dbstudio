@@ -26,7 +26,7 @@ for (let index = 0; index < args.length; index++) {
   }
   throw new Error('生产入口仅允许 --no-bundle、--ci、--no-sign、--target 与 --bundles；禁止调试、feature 或配置覆盖参数')
 }
-const env = { ...process.env, VITE_DBSTUDIO_TEST_HOOKS: '0', OPENSSL_STATIC: '1' }
+const env = { ...process.env, VITE_DBSTUDIO_TEST_HOOKS: '0', VITE_MYSQL_PARITY: '0', OPENSSL_STATIC: '1' }
 delete env.DBSTUDIO_NATIVE_SMOKE_ROOT
 const output = resolve(root, 'dist', `native-production-${randomUUID()}`)
 assert.ok(!existsSync(output), '生产前端产物必须写入全新目录')
@@ -40,7 +40,11 @@ assert.ok(existsSync(join(output, 'index.html')), '缺少生产 Vue 入口')
 const assets = join(output, 'assets')
 for (const entry of readdirSync(assets, { withFileTypes: true })) {
   if (entry.isFile() && /\.js$/.test(entry.name)) {
-    assert.ok(!readFileSync(join(assets, entry.name), 'utf8').includes('__DBSTUDIO_NATIVE_SMOKE__'), '生产前端不允许原生测试控制器')
+    const source = readFileSync(join(assets, entry.name), 'utf8')
+    assert.ok(!source.includes('__DBSTUDIO_NATIVE_SMOKE__'), '生产前端不允许原生测试控制器')
+    for (const marker of ['__DBSTUDIO_MYSQL_ACCEPTANCE_', 'mysqlAcceptance', 'mysqlAcceptanceContext', 'mysqlAcceptanceFillAppPassword', 'mysqlAcceptanceReport', 'mysqlAcceptanceProbeReport', 'mysqlAcceptanceStartupTrace', 'mysqlAcceptanceCommitCheckpoint', 'mysqlAcceptanceCommitContinue', 'mysqlAcceptanceDeadlockCheckpoint', 'mysqlAcceptanceDeadlockContinue', 'mysqlAcceptanceDuplicateCheckpoint', 'mysqlAcceptanceDuplicateContinue', 'mysqlAcceptanceTimeoutCheckpoint', 'mysqlAcceptanceTimeoutContinue', 'mysqlAcceptancePrecisionCheckpoint', 'mysqlAcceptancePrecisionContinue', 'mysqlAcceptanceTextCheckpoint', 'mysqlAcceptanceTextContinue', 'mysqlAcceptanceSessionTimezoneCheckpoint', 'mysqlAcceptanceSessionTimezoneContinue', 'mysqlAcceptanceTimeCheckpoint', 'mysqlAcceptanceTimeContinue']) {
+      assert.ok(!source.includes(marker), '生产前端不允许 MySQL 验收桥')
+    }
   }
 }
 run(['tauri', 'build', '--config', JSON.stringify({ build: { frontendDist: output } }), ...args])

@@ -1,0 +1,994 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-gui-commit-real-ui-chain",
+  "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+  "phase": "commit",
+  "actionDriver": "native-dom-synthetic",
+  "chainPassed": true,
+  "productionReady": false,
+  "preCommitObserverVisibilityVerified": true,
+  "commitVerified": true,
+  "osTrustedKeyboardVerified": false,
+  "crossBuildCredentialVerified": false,
+  "errorRecoveryVerified": false,
+  "soakVerified": false,
+  "referenceProductOperated": false,
+  "mysql84Verified": false,
+  "windowsVerified": false,
+  "checks": {
+    "storage_marker": true,
+    "persisted_connection": true,
+    "credential_reconnect": true,
+    "table_created": true,
+    "baseline_committed": true,
+    "baseline_observed": true,
+    "pending_visible": true,
+    "pending_isolated": true,
+    "commit_clicked": true,
+    "result_refreshed": true,
+    "committed_observed": true,
+    "nontransactional": true
+  },
+  "row": {
+    "id": 1,
+    "baselineSha256": "2acd4cc8a79947d98adb2c225b921035483423527237f2c26b4bb493d1b551d4",
+    "pendingSha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+    "committedSha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4"
+  },
+  "actions": {
+    "click": 9,
+    "input": 5,
+    "keydown": 0
+  },
+  "elapsedMs": 2415,
+  "native": {
+    "scope": "test-host-observation-only",
+    "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+    "phase": "commit",
+    "methods": {
+      "closeCursor": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 16
+      },
+      "commitTransaction": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 31
+      },
+      "connectConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 50
+      },
+      "executeStatement": {
+        "success": 5,
+        "failure": 0,
+        "totalElapsedMs": 79
+      },
+      "listChildren": {
+        "success": 3,
+        "failure": 0,
+        "totalElapsedMs": 104
+      },
+      "listConnections": {
+        "success": 3,
+        "failure": 0,
+        "totalElapsedMs": 90
+      },
+      "listDialects": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 6
+      },
+      "migrationStatus": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 9
+      },
+      "recordSqlHistory": {
+        "success": 5,
+        "failure": 0,
+        "totalElapsedMs": 63
+      },
+      "runQuery": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 16
+      },
+      "transactionState": {
+        "success": 5,
+        "failure": 0,
+        "totalElapsedMs": 40
+      }
+    },
+    "keyringGets": 8,
+    "keyringHits": 8,
+    "keyringSets": 0,
+    "guiVerified": false,
+    "mysqlVerified": false,
+    "storePersistenceVerified": false
+  },
+  "lifecycle": {
+    "pid": 48516,
+    "progress": {
+      "steps": [
+        {
+          "step": "baseline",
+          "checkpointSha256": "e68ad9a4c55c78391cdee7d47c723b6537d96abd3d0a3055df15f8f4dee1bf73",
+          "checkpoint": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "baseline",
+            "bodySha256": "2acd4cc8a79947d98adb2c225b921035483423527237f2c26b4bb493d1b551d4",
+            "active": false,
+            "pendingAffected": 0,
+            "observations": {
+              "scope": "test-host-observation-only",
+              "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+              "phase": "commit",
+              "methods": {
+                "commitTransaction": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 20
+                },
+                "connectConnection": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 50
+                },
+                "executeStatement": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 58
+                },
+                "listChildren": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 104
+                },
+                "listConnections": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 90
+                },
+                "listDialects": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 6
+                },
+                "migrationStatus": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 9
+                },
+                "recordSqlHistory": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 38
+                },
+                "transactionState": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 24
+                }
+              },
+              "keyringGets": 8,
+              "keyringHits": 8,
+              "keyringSets": 0,
+              "guiVerified": false,
+              "mysqlVerified": false,
+              "storePersistenceVerified": false
+            }
+          },
+          "reference": {
+            "rowCount": 1,
+            "firstId": 1,
+            "lastId": 1,
+            "bodySha256": "2acd4cc8a79947d98adb2c225b921035483423527237f2c26b4bb493d1b551d4",
+            "autocommit": true,
+            "readOnly": true
+          },
+          "ack": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "baseline",
+            "bodySha256": "2acd4cc8a79947d98adb2c225b921035483423527237f2c26b4bb493d1b551d4",
+            "verified": true
+          }
+        },
+        {
+          "step": "pending",
+          "checkpointSha256": "10263e84599970eaf80cecd1c8d32680bdab8a63be0b9c2603eb014463b1751d",
+          "checkpoint": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "pending",
+            "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+            "active": true,
+            "pendingAffected": 1,
+            "observations": {
+              "scope": "test-host-observation-only",
+              "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+              "phase": "commit",
+              "methods": {
+                "commitTransaction": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 20
+                },
+                "connectConnection": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 50
+                },
+                "executeStatement": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 79
+                },
+                "listChildren": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 104
+                },
+                "listConnections": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 90
+                },
+                "listDialects": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 6
+                },
+                "migrationStatus": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 9
+                },
+                "recordSqlHistory": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 63
+                },
+                "transactionState": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 40
+                }
+              },
+              "keyringGets": 8,
+              "keyringHits": 8,
+              "keyringSets": 0,
+              "guiVerified": false,
+              "mysqlVerified": false,
+              "storePersistenceVerified": false
+            }
+          },
+          "reference": {
+            "rowCount": 1,
+            "firstId": 1,
+            "lastId": 1,
+            "bodySha256": "2acd4cc8a79947d98adb2c225b921035483423527237f2c26b4bb493d1b551d4",
+            "autocommit": true,
+            "readOnly": true
+          },
+          "ack": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "pending",
+            "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+            "verified": true
+          }
+        },
+        {
+          "step": "committed",
+          "checkpointSha256": "877ebb7e6c39fc4e97cb9288cd1498a576ec1b4f4a187873d0fb353d14bf78bf",
+          "checkpoint": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "committed",
+            "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+            "active": false,
+            "pendingAffected": 0,
+            "observations": {
+              "scope": "test-host-observation-only",
+              "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+              "phase": "commit",
+              "methods": {
+                "closeCursor": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 16
+                },
+                "commitTransaction": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 31
+                },
+                "connectConnection": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 50
+                },
+                "executeStatement": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 79
+                },
+                "listChildren": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 104
+                },
+                "listConnections": {
+                  "success": 3,
+                  "failure": 0,
+                  "totalElapsedMs": 90
+                },
+                "listDialects": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 6
+                },
+                "migrationStatus": {
+                  "success": 1,
+                  "failure": 0,
+                  "totalElapsedMs": 9
+                },
+                "recordSqlHistory": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 63
+                },
+                "runQuery": {
+                  "success": 2,
+                  "failure": 0,
+                  "totalElapsedMs": 16
+                },
+                "transactionState": {
+                  "success": 5,
+                  "failure": 0,
+                  "totalElapsedMs": 40
+                }
+              },
+              "keyringGets": 8,
+              "keyringHits": 8,
+              "keyringSets": 0,
+              "guiVerified": false,
+              "mysqlVerified": false,
+              "storePersistenceVerified": false
+            }
+          },
+          "reference": {
+            "rowCount": 1,
+            "firstId": 1,
+            "lastId": 1,
+            "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+            "autocommit": true,
+            "readOnly": true
+          },
+          "ack": {
+            "schemaVersion": 1,
+            "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+            "phase": "commit",
+            "pid": 48516,
+            "step": "committed",
+            "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+            "verified": true
+          }
+        }
+      ],
+      "failureCode": "NONE"
+    },
+    "exitCode": 0,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": false
+  },
+  "trace": {
+    "records": [
+      {
+        "schemaVersion": 1,
+        "seq": 1,
+        "stage": "main_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 2,
+        "stage": "preflight_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 3,
+        "stage": "app_import_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 4,
+        "stage": "app_import_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 5,
+        "stage": "app_mount_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 6,
+        "stage": "app_mounted",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 7,
+        "stage": "listener_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 8,
+        "stage": "listener_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 9,
+        "stage": "boot_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 10,
+        "stage": "native_enter",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 11,
+        "stage": "native_returned",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 12,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 13,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 14,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 15,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 16,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 17,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 18,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 19,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 20,
+        "stage": "native_enter",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 21,
+        "stage": "native_returned",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 22,
+        "stage": "boot_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 23,
+        "stage": "dom_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 24,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 25,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 26,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 27,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 28,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 29,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 30,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 31,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 32,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 33,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 34,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 35,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 36,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 37,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 38,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 39,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 40,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 41,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 42,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 43,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 44,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 45,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 46,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 47,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 48,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 49,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 50,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 51,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 52,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 53,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 54,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 55,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 56,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 57,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 58,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 59,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 60,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 61,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 62,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 63,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 64,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 65,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 66,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 67,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 68,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 69,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 70,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 71,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 72,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 73,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 74,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 75,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 76,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 77,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 78,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 79,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 80,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 81,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 82,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 83,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 84,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 85,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 86,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 87,
+        "stage": "native_returned",
+        "method": "other"
+      }
+    ],
+    "sha256": "1e2b4fe4d8ee96f1b10cafb615100ea3b5bd8b92efbd12d8b915703ecc76d9a7"
+  },
+  "observer": {
+    "status": "OBSERVER_READBACK_OK",
+    "runId": "e12b3fa346f24dd78ad934867e64e1f3",
+    "counts": {
+      "paging": 805,
+      "precision": 1,
+      "composite": 2,
+      "import": 0
+    },
+    "autocommit": true,
+    "readOnly": true,
+    "precisionChecks": 11,
+    "pagingChecks": 9,
+    "independentConnections": 3,
+    "guiPassed": false
+  },
+  "finalTableReference": {
+    "rowCount": 1,
+    "firstId": 1,
+    "lastId": 1,
+    "bodySha256": "9c5a6afd8808a5c10b923cad69265d726d411df8343d21a2fba876a58964a4b4",
+    "autocommit": true,
+    "readOnly": true
+  },
+  "provenance": {
+    "runnerSourceSha256": "c2436fe6e9d4a4d563fe6e6d70ffd0b50363d88d96b22ee54bcda6fee3b478f5",
+    "fixturePinSha256": "3ea8271b0f7978a6ece9ecef8c1bb1c5c13b54318de22fc0fd4e11b07b9af3ec",
+    "artifactReceiptSha256": "b140d0187ad13ce1140adf685e0aa733004d398475c920fcc70d065f0fda2d68",
+    "manifestSha256": "e1efbd490d84cdfef2f627420bacdb66600b014cd741989faf36eec26fea1aa1",
+    "containerId": "d15c43ed478fcd0ea48bb4534cbeec2c9a916eb0fa7218ef270867892bbd1b32",
+    "imageSha256": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+    "fixtureSourceSha256": "cc946c63a5a51f391bac46b2fe740fbe4b421b0fe381be7b2a233dbed076e34d",
+    "hostManifestSha256": "22741f9922347b75c17d84c73c6c04660e5b7cb4f78f68672681287a472d83ea",
+    "initialReportSha256": "3874953821432a120de251df02cf7f78446dceb0af668659d5767df2a049db04",
+    "initialUiSha256": "86f3f98968f55769e9b27886a42b84df7861ec0c77c124cda3a548e788abc4cd",
+    "failedRestartSha256": null,
+    "binarySha256": "c3381f034eda18964e61920772b40ff93512b4f6f303ae083e69de40c720230f",
+    "frontendIndexSha256": "6d60835d2684f909ec995e53bfa342f432a9a2ace43b69ed55210719220c745d",
+    "frontendAssetsSha256": "fd52fe7783eefbf6b5591ea70930e96dfea72ecd48a7566b7c5cccaf050110d6",
+    "source": {
+      "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+      "files": {
+        "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+        "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+        "apps/desktop/src/mysql-parity-dom.ts": "8a44a33336474aa59f28de3d3ffe852941845621da2f0ceadbf2b7e374ddcf64",
+        "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+        "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+        "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+        "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+        "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+        "src-tauri/src/lib.rs": "c34cfba1b962b9b3c929eb1ad322138a64d37415955d63eac4db7d4edec0a9fb",
+        "src-tauri/src/mysql_acceptance.rs": "d3273162fb86e13a2406a896e7dbb20e221ae57c1f7d3f9b569138f2b99cc7a2",
+        "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+        "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+        "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+        "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+        "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+        "scripts/build-mysql-acceptance.mjs": "21ba968c89180c9bab9e5e67982de8bd9ceef1ad716c5644527cb851a6c6abef",
+        "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+        "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+        "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534"
+      },
+      "diffSha256": "65c051419679ce0a35c9f0a3a4852cb14bef487e9df2e98d85577357d7737093",
+      "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+    }
+  }
+}

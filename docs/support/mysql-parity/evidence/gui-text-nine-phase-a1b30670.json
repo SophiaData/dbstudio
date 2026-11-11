@@ -1,0 +1,493 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-longtext-json-nine-phase-same-candidate-actual-gui",
+  "runId": "a1b30670c3ea4caa9c5867f9f9d3587a",
+  "chainPassed": true,
+  "productionReady": false,
+  "fullTypeMatrixVerified": false,
+  "referenceApplicationsOperated": false,
+  "osTrustedInputVerified": false,
+  "guiActionDriver": "native-dom-synthetic",
+  "businessImplementationChanged": false,
+  "build": {
+    "report": "backups/mysql-acceptance-host-build-a7a095da790a4b6999c3869d77e13245/build-report.json",
+    "receiptSha256": "85ab5f34bafc1f86223444e0859d910863844df4e282f44d3e8a3dcf3a5761a4",
+    "binarySha256": "8ddd766e24e3a14a13f8c57020aa6a0043934289658e1334f94df04bcf31824d",
+    "hostTestsVerified": 97,
+    "oldHostTests": 88,
+    "newHostTests": 9,
+    "separatePureGateAssertions": 5,
+    "directSourceFileCount": 22
+  },
+  "phases": [
+    {
+      "phase": "initial",
+      "pid": null,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-initial-a1b30670.json",
+      "sourceSha256": "83678d9be4f090bf69bf47ebac6aff5298a4c447cc764539d8557171d0f7b6b4"
+    },
+    {
+      "phase": "grid-text",
+      "pid": 38529,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-joint-38529.json",
+      "sourceSha256": "0f076d3de77d734f5835bab06052ffbfdeff9b11259dc52718fd29f29ddffff8"
+    },
+    {
+      "phase": "grid-precision",
+      "pid": 40314,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-precision-40314.json",
+      "sourceSha256": "391e1ef77ea9a73e0f66115c05316b68838d20499c8438b11833ec936fdfc283"
+    },
+    {
+      "phase": "grid-duplicate",
+      "pid": 41113,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-duplicate-41113.json",
+      "sourceSha256": "79fe5c69b8905273c36f8da4391dc23aebcf96e3301166a9ac57846f807103d4"
+    },
+    {
+      "phase": "grid-deadlock",
+      "pid": 42113,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-deadlock-42113.json",
+      "sourceSha256": "378883a1edaa05ae379d8353c7156db86c86ce82a616ced23d828716931a36e6"
+    },
+    {
+      "phase": "grid-timeout",
+      "pid": 43450,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-timeout-43450.json",
+      "sourceSha256": "ab852b3220d2ca8fe33d3142239be8bc3504c87ce6ca8550e4113df53293bdec"
+    },
+    {
+      "phase": "restart",
+      "pid": 45500,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-restart-45500.json",
+      "sourceSha256": "863081f9377892a454d5a57248ae143294171461b8765759f9ff0019ba9ad73f"
+    },
+    {
+      "phase": "explain",
+      "pid": 46316,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-explain-46316.json",
+      "sourceSha256": "1ab70689262cb7a39d28a429b6496d5f93ce3341b21e91f8bf37e9be3b9f35f9"
+    },
+    {
+      "phase": "commit",
+      "pid": 46707,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-text-commit-46707.json",
+      "sourceSha256": "7be9646fd4dcf161788246e1e5c90e9c5970ee766218febd0bee39869b7925dd"
+    }
+  ],
+  "commonSixProvenance": {
+    "runnerSourceSha256": "a76672f8538f38446e65cb43fa5497926a8cdc24924fe7fd8bdc481464025331",
+    "fixturePinSha256": "3f853c8689198c287b87b8e86aa503f63919d13d1a0bba9ec2a4a88e48f77612",
+    "artifactReceiptSha256": "85ab5f34bafc1f86223444e0859d910863844df4e282f44d3e8a3dcf3a5761a4",
+    "binarySha256": "8ddd766e24e3a14a13f8c57020aa6a0043934289658e1334f94df04bcf31824d",
+    "frontendIndexSha256": "22325d0c308d516911dbb1d8b015c33f69277b2e1954cc50bb9c8025ce307514",
+    "frontendAssetsSha256": "73b434449229bf481d80bdcdafd5b28cf82dfd112e50d814b4be0c35ff595920"
+  },
+  "initialMaterialPins": {
+    "hostManifestSha256": "7769bf68e8dbb2f42b03acca5ce9b77120b44009d4fdff279be1d92f9bbee960",
+    "initialReportSha256": "83678d9be4f090bf69bf47ebac6aff5298a4c447cc764539d8557171d0f7b6b4",
+    "initialUiSha256": "670885a0498baf713b3ed21929e413aa683345a85f9021dae74b19e9670a0134",
+    "failedRestartSha256": null
+  },
+  "source": {
+    "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+    "files": {
+      "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+      "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+      "apps/desktop/src/mysql-parity-dom.ts": "4421b161320deb192c21ffb77ce60137acabb42e3edb11eb956f53a5b532c92c",
+      "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+      "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+      "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+      "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+      "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+      "src-tauri/src/lib.rs": "383d437442767063fd07c0c651fec077fca44c071e467248b4936b404005e8d6",
+      "src-tauri/src/mysql_acceptance.rs": "9fa6d292aa39ed4de208ae69083395b549a6e494368e6ca52c90cb1969ed72d1",
+      "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+      "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+      "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+      "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+      "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+      "scripts/build-mysql-acceptance.mjs": "056ebea8d99f74479b0f4bf4f2af848dcbc8a792300b07bf9d47cc10bbabb4c5",
+      "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+      "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+      "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534",
+      "apps/desktop/src/components/CellViewer.vue": "ad42a8e0dfe07b381b82828a2586cd39adf4be130ba00eae643e829df1415328",
+      "apps/desktop/src/result-export.ts": "3b1fa77567f320cf6076c37fb0ef47d23a9e6a92118dca24197666c5596d4331",
+      "crates/dbstudio-drivers/src/network.rs": "fb058fe9f1bf6ff516030f93fe08c9df08addd8cd4409f0501bd9681ddbf04b3"
+    },
+    "diffSha256": "5815b259ccea9568bd790526e072a04c3873b1b44111349ea60004c6724b6f14",
+    "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+  },
+  "text": {
+    "uiChecksPassed": 19,
+    "proof": {
+      "rowCount": 1,
+      "editedColumns": 2,
+      "baselineLongSha256": "ec1fead7cb466ff77da7db8e48be22e38e690341093e0cd35e6a90526b8d5522",
+      "baselineJsonSha256": "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+      "draftLongSha256": "c73e687b75870fc7662eec6745840fce7b8ef062c6f8bd8bb91bce3bc2ff4b96",
+      "draftJsonSha256": "fed76e9b4f53cc144678ae795b5f3f7c8bbac21211266790e6cb547fbfa6bff5",
+      "appliedLongSha256": "c73e687b75870fc7662eec6745840fce7b8ef062c6f8bd8bb91bce3bc2ff4b96",
+      "appliedJsonSha256": "79a7775d789af4082cadbdf463e8ffa804e75e91f0b0d1515370d0b3cfc9cf36",
+      "committedLongSha256": "c73e687b75870fc7662eec6745840fce7b8ef062c6f8bd8bb91bce3bc2ff4b96",
+      "committedJsonSha256": "79a7775d789af4082cadbdf463e8ffa804e75e91f0b0d1515370d0b3cfc9cf36",
+      "baselineValuesSha256": "40419e3e523c626e4d60be4df03374a6f049c93de7b9ab4ebe64de2cf6669290",
+      "draftValuesSha256": "cd38f3e526895fd33ff255c7c0f82fe2508060de7f9ca18697190ffadc2aea11",
+      "appliedValuesSha256": "bcd2020e7d96971cd461e2260053571d31a3cf7a5b28d6980d7ed5d15837244f",
+      "committedValuesSha256": "bcd2020e7d96971cd461e2260053571d31a3cf7a5b28d6980d7ed5d15837244f",
+      "uncommittedProjectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e",
+      "committedProjectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e",
+      "witnessConnectionId": 177,
+      "uiActiveAfterApply": true,
+      "uiPendingAffectedAfterApply": 1,
+      "dirtyRowsBeforeApply": 1,
+      "dirtyRowsAfterApply": 0,
+      "baselinePreview": [
+        {
+          "prefixSha256": "9d3660081a87c359e6c21182150cd3fb46b0ed087509ddc9cb09a477d9919657",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        },
+        {
+          "prefixSha256": "91c545101312135e201bc791b3bba67a9a978ca85b3c86c8d1a4273409271d08",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        }
+      ],
+      "appliedPreview": [
+        {
+          "prefixSha256": "57e269a66379e6b9ca1e166afc500512feaa4acfb22d3455be7cb99bcf225b1a",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        },
+        {
+          "prefixSha256": "34fa47c9f5b7a72fa3ad05f71e055a418d1a1d6d1ac88d108a75e4553fe2967c",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        }
+      ],
+      "committedPreview": [
+        {
+          "prefixSha256": "57e269a66379e6b9ca1e166afc500512feaa4acfb22d3455be7cb99bcf225b1a",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        },
+        {
+          "prefixSha256": "34fa47c9f5b7a72fa3ad05f71e055a418d1a1d6d1ac88d108a75e4553fe2967c",
+          "prefixCodePoints": 1000,
+          "ellipsis": true
+        }
+      ]
+    },
+    "oracle": {
+      "baselineJsonSha256": "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+      "editedJsonSha256": "79a7775d789af4082cadbdf463e8ffa804e75e91f0b0d1515370d0b3cfc9cf36",
+      "draftJsonSha256": "fed76e9b4f53cc144678ae795b5f3f7c8bbac21211266790e6cb547fbfa6bff5",
+      "baselineValuesSha256": "40419e3e523c626e4d60be4df03374a6f049c93de7b9ab4ebe64de2cf6669290",
+      "draftValuesSha256": "cd38f3e526895fd33ff255c7c0f82fe2508060de7f9ca18697190ffadc2aea11",
+      "editedValuesSha256": "bcd2020e7d96971cd461e2260053571d31a3cf7a5b28d6980d7ed5d15837244f",
+      "baselineProjectionSha256": "ec7adb68ee9a3df18e72fbf845dd045f3707c99cd51e2c5bad7b7b0f83befae5",
+      "editedProjectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e"
+    },
+    "actions": {
+      "click": 43,
+      "input": 5,
+      "keydown": 0,
+      "dblclick": 3
+    },
+    "elapsedWithObserversMs": 4578,
+    "steps": [
+      {
+        "step": "baseline",
+        "request": {
+          "schemaVersion": 1,
+          "step": "baseline",
+          "uiActive": false,
+          "uiPendingAffected": 0,
+          "dirtyRows": 0,
+          "valuesSha256": "40419e3e523c626e4d60be4df03374a6f049c93de7b9ab4ebe64de2cf6669290",
+          "witnessConnectionId": null,
+          "witnessProjectionSha256": null
+        },
+        "freshReference": {
+          "rowCount": 1,
+          "projection": [
+            "1610",
+            "5610",
+            "ec1fead7cb466ff77da7db8e48be22e38e690341093e0cd35e6a90526b8d5522",
+            "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+            "9007199254740993",
+            "UNSIGNED INTEGER",
+            "E4BDA0E5A5BDF09F9880",
+            "0"
+          ],
+          "projectionSha256": "ec7adb68ee9a3df18e72fbf845dd045f3707c99cd51e2c5bad7b7b0f83befae5",
+          "autocommit": true,
+          "readOnly": true
+        },
+        "fetchSuccess": 2
+      },
+      {
+        "step": "draft",
+        "request": {
+          "schemaVersion": 1,
+          "step": "draft",
+          "uiActive": false,
+          "uiPendingAffected": 0,
+          "dirtyRows": 1,
+          "valuesSha256": "cd38f3e526895fd33ff255c7c0f82fe2508060de7f9ca18697190ffadc2aea11",
+          "witnessConnectionId": null,
+          "witnessProjectionSha256": null
+        },
+        "freshReference": {
+          "rowCount": 1,
+          "projection": [
+            "1610",
+            "5610",
+            "ec1fead7cb466ff77da7db8e48be22e38e690341093e0cd35e6a90526b8d5522",
+            "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+            "9007199254740993",
+            "UNSIGNED INTEGER",
+            "E4BDA0E5A5BDF09F9880",
+            "0"
+          ],
+          "projectionSha256": "ec7adb68ee9a3df18e72fbf845dd045f3707c99cd51e2c5bad7b7b0f83befae5",
+          "autocommit": true,
+          "readOnly": true
+        },
+        "fetchSuccess": 4
+      },
+      {
+        "step": "applied",
+        "request": {
+          "schemaVersion": 1,
+          "step": "applied",
+          "uiActive": true,
+          "uiPendingAffected": 1,
+          "dirtyRows": 0,
+          "valuesSha256": "bcd2020e7d96971cd461e2260053571d31a3cf7a5b28d6980d7ed5d15837244f",
+          "witnessConnectionId": 177,
+          "witnessProjectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e"
+        },
+        "freshReference": {
+          "rowCount": 1,
+          "projection": [
+            "1610",
+            "5610",
+            "ec1fead7cb466ff77da7db8e48be22e38e690341093e0cd35e6a90526b8d5522",
+            "5b4343575cbe002628070a018582924e8c914f8293c7de35c8831a8404bcf552",
+            "9007199254740993",
+            "UNSIGNED INTEGER",
+            "E4BDA0E5A5BDF09F9880",
+            "0"
+          ],
+          "projectionSha256": "ec7adb68ee9a3df18e72fbf845dd045f3707c99cd51e2c5bad7b7b0f83befae5",
+          "autocommit": true,
+          "readOnly": true
+        },
+        "fetchSuccess": 6
+      },
+      {
+        "step": "committed",
+        "request": {
+          "schemaVersion": 1,
+          "step": "committed",
+          "uiActive": false,
+          "uiPendingAffected": 0,
+          "dirtyRows": 0,
+          "valuesSha256": "bcd2020e7d96971cd461e2260053571d31a3cf7a5b28d6980d7ed5d15837244f",
+          "witnessConnectionId": 177,
+          "witnessProjectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e"
+        },
+        "freshReference": {
+          "rowCount": 1,
+          "projection": [
+            "1810",
+            "6310",
+            "c73e687b75870fc7662eec6745840fce7b8ef062c6f8bd8bb91bce3bc2ff4b96",
+            "79a7775d789af4082cadbdf463e8ffa804e75e91f0b0d1515370d0b3cfc9cf36",
+            "9007199254740995",
+            "UNSIGNED INTEGER",
+            "E694B9E5908EF09F9A80",
+            "1"
+          ],
+          "projectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e",
+          "autocommit": true,
+          "readOnly": true
+        },
+        "fetchSuccess": 8
+      }
+    ],
+    "native": {
+      "scope": "test-host-observation-only",
+      "runId": "a1b30670c3ea4caa9c5867f9f9d3587a",
+      "phase": "grid-text",
+      "methods": {
+        "applyEdits": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 25
+        },
+        "closeCursor": {
+          "success": 4,
+          "failure": 0,
+          "totalElapsedMs": 29
+        },
+        "commitTransaction": {
+          "success": 2,
+          "failure": 0,
+          "totalElapsedMs": 27
+        },
+        "connectConnection": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 45
+        },
+        "describeTable": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 47
+        },
+        "executeStatement": {
+          "success": 3,
+          "failure": 0,
+          "totalElapsedMs": 62
+        },
+        "fetchCellValue": {
+          "success": 8,
+          "failure": 0,
+          "totalElapsedMs": 95
+        },
+        "listChildren": {
+          "success": 7,
+          "failure": 0,
+          "totalElapsedMs": 168
+        },
+        "listConnections": {
+          "success": 3,
+          "failure": 0,
+          "totalElapsedMs": 100
+        },
+        "listDialects": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 8
+        },
+        "migrationStatus": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 8
+        },
+        "recordSqlHistory": {
+          "success": 3,
+          "failure": 0,
+          "totalElapsedMs": 41
+        },
+        "runQuery": {
+          "success": 5,
+          "failure": 0,
+          "totalElapsedMs": 57
+        },
+        "tableSelectSql": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 8
+        },
+        "transactionState": {
+          "success": 5,
+          "failure": 0,
+          "totalElapsedMs": 38
+        }
+      },
+      "keyringGets": 8,
+      "keyringHits": 8,
+      "keyringSets": 0,
+      "guiVerified": false,
+      "mysqlVerified": false,
+      "storePersistenceVerified": false,
+      "text": {
+        "lastApplyResult": {
+          "ok": true,
+          "affected": 1,
+          "inTransaction": true,
+          "outcomeCount": 1,
+          "failedOutcomeCount": 0,
+          "errorClass": "none"
+        },
+        "lastObservedTransactionState": {
+          "active": false,
+          "pendingAffected": 0
+        }
+      }
+    },
+    "finalTableReferenceAtTextPhaseEnd": {
+      "rowCount": 1,
+      "projection": [
+        "1810",
+        "6310",
+        "c73e687b75870fc7662eec6745840fce7b8ef062c6f8bd8bb91bce3bc2ff4b96",
+        "79a7775d789af4082cadbdf463e8ffa804e75e91f0b0d1515370d0b3cfc9cf36",
+        "9007199254740995",
+        "UNSIGNED INTEGER",
+        "E694B9E5908EF09F9A80",
+        "1"
+      ],
+      "projectionSha256": "d739d493c9e6ea586ea7dea4cf3ee530576cb96bf0ff17368ed0d954bf478a4e",
+      "autocommit": true,
+      "readOnly": true
+    },
+    "finalTransactionEnded": true
+  },
+  "retainedEarlierInfra": {
+    "runId": "4521e48798ae48ccbc4385e598480422",
+    "pid": 20203,
+    "summary": "gui-text-type-infra-4521e487.json",
+    "summarySha256": "607c6be97ab5356e168571a73819cb58f42366b4543d7c29fab305771e91adad",
+    "classification": "INFRA_ERROR",
+    "notProductRedOrPass": true
+  },
+  "scopeLimitations": [
+    "only fixed single-row LONGTEXT and JSON positive workflow",
+    "no clipboard, all-size or structured JSON viewer claim",
+    "no whole-type, performance, OS-trusted, soak, reference-app, cross-build, TLS-full, 8.4 or Windows parity claim"
+  ],
+  "rawFileSha256": {
+    "gui-text-initial-a1b30670.json": "83678d9be4f090bf69bf47ebac6aff5298a4c447cc764539d8557171d0f7b6b4",
+    "gui-text-joint-38529.json": "0f076d3de77d734f5835bab06052ffbfdeff9b11259dc52718fd29f29ddffff8",
+    "gui-text-precision-40314.json": "391e1ef77ea9a73e0f66115c05316b68838d20499c8438b11833ec936fdfc283",
+    "gui-text-duplicate-41113.json": "79fe5c69b8905273c36f8da4391dc23aebcf96e3301166a9ac57846f807103d4",
+    "gui-text-deadlock-42113.json": "378883a1edaa05ae379d8353c7156db86c86ce82a616ced23d828716931a36e6",
+    "gui-text-timeout-43450.json": "ab852b3220d2ca8fe33d3142239be8bc3504c87ce6ca8550e4113df53293bdec",
+    "gui-text-restart-45500.json": "863081f9377892a454d5a57248ae143294171461b8765759f9ff0019ba9ad73f",
+    "gui-text-explain-46316.json": "1ab70689262cb7a39d28a429b6496d5f93ce3341b21e91f8bf37e9be3b9f35f9",
+    "gui-text-commit-46707.json": "7be9646fd4dcf161788246e1e5c90e9c5970ee766218febd0bee39869b7925dd",
+    "gui-text-initial-ui-a1b30670.json": "670885a0498baf713b3ed21929e413aa683345a85f9021dae74b19e9670a0134",
+    "gui-text-ui-38529.json": "a6c582e639c1bc6e210eeba4a778ea5d088a3570bb92263101a5b32f5a5625ae",
+    "gui-text-checkpoint-38529-baseline.json": "7b1853fd6e8c8b49114938d88fe7e65254f656b97416e26dc0d806e0863668da",
+    "gui-text-ack-38529-baseline.json": "578887c07927223662e35a457c42feee58112b99eb923158358399cdef123858",
+    "gui-text-checkpoint-38529-draft.json": "bc30266a221ddceff3376edde6e51c58d755a33d1c5c0e40eb93e9f57d8e895a",
+    "gui-text-ack-38529-draft.json": "f818a6722d3dedc7aef1763f333f4a25c2b5fa0e526d091dd206f36abf3ccb9d",
+    "gui-text-checkpoint-38529-applied.json": "1cd3141ff59cb47e5dd72d93cfde112e94ee2f4d1c75b44acf1eb2cee06e279f",
+    "gui-text-ack-38529-applied.json": "d4d60667ad6df4eaaa0eddb6d92230019e801cdcb1869e352b4b8992b3418ebd",
+    "gui-text-checkpoint-38529-committed.json": "25ed79bcff420d8b979bd6cbfb40427f7055d2193b1eb4624b12ecb1ab4ac6cc",
+    "gui-text-ack-38529-committed.json": "2ae8979e46d0849b9f5f3809306b623dfab4487a94c8dfe5b06c0ac0bbf389d4"
+  }
+}

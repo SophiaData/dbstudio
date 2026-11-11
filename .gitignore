@@ -53,3 +53,23 @@ verify-*/
 /target/
 /src-tauri/target/
 /src-tauri/gen/
+**/privatebackups/**
+
+# 含本机元数据的原始验收材料留本地，公开版本见 docs/support/mysql-parity/public/
+/smoke.json
+/docs/superpowers/plans/2026-11-11-mysql-acceptance-storage.md
+/docs/support/mysql-parity/desktop-workflow-gaps.md
+/docs/support/mysql-parity/gui-precision-contract.md
+/docs/support/mysql-parity/gui-session-timezone-acceptance.md
+/docs/support/mysql-parity/gui-text-acceptance.md
+/docs/support/mysql-parity/gui-time-acceptance.md
+/docs/support/mysql-parity/gui-time-contract.md
+/docs/support/mysql-parity/gui-time-crosszone-acceptance.md
+/docs/support/mysql-parity/progress.md
+/docs/support/mysql-parity/real-acceptance-results.md
+/docs/support/mysql-parity/evidence/gui-bit-blob-infra-*
+/docs/support/mysql-parity/evidence/gui-time-*
+/docs/support/mysql-parity/evidence/unit-time-metadata-*
+/docs/support/mysql-parity/evidence/explain-api-red-23cbc47b.json
+/docs/support/mysql-parity/evidence/explain-native-green-b0349ac6.json
+/docs/support/mysql-parity/evidence/transaction-summary-e83b5c0a.json

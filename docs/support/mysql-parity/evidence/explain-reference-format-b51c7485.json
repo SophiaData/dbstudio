@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "scope": "readonly-explain-reference-format-probe",
+  "runId": "b51c7485c6364ad1b6a4cc52f09619de",
+  "columns": [
+    "id",
+    "select_type",
+    "table",
+    "partitions",
+    "type",
+    "possible_keys",
+    "key",
+    "key_len",
+    "ref",
+    "rows",
+    "filtered",
+    "Extra"
+  ],
+  "rows": [
+    [
+      "1",
+      "SIMPLE",
+      "items_805",
+      "NULL",
+      "const",
+      "PRIMARY",
+      "PRIMARY",
+      "8",
+      "const",
+      "1",
+      "100",
+      "NULL"
+    ]
+  ],
+  "planSha256": "354ba61bfae298475cb9858961e683e120973536fd1028e683d062683124374f",
+  "autocommit": true,
+  "readOnly": true,
+  "guiPassed": false
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "dbstudio MySQL Acceptance",
+  "identifier": "io.dbstudio.mysql-acceptance",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": null
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": { "active": false }
+}

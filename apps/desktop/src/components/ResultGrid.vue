@@ -15,7 +15,14 @@ watch([editing, insertOpen], ([cell, insert]) => {
   if (cell || insert) props.workbench.pendingEditors.add(props.tab.id)
   else props.workbench.pendingEditors.delete(props.tab.id)
 }, { flush: 'sync' })
-onBeforeUnmount(() => props.workbench.pendingEditors.delete(props.tab.id))
+let editRequest = 0
+let disposed = false
+function invalidateCellEdit() { editRequest++; editing.value = null }
+onBeforeUnmount(() => {
+  disposed = true
+  invalidateCellEdit()
+  props.workbench.pendingEditors.delete(props.tab.id)
+})
 const insertValues = reactive<Record<string, string>>({})
 const insertInclude = reactive(new Set<string>())
 const insertNulls = reactive(new Set<string>())
@@ -26,11 +33,15 @@ const loadedExport = ref(false)
 const loadedExportController = ref<InstanceType<typeof LoadedExportDialog> | null>(null)
 const rowCount = ref<number | null>(null)
 const reading = ref(false)
-watch([() => props.tab.result, () => props.tab.page], () => {
+watch([
+  () => props.tab, () => props.tab.result, () => props.tab.page, () => props.tab.generation,
+  () => props.tab.result?.cursorId, () => props.tab.invalidated
+], () => {
+  invalidateCellEdit()
   selectedCell.value = null
   viewer.value = null
   rowCount.value = null
-})
+}, { flush: 'sync' })
 function selectCell(row: ResultRow, column: number) { selectedCell.value = { row, column } }
 function readSelected() { if (selectedCell.value) void readCell(selectedCell.value.row, selectedCell.value.column) }
 function copySelected(wholeRow: boolean) { if (selectedCell.value) void copyCell(wholeRow) }
@@ -89,19 +100,30 @@ function displayed(row: ResultRow, column: number): CellValue {
   return props.tab.dirty.get(row.index)?.changes[name] ?? row.cells[column]!
 }
 async function edit(row: ResultRow, column: number) {
-  if (!writable.value || locked.value) return
+  if (disposed || !writable.value || locked.value || !props.tab.page) return
+  const tab = props.tab
+  const page = tab.page!
+  const result = tab.result
+  const generation = tab.generation
+  const cursorId = result?.cursorId
+  const request = ++editRequest
+  const ownsRequest = () => !disposed && request === editRequest && props.tab === tab &&
+    tab.page === page && tab.result === result && tab.generation === generation &&
+    tab.result?.cursorId === cursorId && !tab.invalidated && !insertOpen.value
   error.value = ''
   try {
-    props.workbench.rowKeys(props.tab, row)
+    props.workbench.rowKeys(tab, row)
     let cell = displayed(row, column)
     if (cell.kind === 'blob') throw new Error('二进制单元格只读')
     if (cell.kind === 'text' && cell.truncated) {
-      if (!props.tab.result?.cursorId) throw new Error('游标已关闭，无法获取完整文本')
-      cell = await backend.fetchCellValue(props.tab.result.cursorId, row.index, column)
+      if (!cursorId) throw new Error('游标已关闭，无法获取完整文本')
+      cell = await backend.fetchCellValue(cursorId, row.index, column)
+      if (!ownsRequest()) return
       if (cell.kind !== 'text' || cell.truncated) throw new Error('完整文本不可用，无法安全编辑')
     }
-    editing.value = { row, column, raw: cell.kind === 'null' ? '' : cellText(cell), kind: cell.kind === 'null' ? props.tab.page!.columns[column]!.type : cell.kind, isNull: cell.kind === 'null' }
-  } catch (cause) { error.value = errorText(cause) }
+    if (!ownsRequest()) return
+    editing.value = { row, column, raw: cell.kind === 'null' ? '' : cellText(cell), kind: cell.kind === 'null' ? page.columns[column]!.type : cell.kind, isNull: cell.kind === 'null' }
+  } catch (cause) { if (ownsRequest()) error.value = errorText(cause) }
 }
 function saveCell() {
   const editor = editing.value
@@ -117,6 +139,7 @@ async function sort(column: string) {
   await props.workbench.attempt(() => props.workbench.transformTab(props.tab))
 }
 function beginInsert() {
+  invalidateCellEdit()
   insertInclude.clear(); insertNulls.clear()
   for (const column of insertColumns.value) {
     insertValues[column.name] = ''
@@ -132,8 +155,8 @@ async function submitInsert() {
       const kind = /int|numeric|decimal|real|float|double/i.test(column.typeName) ? 'number' : /bool/i.test(column.typeName) ? 'boolean' : 'text'
       values[column.name] = inputCell(insertValues[column.name] ?? '', kind, insertNulls.has(column.name))
     }
-    await props.workbench.insertRow(props.tab, values)
-    insertOpen.value = false
+    const inserted = await props.workbench.insertRow(props.tab, values)
+    if (inserted === true) insertOpen.value = false
   } catch (cause) { error.value = errorText(cause) }
 }
 defineExpose({ readCell, buildCopyText, copyCell, countRows, openCell, selectCell, openLoadedExport, closeLoadedExport, beginInsert, submitInsert, saveCell, editing, viewer, loadedExport, rowCount, selectedCell, error })

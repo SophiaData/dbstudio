@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "caseId": "mysql_lock_wait_timeout_preserves_prior_transaction",
+  "changeAttempted": true,
+  "globalTimeoutRestored": true,
+  "independentReadbackVerified": true
+}

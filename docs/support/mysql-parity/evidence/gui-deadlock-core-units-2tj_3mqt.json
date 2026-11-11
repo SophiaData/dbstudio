@@ -1,0 +1,31 @@
+{
+  "scope": "two-core-redaction-unit-contracts",
+  "passed": true,
+  "exitCode": 0,
+  "expectedTests": [
+    "mysql_deadlock_error_redaction_binds_actual_session_driver",
+    "mysql_deadlock_error_redaction_is_exact_and_closed"
+  ],
+  "verifiedTests": [
+    "mysql_deadlock_error_redaction_binds_actual_session_driver",
+    "mysql_deadlock_error_redaction_is_exact_and_closed"
+  ],
+  "failedTests": [],
+  "sourceHashesUnchanged": true,
+  "sourceSha256": {
+    "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534",
+    "crates/dbstudio-core/src/tests.rs": "be7dc837d187c829c9260b1ce8bf877246607a8a5b1955abcc75d30c5c48c353",
+    "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+    "apps/desktop/tests/grid-workflow-regressions.mjs": "b704b8231fad2e0d5cb63262ca238e116eabccf7d87bdbd4fe4f4346e1a2cabe",
+    "apps/desktop/src/mysql-parity-dom.ts": "cd66607e54decfb5e6635c153c7ec4c588d3e9039bd28b42eb35327d787f8771",
+    "scripts/mysql-ui-acceptance.mjs": "5622878430792c1651fc188e8d795c224eedab8dc51f9c99318d2e6ccaab8eb4",
+    "src-tauri/src/mysql_acceptance.rs": "52f2d223682bdeee94b6eb3a453e997120db3d43f5df4c8ad30bf3fc06f6130e",
+    "src-tauri/src/lib.rs": "72508765a163a39660dbc0558926b28a792ea7a50d9fd8771a2d9b2d725f1486",
+    "scripts/build-mysql-acceptance.mjs": "e8f6eefa17d0981c59a8a79470115994adfd36208d513087772c74adf77c36a1",
+    "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+    "scripts/mysql-ui-acceptance-fixture.mjs": "cc946c63a5a51f391bac46b2fe740fbe4b421b0fe381be7b2a233dbed076e34d"
+  },
+  "externalDatabaseConnected": false,
+  "guiLaunched": false,
+  "osKeyringAccessed": false
+}

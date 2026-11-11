@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dd57df9a7d4242fbaef34fabdac1c64c","phase":"grid-deadlock","pid":61745,"step":"observed","proof":{"schemaVersion":1,"step":"observed","uiActive":true,"uiPendingAffected":1,"dirtyRows":1,"row1Value":1,"row3Value":7,"original1213":false,"rollbackNotice":false},"verified":true}

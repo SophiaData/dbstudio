@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scope": "same-candidate-initial-restart-explain-real-ui",
+  "runId": "dd714960179e4c9383867a9b5aa64573",
+  "allThreePhasesPassed": true,
+  "explainPanelVerified": true,
+  "independentReferenceVerified": true,
+  "productionReady": false,
+  "binarySha256": "f7623236ccd1948f75fc9b21acdf8211b7f097c68a4dc513fbfc71cfb026e799",
+  "driverSourceSha256": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+  "explainChecks": {
+    "storage_marker": true,
+    "persisted_connection": true,
+    "credential_reconnect": true,
+    "query_result": true,
+    "explain_open": true,
+    "plan_content": true,
+    "plan_refresh": true,
+    "return_results": true,
+    "nontransactional": true
+  },
+  "plan": {
+    "rowCount": 1,
+    "columnCount": 12,
+    "firstPlanSha256": "354ba61bfae298475cb9858961e683e120973536fd1028e683d062683124374f",
+    "refreshedPlanSha256": "354ba61bfae298475cb9858961e683e120973536fd1028e683d062683124374f",
+    "executedSqlSha256": "68d4b8eb981306d80bb91cef4d3f645f352cd903ca5c6946227135e44c44bf2e"
+  },
+  "actions": {
+    "click": 6,
+    "input": 1,
+    "keydown": 0
+  },
+  "domFlowElapsedMs": 258,
+  "nativeExplainSuccesses": 2,
+  "keyringGets": 6,
+  "keyringHits": 6,
+  "keyringSets": 0,
+  "sourceReportSha256": {
+    "explain-initial-dd714960.json": "bffce2334c0fea9356399236b69def11ec04b8b0f79c6e4fb6235472e678ba72",
+    "explain-restart-regression-35488.json": "4ca37e1eb4ff9b7c97485dfe4b766196595dc74183c9e8e5f6cd7b41ef928967",
+    "explain-ui-36117.json": "cbcfc7b2767cfa35ee00590d23f2fa5de7b87eb2671875b543ea830f0c009a36",
+    "explain-joint-36117.json": "4ac7d5bdf2967bd4a66af3d4b5fc27c0772fcf6e87bd5f41550a3f6b4683f903"
+  },
+  "osTrustedInputVerified": false,
+  "crossBuildCredentialRecoveryVerified": false,
+  "guiCommitVisibilityVerified": false,
+  "referenceProductsOperated": false,
+  "soakVerified": false
+}

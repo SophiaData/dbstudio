@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "scope": "lock-timeout-injection-selection-probe",
+  "runId": "b51c7485c6364ad1b6a4cc52f09619de",
+  "containerId": "e5db8a8460a876df9cb2b9b89b2978772ab6366c74765fa7b0c997bb3ab63d46",
+  "serverVersion": "8.0.46",
+  "ownershipAndImageVerified": true,
+  "sessionTimeoutBefore": 50,
+  "rollbackOnTimeout": 0,
+  "sessionTimeoutInsideHint": 50,
+  "hintEffective": false,
+  "warningCodes": [
+    3637
+  ],
+  "actual1205Observed": false,
+  "guiPassed": false,
+  "source": "live-owned-container-fixed-readonly-sql",
+  "documentationLookupSucceeded": false
+}

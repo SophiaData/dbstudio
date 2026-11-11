@@ -265,6 +265,8 @@ export function useWorkbench() {
           else { tab.message = result.summary; await refreshConnections() }
           await readTransaction(connection.id)
         } catch (cause) {
+          try { await readTransaction(connection.id) }
+          catch { /* Keep the original execution error if transaction state is unavailable. */ }
           if (!executed) await recordHistory({ sql: statement.sql, connectionId: connection.id, dialectId: connection.dialectId, elapsedMs: performance.now() - startedAt, status: 'error', error: errorText(cause) })
           tab.message = `第 ${statement.startLine} 行：${errorText(cause)}`; throw new Error(tab.message)
         }
@@ -278,8 +280,8 @@ export function useWorkbench() {
     const signal = activeSignal.value
     if (!executing.value || !id || !signal) throw new Error('当前没有正在执行的查询')
     if (!executionConnection.value?.capabilities?.supportsCancel) throw new Error('当前执行查询的驱动不支持取消')
-    await backend.cancelQuery(connectionNode(id), signal)
-    setStatus('已请求取消执行')
+    const cancelled = await backend.cancelQuery(connectionNode(id), signal)
+    setStatus(cancelled ? '已请求取消执行' : '未取消：当前没有正在执行的查询或驱动无法取消', !cancelled)
   }
   function rowKeys(tab: ResultTab, row: ResultRow): Record<string, CellValue> {
     const keys = tab.description?.columns.filter((c) => c.primaryKeyOrdinal !== null).sort((a, b) => a.primaryKeyOrdinal! - b.primaryKeyOrdinal!) ?? []
@@ -313,13 +315,13 @@ export function useWorkbench() {
     if (Object.keys(changes).length) tab.dirty.set(row.index, { keyValues, changes })
     else tab.dirty.delete(row.index)
   }
-  async function reloadTab(tab: ResultTab, guard = true) {
+  async function reloadTab(tab: ResultTab, guard = true, offset = 0) {
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
     if (guard && !(await guardLocal(tab, '刷新结果'))) return
     tab.busy = true
     const generation = ++tab.generation
     try {
-      const result = await backend.runQuery(connectionNode(tab.connectionId), tab.querySql, { limit: PAGE_SIZE, keepCursor: true, parameters: tab.parameters })
+      const result = await backend.runQuery(connectionNode(tab.connectionId), tab.querySql, { limit: PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
       if (generation !== tab.generation) { if (result.cursorId) await backend.closeCursor(result.cursorId); return }
       await setResult(tab, result)
     } finally { tab.busy = false }
@@ -348,12 +350,25 @@ export function useWorkbench() {
     if (tab.busy || tab.invalidated) throw new Error('当前结果不可应用修改')
     tab.busy = true
     try {
+      const offset = tab.page?.offset ?? 0
       const updates = [...tab.dirty.values()]
-      const result = await backend.applyEdits(tab.table.id, updates)
+      const wasActive = transactions[tab.connectionId]?.active === true
+      const result = await backend.applyEdits(tab.table.id, updates).catch(async (cause: unknown) => {
+        let state: TransactionState | null = null
+        try { state = await readTransaction(tab.connectionId) } catch { /* Preserve the original apply error when state cannot be confirmed. */ }
+        const mysqlDeadlock = cause !== null && typeof cause === 'object' &&
+          'code' in cause && cause.code === 'driver-error' &&
+          'message' in cause && cause.message === 'MySQL操作失败(SQLSTATE 40001, code 1213)' &&
+          connections.value.some((connection) => connection.id === tab.connectionId && connection.dialectId === 'mysql')
+        if (wasActive && state?.active === false && state.pendingAffected === 0 && mysqlDeadlock) {
+          throw Object.assign(new Error('MySQL操作失败(SQLSTATE 40001, code 1213)；整个事务已回滚；本地草稿已保留。请处理草稿后刷新结果'), { code: 'driver-error' })
+        }
+        throw cause
+      })
       await readTransaction(tab.connectionId)
       if (!result.ok) throw new Error(result.outcomes.filter((item) => item.error).map((item) => item.error).join('；') || '部分修改失败，请回滚当前连接事务')
       tab.dirty.clear()
-      await reloadTab(tab, false)
+      await reloadTab(tab, false, offset)
       setStatus(`已应用 ${result.affected} 行，尚未提交`)
     } finally { tab.busy = false }
   }
@@ -456,12 +471,13 @@ export function useWorkbench() {
       else activeTabId.value = ''
     }
   }
-  async function insertRow(tab: ResultTab, values: Record<string, CellValue>) {
+  async function insertRow(tab: ResultTab, values: Record<string, CellValue>): Promise<boolean> {
     if (!editableSource(tab) || tab.busy || !tab.table) throw new Error('当前表不可新增行')
-    if (!(await guardLocal(tab, '插入行'))) return
+    if (!(await guardLocal(tab, '插入行'))) return false
     const result = await backend.insertRow(tab.table.id, values)
     await readTransaction(tab.connectionId); await reloadTab(tab, false)
     setStatus(`已插入 ${result.affected} 行，尚未提交`)
+    return true
   }
   async function deleteSelected(tab: ResultTab) {
     if (!editableSource(tab) || tab.busy || !tab.table || !tab.page) throw new Error('当前结果不可删除')

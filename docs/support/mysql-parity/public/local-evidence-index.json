@@ -1,0 +1,983 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Public hash index of locally retained private evidence. Hashes and closed-status counts only; no content, paths inside payloads, SQL, rows or environment data.",
+  "scope": "docs/support/mysql-parity/evidence/ (gui-bit-blob-infra-91e1f104-66281/**, gui-time-*, unit-time-metadata-bfda08a0/**, explain-api-red-23cbc47b.json, explain-native-green-b0349ac6.json, transaction-summary-e83b5c0a.json)",
+  "itemCount": 94,
+  "items": [
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/explain-api-red-23cbc47b.json",
+      "originalSha256": "6338e4138eed48353bef452478ed6524e81ef62db7ad18de13a6ef776de4c56e",
+      "bytes": 919,
+      "closedStatus": {
+        "status": "NATIVE_BASELINE_HAS_GAPS"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/explain-native-green-b0349ac6.json",
+      "originalSha256": "61e3d072c5883897a2a6a807fd1bd7ba2f49e4e9bcf43eb8f8db7b9f961b0bf8",
+      "bytes": 6821,
+      "closedStatus": {
+        "status": "NATIVE_BASELINE_ALL_GREEN"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/binary-ack-66281-baseline.json",
+      "originalSha256": "318e7493b2414586af29e1287ec36b04f8f88de115c87f7afccf1293f6ceb18f",
+      "bytes": 511,
+      "closedStatus": {
+        "phase": "grid-bit-blob"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/binary-checkpoint-66281-baseline.json",
+      "originalSha256": "2de78a48e2c8e441808a0fd78321323415833286339053f5f8c784047c3df279",
+      "bytes": 1651,
+      "closedStatus": {
+        "phase": "grid-bit-blob"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/real-ui-grid-bit-blob-66281.json",
+      "originalSha256": "4c731b2582be5cd8eddd509e885da8d060634f79fc5f9946ee4c4e51fc88dba4",
+      "bytes": 28054,
+      "closedStatus": {
+        "classification": "INFRA_ERROR",
+        "phase": "grid-bit-blob",
+        "failureCode": "CHECKPOINT",
+        "chainPassed": false,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/real-ui-report.json",
+      "originalSha256": "2f20df5666ac4d535d15481b72e8a7ce548964cd55cb0841c46b44f1a0175b07",
+      "bytes": 6870,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 6,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/summary.json",
+      "originalSha256": "2099e7894c1c1a1c32fdfe5f325738290ae9add0aae9ed51746ce81b0b84965a",
+      "bytes": 25631
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/ui-grid-bit-blob-66281.json",
+      "originalSha256": "fd133c3d58f0c8bfd8598d1a0f45c9614b595ed41b2eb505910bb279956500e7",
+      "bytes": 3683,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-bit-blob-infra-91e1f104-66281/700/ui-initial.json",
+      "originalSha256": "c7889e207508bf88f2894ae6f71085a2baad97c37cfbaf1464915254b3f8f47b",
+      "bytes": 1709,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-ack-72012-baseline.json",
+      "originalSha256": "dcaa6a933054d00f65bfece59865241100619981d7103b15adaf5d2222e1a45b",
+      "bytes": 576,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-ack-72012-restored.json",
+      "originalSha256": "6658b5a0fc2b013196ed454ff1587feb1215360b34d38eedb45f02b597b0d69e",
+      "bytes": 580,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-ack-72012-shifted.json",
+      "originalSha256": "23e8d2fe7cd0c5022e51db4934b3268bc85195be5d7fe896b972ab62acedbc48",
+      "bytes": 574,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-checkpoint-72012-baseline.json",
+      "originalSha256": "5e30d18d1751dfa3735240f4869e873367ec5619cfdb124043e322ef08a6629a",
+      "bytes": 1485,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-checkpoint-72012-restored.json",
+      "originalSha256": "ccc8d44bd95e330ecb9e66097d97f80f33950d0b62f4342361fda5f8154a5efa",
+      "bytes": 1493,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/crosszone-checkpoint-72012-shifted.json",
+      "originalSha256": "e37860252a25279c10f45dc5716674b2e84edb21fb2a605f80ecfdb31e880da6",
+      "bytes": 1485,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-commit-82238.json",
+      "originalSha256": "bbd8ab876fa2e57c92700c48527282d3faaec25089db382fcd7b4d90f6093359",
+      "bytes": 28100,
+      "closedStatus": {
+        "phase": "commit",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 12,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-explain-81880.json",
+      "originalSha256": "0898420856c3631e742c200a66af24e91c8be26f86e29c851ae38ebdf728076a",
+      "bytes": 13873,
+      "closedStatus": {
+        "phase": "explain",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 9,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-deadlock-78117.json",
+      "originalSha256": "2ad2144714543743fae93001ab7064c5025933ddb14fc7b1f9295cdd68ede0a1",
+      "bytes": 34308,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-deadlock",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-duplicate-77158.json",
+      "originalSha256": "34f4ba1ee09768618273e6b98077c3b97cd47e57f150fb5b7c728aefcd100bfa",
+      "bytes": 37714,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-duplicate",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-precision-76340.json",
+      "originalSha256": "f96ef19da78aca36be7b99c63cb14b3b157d587ccb16ca1477cc92d30c9af4de",
+      "bytes": 42360,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-precision",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-text-75451.json",
+      "originalSha256": "31ff8088708b52e64553aec67cfe7b156e81c5ad0f697bef0f1b3a0510cdb2eb",
+      "bytes": 47973,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-text",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-time-73212.json",
+      "originalSha256": "ba33e24faeb5b7152b06038128baaa187f8a65b87aa28cdd9da428e9b83d2a55",
+      "bytes": 55996,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-time",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-time-crosszone-72012.json",
+      "originalSha256": "babb62352cc0a6897b4e8c3a6e1c0b039a74915c45a391b9e2c4d3bc6517d909",
+      "bytes": 43908,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-time-crosszone",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-grid-timeout-79434.json",
+      "originalSha256": "f6fc4bf863a27b0d80d710412602f42c2d3d0e348a8af206f7803517934b5de9",
+      "bytes": 40737,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-timeout",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-report.json",
+      "originalSha256": "32e9c763951fba9227f4702c51b130db4433f3320e2fc2578d53dade9ce5baf2",
+      "bytes": 6870,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 6,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-restart-81491.json",
+      "originalSha256": "33c56c63f185f430fc2c02f8c2206953e130d75da9a910e57debc253ea2b2228",
+      "bytes": 18622,
+      "closedStatus": {
+        "phase": "restart",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 9,
+        "actions": 4
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/real-ui-session-timezone-74742.json",
+      "originalSha256": "ba755835f27a3b627d6253dac13120eb197577578cf55eacd65a13bb619eade2",
+      "bytes": 28738,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "session-timezone",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/run-acceptance-summary.json",
+      "originalSha256": "9332ab4b0e051ece48a3e2e3739d98996bade01e2ed4a799f1982c9da504ef11",
+      "bytes": 77262,
+      "closedStatus": {
+        "phase": "12-phase-green-archive"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-ack-73212-applied.json",
+      "originalSha256": "c35161124b9f2c6985122d95f3cc1bc6d8d821b5e83ebe4b4cc516fcfa6fdd12",
+      "bytes": 426,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-ack-73212-baseline.json",
+      "originalSha256": "84c3f827c1419bd39eaf23a4fb48421b2bad016511587263c4bc3535843a6c31",
+      "bytes": 429,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-ack-73212-committed.json",
+      "originalSha256": "53a5927bc506f74a61594a531a3213b8563d39dec51ae2a857ba13812edd650c",
+      "bytes": 431,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-ack-73212-draft.json",
+      "originalSha256": "497720b3ad21bda2f235c637cf78c8f4bfbcd2b0910aa31698312da8eb714c01",
+      "bytes": 423,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-checkpoint-73212-applied.json",
+      "originalSha256": "a310beb78928a05618ec4a244fc9cc3d5efbb5e2f47114ffba039e3aa120d1ef",
+      "bytes": 1726,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-checkpoint-73212-baseline.json",
+      "originalSha256": "5d1d3cdaa0d2f3aeb79c74ca16968053f41d82df64c44379ea1fe4a9ceffb737",
+      "bytes": 1568,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-checkpoint-73212-committed.json",
+      "originalSha256": "26862d3bae374a2fa95ce233c898f9f3d4eebd3bb3b696cf2a20cbcf9d4ec4ed",
+      "bytes": 1730,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/time-checkpoint-73212-draft.json",
+      "originalSha256": "5d12a6a857c8fd2f242769f9e4ca9d5c83b922033d0df99b6733c58cff59289a",
+      "bytes": 1565,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/ui-grid-time-73212.json",
+      "originalSha256": "07c42977ef80d859c5f5e27103b0a3f8548824789aeefb967eb27e7ace60af07",
+      "bytes": 5040,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/ui-grid-time-crosszone-72012.json",
+      "originalSha256": "66566edb2f06728e5c82ea674ffdc2fe56b59bacb01ae5361507373e26d07e41",
+      "bytes": 3964,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-green-a4ec3e44/ui-initial.json",
+      "originalSha256": "fce1a016bfa3aa13910540db11dd5b3c2abb354a88544692ee214f1821d46292",
+      "bytes": 1709,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/crosszone-ack-37519-baseline.json",
+      "originalSha256": "9428c6811a6931dda12c4d8bd151596614121a72415d6688badb664c296930d4",
+      "bytes": 576,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/crosszone-checkpoint-37519-baseline.json",
+      "originalSha256": "d00c1511670b4a824abf1703b3b0cc480143e128e3282fa7b19d7479d1010e1a",
+      "bytes": 1487,
+      "closedStatus": {
+        "phase": "grid-time-crosszone"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/real-ui-grid-time-crosszone-37519.json",
+      "originalSha256": "b8bacba68f7f78922ec6adf26e9323a671d92ac06a0f0db1552b83efb42da8a2",
+      "bytes": 25845,
+      "closedStatus": {
+        "classification": "KNOWN_GAP_RED",
+        "phase": "grid-time-crosszone",
+        "failureCode": "DISPLAY_TYPE_MISMATCH",
+        "chainPassed": false,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/real-ui-report.json",
+      "originalSha256": "49eeaa4252fb5f23827bd55f6d223a3092930f8086b3c6af5a73be27ac28b7a8",
+      "bytes": 6871,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 6,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/summary-cbda636c.json",
+      "originalSha256": "b6235c225590dc596c0feb7402558e1ec965a11e41eca223f06189586edb12bb",
+      "bytes": 10091,
+      "closedStatus": {
+        "classification": "KNOWN_GAP_RED",
+        "phase": "grid-time-crosszone",
+        "failureCode": "DISPLAY_TYPE_MISMATCH",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/ui-grid-time-crosszone-37519.json",
+      "originalSha256": "ae6f6c855bb8443d5410b5600b597f4e2f73213e40124a7cec33030ca909902a",
+      "bytes": 2473,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-crosszone-red-cbda636c/ui-initial.json",
+      "originalSha256": "c2315e14fd82f22d45eab1710d3592b18e0c72338cad7aff93c6aa6f57cd597c",
+      "bytes": 1710,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-39706ad4-joint.json",
+      "originalSha256": "7ad972fdaea4c903b29ea406a01dbcc754550ab4e2d5eca8f1b2bc47c74e8b5e",
+      "bytes": 343,
+      "closedStatus": {
+        "phase": "initial",
+        "failureCode": "JOINT_VALIDATION_FAILED",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-39706ad4-ui.json",
+      "originalSha256": "37c9741b2da9d2fdfa934f3f0da3fed3e2b946781ed2a597474e39916366dfb0",
+      "bytes": 1705,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-39706ad4-v2.json",
+      "originalSha256": "8ab311fd73f0b0978574565a6e044dbe1965b9a2a6456804304f95e25c0b9c94",
+      "bytes": 6794,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-39706ad4.json",
+      "originalSha256": "c7d734cd59c3e084efdedb506adb3bdb6f9859308dc5a71a5293f1387eeaa68a",
+      "bytes": 6192,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd-joint.json",
+      "originalSha256": "28a24ef7dd74bfb80243899dd4dcd943f76ed612f48079ec42c314c2619b28ea",
+      "bytes": 343,
+      "closedStatus": {
+        "phase": "initial",
+        "failureCode": "JOINT_VALIDATION_FAILED",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd-trace.jsonl",
+      "originalSha256": "94dd78a89ed7ff1b4ec6e2a391cf10ae5c98a1f68ab389b05da1e294a6175446",
+      "bytes": 3851,
+      "closedStatus": {
+        "stage": "native_returned"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd-ui.json",
+      "originalSha256": "b90269b04e51162173636c43df35986e0cf8dd286a10af3d3968d2defd9dc989",
+      "bytes": 1709,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd-v2.json",
+      "originalSha256": "f0d6442cf51ea98533e88d9913045eae06b67a5a9f779f3004b398f68ed2b497",
+      "bytes": 12573,
+      "closedStatus": {
+        "phase": "initial"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd-v3.json",
+      "originalSha256": "9cce5c64db20f007823f263d7b9cb287f07e92108d51ec99d076059b54320ca4",
+      "bytes": 16950,
+      "closedStatus": {
+        "phase": "initial"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-48a263fd.json",
+      "originalSha256": "379cded241bd20285ebae2032a373635bd9da2bbd4507f0332b1e4462f575898",
+      "bytes": 10004,
+      "closedStatus": {
+        "phase": "initial"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-72cd873a-joint.json",
+      "originalSha256": "4089a91d0684e9c7f7766d70cc5e2d1e73a07245f52bac0096442b6a9c545c0f",
+      "bytes": 343,
+      "closedStatus": {
+        "phase": "initial",
+        "failureCode": "JOINT_VALIDATION_FAILED",
+        "chainPassed": false,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-72cd873a-trace.jsonl",
+      "originalSha256": "b822b65a368d88a6cc22223ee3f30964ef1af344c79827b02d184870803815bf",
+      "bytes": 3934,
+      "closedStatus": {
+        "stage": "native_returned"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-72cd873a-ui.json",
+      "originalSha256": "52dbc46087be993b64775802c9f285a4d50e60e56a4ee2eae23d82c72ece952d",
+      "bytes": 1709,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-initial-failure-72cd873a.json",
+      "originalSha256": "2c144152b5ca24f8dd0dc511718fe9670206030dd0047586f9bebcf596f14299",
+      "bytes": 14839,
+      "closedStatus": {
+        "classification": "numeric-platform-initial-red",
+        "phase": "initial"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-5c919f79.json",
+      "originalSha256": "959b8977ec456501043431efac13da29096721ea41bfe0207f29ef782a96710c",
+      "bytes": 12886,
+      "closedStatus": {
+        "classification": "KNOWN_GAP_RED",
+        "failureCode": "BASELINE_MISMATCH",
+        "materialsPreserved": true
+      },
+      "counts": {
+        "actions": 4
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-ack-4227-baseline.json",
+      "originalSha256": "138b7aab859563ec875930c539c811355759ca1c4f38b09ce76941b6303399c0",
+      "bytes": 429,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-checkpoint-4227-baseline.json",
+      "originalSha256": "3c50541f83572db11b4429ced556adc55b3977576afbf126c297931bfccf2eb8",
+      "bytes": 1567,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-initial-5c919f79.json",
+      "originalSha256": "81c907243288b922043cb218df3bbe8fdf45c3577992a4617a6471b6c206be26",
+      "bytes": 6866,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 6,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-initial-ui-5c919f79.json",
+      "originalSha256": "c2d3f8299e3997b38044aeb00ee99386ab45683b7bb854284fa8a184efa29c3e",
+      "bytes": 1705,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-joint-4227.json",
+      "originalSha256": "0d1bebdad3103fce8ff591b9ab0617d35cfb0f4da249839354c2cf4a65e9cc3b",
+      "bytes": 28649,
+      "closedStatus": {
+        "classification": "KNOWN_GAP_RED",
+        "phase": "grid-time",
+        "failureCode": "BASELINE_MISMATCH",
+        "chainPassed": false,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-red-ui-4227.json",
+      "originalSha256": "4339e55ece342148902869483117bf1c6e76fda7c7012316f8c678d136a16e38",
+      "bytes": 2628,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/archive-summary.json",
+      "originalSha256": "1f7ffa0b3378561457c61aa131750a3c33d792aada0768abb89b82f8604a1c2b",
+      "bytes": 67866,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-time",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-commit-61289.json",
+      "originalSha256": "f1cc24ecc414e4992fa05487b4bb8db3ed1876c6fe73bd74a2c103b8eb604f40",
+      "bytes": 28100,
+      "closedStatus": {
+        "phase": "commit",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 12,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-explain-60930.json",
+      "originalSha256": "8574a4fea08609845a4dbdeacd9e5a79b44955db0e79c49ca2ec2b7a57bad984",
+      "bytes": 13873,
+      "closedStatus": {
+        "phase": "explain",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 9,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-deadlock-57124.json",
+      "originalSha256": "b93381ff45c02beba26a2756848fcc0b1396814b7c1f9b6b2d8c2236f9712df4",
+      "bytes": 34311,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-deadlock",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-duplicate-56139.json",
+      "originalSha256": "7ba5f0a2e928fbbc064f8321402bd946edbd890e15346031a9d629a628fa57ad",
+      "bytes": 37717,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-duplicate",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-precision-55319.json",
+      "originalSha256": "24cda3d19a4326384bb5b50812cccd309480bbb7aa36b3317b2b8ea4593a6a12",
+      "bytes": 42366,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-precision",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-text-54412.json",
+      "originalSha256": "d9cee1f2c2e44eda9787c1ed4ac9899b58e00f29042e72067d156a41e5490a95",
+      "bytes": 47979,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-text",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-time-80849.json",
+      "originalSha256": "3a6d2faff6aa30adfabfd9a3e8b39515469ff54e07ffb44d6d56f3b6239ecd8e",
+      "bytes": 55974,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-time",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-grid-timeout-58438.json",
+      "originalSha256": "20153a695f7d38c1448141d75f9a419402e1d990b93bea6c845778f72232e2f2",
+      "bytes": 40743,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "grid-timeout",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-report.json",
+      "originalSha256": "07a9b51f8ace7d090d9ce75ea82d137288eab14bd27582a0379da3540b0de060",
+      "bytes": 6870,
+      "closedStatus": {
+        "phase": "initial",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 6,
+        "actions": 3
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-restart-60533.json",
+      "originalSha256": "63ffcd151664894d9e58acb4ddfcb9602ff0aad07573ab7fd091d8b5314ed5ea",
+      "bytes": 18623,
+      "closedStatus": {
+        "phase": "restart",
+        "chainPassed": true,
+        "productionReady": false
+      },
+      "counts": {
+        "checks": 9,
+        "actions": 4
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/real-ui-session-timezone-53641.json",
+      "originalSha256": "7aaaaa1687032d41ec978d4b6c72f4f8e5239b29a03c461651ae486d8350d5aa",
+      "bytes": 28751,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "phase": "session-timezone",
+        "failureCode": "NONE",
+        "chainPassed": true,
+        "productionReady": false,
+        "materialsPreserved": true
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/run-acceptance-summary.json",
+      "originalSha256": "80236c43eca5d1c8dcf4b78b5acb9cd742cc46401f9630ec9b665de820ddec26",
+      "bytes": 37678,
+      "closedStatus": {
+        "classification": "VERIFIED",
+        "chainPassed": true,
+        "productionReady": false
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-ack-80849-applied.json",
+      "originalSha256": "a3f913c91c79f6164ba4c337eb9fc14b96578d24dc0c5ce8de44cf35b52f8026",
+      "bytes": 425,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-ack-80849-baseline.json",
+      "originalSha256": "46964f040b1673595afe035b71acd510f7f99439568a85bb3f47995c082ad9a5",
+      "bytes": 428,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-ack-80849-committed.json",
+      "originalSha256": "787d89a56426e15eed5c78f107965a5b6a2e1b7a0838e6b0d25456ee77cc29b2",
+      "bytes": 430,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-ack-80849-draft.json",
+      "originalSha256": "48c564ba1480c4a9f9310c630d66269ec71f7ef69ad9e7216f11bc9f2f360c92",
+      "bytes": 422,
+      "closedStatus": {
+        "phase": "grid-time"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-checkpoint-80849-applied.json",
+      "originalSha256": "be02c8c11367b3ec0689b03078ad873e65256a8a2bffe74167a597327945106c",
+      "bytes": 1724,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-checkpoint-80849-baseline.json",
+      "originalSha256": "c70e07e52216f918ac11a7d25bf2b4415c2c7e2d9f3d30a1017424057cde52cd",
+      "bytes": 1566,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-checkpoint-80849-committed.json",
+      "originalSha256": "b55b290fa14698217c510de7a706b531f8744284050c30bc8729c0c86cdce189",
+      "bytes": 1728,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/time-checkpoint-80849-draft.json",
+      "originalSha256": "00e6a80d45a6a94faa033b1ce40257fad4535be84549238fa31f92fc2feb6fb0",
+      "bytes": 1563,
+      "closedStatus": {
+        "phase": "grid-time"
+      },
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/ui-grid-time-80849.json",
+      "originalSha256": "518b840292c01ddf14dc538083ca8898cc2198145f525364fc53bd1aacdc1fe8",
+      "bytes": 5035,
+      "counts": {
+        "observations": 11
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-run-dd2a16a1/ui-initial.json",
+      "originalSha256": "e440815c15d75d34fe36c21e9f1f3541d0b5524d2f891386c963a8b956cb51b3",
+      "bytes": 1709,
+      "counts": {
+        "observations": 10
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/gui-time-source-diff-e7-to-9f09.json",
+      "originalSha256": "4a5d5026183541fcc12305b19404ea060ad00facc18c98f6b85786fa36edd581",
+      "bytes": 8083
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/transaction-summary-e83b5c0a.json",
+      "originalSha256": "3e4d2f4bd4fa84c9d415156f41a5230545dacf2b238d538051c4869696875cc0",
+      "bytes": 2481,
+      "closedStatus": {
+        "status": "NATIVE_BASELINE_ALL_GREEN"
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/unit-time-metadata-bfda08a0/unit-green-report.json",
+      "originalSha256": "ada264390e3dc5748c15a2e7918472125a56d2900f7f7c785607c14d0cb0ee6c",
+      "bytes": 3136,
+      "closedStatus": {
+        "phase": "GREEN",
+        "exitCode": 0
+      }
+    },
+    {
+      "repoRelativeName": "docs/support/mysql-parity/evidence/unit-time-metadata-bfda08a0/unit-red-report.json",
+      "originalSha256": "567fc0acef9e338bc183ef6a24dd850a1f9d949be795c2808ae6465c0b3342e2",
+      "bytes": 3309,
+      "closedStatus": {
+        "phase": "RED",
+        "exitCode": 101
+      }
+    }
+  ]
+}

@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "scope": "session-timezone-single-driver-red-green-and-ten-phase-real-gui",
+  "runId": "bd5d67d98fac4a1a8cc7b4aaf95d0719",
+  "chainPassed": true,
+  "productionReady": false,
+  "typedTemporalGridVerified": false,
+  "fullTypeMatrixVerified": false,
+  "osTrustedInputVerified": false,
+  "referenceApplicationsOperated": false,
+  "hostTestsVerified": 105,
+  "oldHostTests": 97,
+  "newHostTests": 8,
+  "separateDriverParserTestsVerified": 3,
+  "directSourceFiles": 22,
+  "commonSixProvenance": {
+    "runnerSourceSha256": "8b907711fd26c45675700012d0b10e340b283b2f8d6ea203e861ed001e55ace9",
+    "fixturePinSha256": "098cd7f5748195547190c3fd1acd2dcbb0f505ec8082672186fb1506f54ad5e2",
+    "artifactReceiptSha256": "ffd276214ce17c5d9916a24471bb8660bf4e4f3268696e7cee0fbadaf55f92c4",
+    "binarySha256": "061f7a800b49d44b43daf182426afd96419e247b3c162d2e3e957a545ce6a3d5",
+    "frontendIndexSha256": "eea3abdbaa237ba0afc58bb5bef902e8d3cf58e35e748034677d3a0beda6ffbe",
+    "frontendAssetsSha256": "30b60bec74fefe2c52713b7300b813879634fd0eaa696dc2c2f4b467d0659f32"
+  },
+  "initialMaterialPins": {
+    "hostManifestSha256": "278b1190684be74d9d9cc930d092d33cc23dbf89136aa937b52c0d1096a8253b",
+    "initialReportSha256": "adf0309da768751033bb00326c804d12ee5694534db3e881909ce4a0179bd0c6",
+    "initialUiSha256": "5854f815b992eda0fdef3e00ca6bd1baba9d523f5f93a066c18565b8e50812d5",
+    "failedRestartSha256": null
+  },
+  "source": {
+    "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+    "files": {
+      "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+      "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+      "apps/desktop/src/mysql-parity-dom.ts": "a8d01b3eb72366ce8344a9c5d156779d913ba76ef697ab6cf64c47db257002f1",
+      "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+      "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+      "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+      "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+      "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+      "src-tauri/src/lib.rs": "7f39d705e692570f41909928708244ef8f0b489b5cf66d03194facdd4337912e",
+      "src-tauri/src/mysql_acceptance.rs": "a8b62fe09e0308776b1ce8a2465f661853e73f86a8dfe3cfbc4ebbe2e776022e",
+      "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+      "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+      "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+      "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+      "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+      "scripts/build-mysql-acceptance.mjs": "41e568a96c82db8cd9774ef71e07d823d646dd22460850e85cda594b8a26028d",
+      "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+      "crates/dbstudio-drivers/src/mysql.rs": "e7f4ff301cbc8af22a10e1e1ae348a513652f33f572a37ed019e331c5506a4b2",
+      "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534",
+      "apps/desktop/src/components/CellViewer.vue": "ad42a8e0dfe07b381b82828a2586cd39adf4be130ba00eae643e829df1415328",
+      "apps/desktop/src/result-export.ts": "3b1fa77567f320cf6076c37fb0ef47d23a9e6a92118dca24197666c5596d4331",
+      "crates/dbstudio-drivers/src/network.rs": "fb058fe9f1bf6ff516030f93fe08c9df08addd8cd4409f0501bd9681ddbf04b3"
+    },
+    "diffSha256": "73eea08356aa391c21eef4410ca59df9e86d513017e380b7bf22e935d9d7ccf4",
+    "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+  },
+  "phases": [
+    {
+      "phase": "initial",
+      "pid": null,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-initial-bd5d67d9.json",
+      "sourceSha256": "adf0309da768751033bb00326c804d12ee5694534db3e881909ce4a0179bd0c6"
+    },
+    {
+      "phase": "session-timezone",
+      "pid": 7142,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-joint-7142.json",
+      "sourceSha256": "8600023b5e3afa8029c54504395ce6f9e9caf68a9af73bed41943ff963b1d5ae"
+    },
+    {
+      "phase": "grid-text",
+      "pid": 8843,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-text-8843.json",
+      "sourceSha256": "252eb0aaa1ea7bda366a3af54ae2311bd07128d9705897c61525a3536fa9fb3e"
+    },
+    {
+      "phase": "grid-precision",
+      "pid": 9761,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-precision-9761.json",
+      "sourceSha256": "2be7eca9b7451f35dffddb860e1152a07b171c9348be537ac4e3ffa56ab84282"
+    },
+    {
+      "phase": "grid-duplicate",
+      "pid": 10599,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-duplicate-10599.json",
+      "sourceSha256": "646333dd18705be1cdd8b06176fd9985d03793580e16cc56db023dfe5f1709b8"
+    },
+    {
+      "phase": "grid-deadlock",
+      "pid": 11553,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-deadlock-11553.json",
+      "sourceSha256": "86c6f3f36cc3390d79dcde534487763a015734ffb58713d758e454a182da2c46"
+    },
+    {
+      "phase": "grid-timeout",
+      "pid": 12873,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-timeout-12873.json",
+      "sourceSha256": "0139eed07a5a76284e0106f65b1bbdaec2021f23ceef439cad77e4fd484560e5"
+    },
+    {
+      "phase": "restart",
+      "pid": 14926,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-restart-14926.json",
+      "sourceSha256": "64598e05772035b7c3b611a12d4dd20939a7a5d318a4f79af83e8b7d86fc8d52"
+    },
+    {
+      "phase": "explain",
+      "pid": 15307,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-explain-15307.json",
+      "sourceSha256": "bf3759b6a4ce321d3c8c8e2c309b45ecba16a0120804480cec9a1247c6536103"
+    },
+    {
+      "phase": "commit",
+      "pid": 15701,
+      "chainPassed": true,
+      "exitCode": 0,
+      "sourceFile": "gui-session-timezone-commit-15701.json",
+      "sourceSha256": "f6ed14af13e7f9c668d4a7a5c15645adeb9fb12def4885518331b9783399f5c2"
+    }
+  ],
+  "sessionTimezone": {
+    "proof": {
+      "rowCount": 1,
+      "baseline": {
+        "connectionId": 317,
+        "sessionTimezone": "+00:00",
+        "systemTimezone": "UTC",
+        "autocommit": true,
+        "epochText": "1709210096.123456",
+        "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+        "setFailed": false,
+        "uiActive": false,
+        "uiPendingAffected": 0
+      },
+      "offset": {
+        "connectionId": 317,
+        "sessionTimezone": "+08:00",
+        "systemTimezone": "UTC",
+        "autocommit": true,
+        "epochText": "1709181296.123456",
+        "projectionSha256": "823c8f123997f692b211521adef69d29aad43249758ffe97b3abb2b20e5a2077",
+        "setFailed": false,
+        "uiActive": false,
+        "uiPendingAffected": 0
+      },
+      "restored": {
+        "connectionId": 317,
+        "sessionTimezone": "+00:00",
+        "systemTimezone": "UTC",
+        "autocommit": true,
+        "epochText": "1709210096.123456",
+        "projectionSha256": "9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89",
+        "setFailed": false,
+        "uiActive": false,
+        "uiPendingAffected": 0
+      }
+    },
+    "checks": {
+      "storage_marker": true,
+      "persisted_connection": true,
+      "credential_reconnect": true,
+      "baseline_observed": true,
+      "offset_set": true,
+      "offset_readback": true,
+      "restored_set": true,
+      "restored_readback": true,
+      "same_connection": true,
+      "transaction_unchanged": true
+    },
+    "actions": {
+      "click": 7,
+      "input": 5,
+      "keydown": 0,
+      "dblclick": 0
+    },
+    "elapsedWithObserversMs": 2594,
+    "native": {
+      "scope": "test-host-observation-only",
+      "runId": "bd5d67d98fac4a1a8cc7b4aaf95d0719",
+      "phase": "session-timezone",
+      "methods": {
+        "connectConnection": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 42
+        },
+        "executeStatement": {
+          "success": 5,
+          "failure": 0,
+          "totalElapsedMs": 46
+        },
+        "listChildren": {
+          "success": 2,
+          "failure": 0,
+          "totalElapsedMs": 58
+        },
+        "listConnections": {
+          "success": 2,
+          "failure": 0,
+          "totalElapsedMs": 52
+        },
+        "listDialects": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 13
+        },
+        "migrationStatus": {
+          "success": 1,
+          "failure": 0,
+          "totalElapsedMs": 6
+        },
+        "recordSqlHistory": {
+          "success": 5,
+          "failure": 0,
+          "totalElapsedMs": 61
+        },
+        "transactionState": {
+          "success": 5,
+          "failure": 0,
+          "totalElapsedMs": 35
+        }
+      },
+      "keyringGets": 6,
+      "keyringHits": 6,
+      "keyringSets": 0,
+      "guiVerified": false,
+      "mysqlVerified": false,
+      "storePersistenceVerified": false,
+      "sessionTimezone": {
+        "lastObservedTransactionState": {
+          "active": false,
+          "pendingAffected": 0
+        }
+      }
+    },
+    "oracle": {
+      "globalTimezone": "+00:00",
+      "globalAutocommit": true,
+      "baseline": [
+        "+00:00",
+        "UTC",
+        "1",
+        "1709210096.123456"
+      ],
+      "offset": [
+        "+08:00",
+        "UTC",
+        "1",
+        "1709181296.123456"
+      ],
+      "restored": [
+        "+00:00",
+        "UTC",
+        "1",
+        "1709210096.123456"
+      ],
+      "readOnly": true,
+      "offsetSetVerified": true,
+      "restoreSetVerified": true
+    },
+    "comparisons": [
+      {
+        "sessionVariableMatches": true,
+        "systemVariableMatches": true,
+        "autocommitVariableMatches": true,
+        "epochMatchesKnownOffset": true,
+        "knownOffset": true
+      },
+      {
+        "sessionVariableMatches": true,
+        "systemVariableMatches": true,
+        "autocommitVariableMatches": true,
+        "epochMatchesKnownOffset": true,
+        "knownOffset": true
+      },
+      {
+        "sessionVariableMatches": true,
+        "systemVariableMatches": true,
+        "autocommitVariableMatches": true,
+        "epochMatchesKnownOffset": true,
+        "knownOffset": true
+      }
+    ],
+    "finalSessionCleanup": {
+      "knownConnectionIds": [
+        317
+      ],
+      "threadCount": 0,
+      "transactionCount": 0,
+      "ended": true
+    }
+  },
+  "redGreen": {
+    "redSummary": "gui-session-timezone-red-59ba845c.json",
+    "redSummarySha256": "2c2043bff85ceecaab4cd8e4ed4760cff449c449f3a3a186e5acc25cabb675aa",
+    "redClassification": "KNOWN_GAP_RED",
+    "redFailure": "SET_REJECTED",
+    "redPid": 81965,
+    "greenPid": 7142,
+    "changedBusinessSourceFiles": [
+      "crates/dbstudio-drivers/src/mysql.rs"
+    ],
+    "driverBeforeSha256": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+    "driverAfterSha256": "e7f4ff301cbc8af22a10e1e1ae348a513652f33f572a37ed019e331c5506a4b2",
+    "allOther21DirectSourcesIdentical": true,
+    "runnerIdentical": true,
+    "harnessFiveSourcesIdentical": true
+  },
+  "rawFileSha256": {
+    "gui-session-timezone-initial-bd5d67d9.json": "adf0309da768751033bb00326c804d12ee5694534db3e881909ce4a0179bd0c6",
+    "gui-session-timezone-joint-7142.json": "8600023b5e3afa8029c54504395ce6f9e9caf68a9af73bed41943ff963b1d5ae",
+    "gui-session-timezone-text-8843.json": "252eb0aaa1ea7bda366a3af54ae2311bd07128d9705897c61525a3536fa9fb3e",
+    "gui-session-timezone-precision-9761.json": "2be7eca9b7451f35dffddb860e1152a07b171c9348be537ac4e3ffa56ab84282",
+    "gui-session-timezone-duplicate-10599.json": "646333dd18705be1cdd8b06176fd9985d03793580e16cc56db023dfe5f1709b8",
+    "gui-session-timezone-deadlock-11553.json": "86c6f3f36cc3390d79dcde534487763a015734ffb58713d758e454a182da2c46",
+    "gui-session-timezone-timeout-12873.json": "0139eed07a5a76284e0106f65b1bbdaec2021f23ceef439cad77e4fd484560e5",
+    "gui-session-timezone-restart-14926.json": "64598e05772035b7c3b611a12d4dd20939a7a5d318a4f79af83e8b7d86fc8d52",
+    "gui-session-timezone-explain-15307.json": "bf3759b6a4ce321d3c8c8e2c309b45ecba16a0120804480cec9a1247c6536103",
+    "gui-session-timezone-commit-15701.json": "f6ed14af13e7f9c668d4a7a5c15645adeb9fb12def4885518331b9783399f5c2",
+    "gui-session-timezone-initial-ui-bd5d67d9.json": "5854f815b992eda0fdef3e00ca6bd1baba9d523f5f93a066c18565b8e50812d5",
+    "gui-session-timezone-ui-7142.json": "0c893dcec33173d75b4b68b2f130bae704a8baf5714753753d14151d71056eb6",
+    "gui-session-timezone-checkpoint-7142-baseline.json": "040ac38fc2923d75e435b4cb27a3afb29cf65ad2eadcd14a7b17d86704683cc4",
+    "gui-session-timezone-ack-7142-baseline.json": "c6ac94012de17e620093ca0fb58ddd5047bd4f64acbd240067fdcc12d8cbaaa3",
+    "gui-session-timezone-checkpoint-7142-offset.json": "a74bb62ed91fb3382f4082b3cae68d88021d1e97f12d0db4ac456cec54d28673",
+    "gui-session-timezone-ack-7142-offset.json": "e045f85c95510e60c8b4d8c57271731e0df7e961a0202baa576a3e23f10b94a6",
+    "gui-session-timezone-checkpoint-7142-restored.json": "e8c60852b4c2638c34e4a882f6ae25f822db7f41774051c5db259992ce803bd1",
+    "gui-session-timezone-ack-7142-restored.json": "505d5dde1f92101d3275038f57034e54f054e25fc716337e662ac29aeafd4176"
+  },
+  "limitations": [
+    "explicit static SESSION timezone offset literal only",
+    "no typed temporal grid, active transaction SET, named timezone, invalid offset or other SET parity claim",
+    "no OS trusted, performance, soak, reference app, MySQL8.4, Windows, cross-build or TLS-full claim"
+  ]
+}
