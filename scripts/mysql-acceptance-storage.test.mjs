@@ -18,7 +18,7 @@ const NODE = process.execPath
 const PYTHON = '/usr/bin/python3'
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixtureRoot = join(project, 'backups', `mysql-acceptance-storage-tests-${randomUUID()}`)
-mkdirSync(fixtureRoot, { mode: 0o700 })
+mkdirSync(fixtureRoot, { recursive: true, mode: 0o700 })
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
 
 const HEAVY_STAGES = ['host-negative-and-contract-tests', 'sqlite-smoke-cfg-compile-only', 'debug-test-artifact']
