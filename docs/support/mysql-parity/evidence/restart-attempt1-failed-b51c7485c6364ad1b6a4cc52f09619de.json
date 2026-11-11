@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-restart-edit-real-ui-chain",
+  "runId": "b51c7485c6364ad1b6a4cc52f09619de",
+  "phase": "restart",
+  "chainPassed": false,
+  "productionReady": false,
+  "failureCode": "JOINT_VALIDATION_FAILED",
+  "finalObserverVerified": true,
+  "lifecycle": {
+    "exitCode": null,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": true
+  }
+}

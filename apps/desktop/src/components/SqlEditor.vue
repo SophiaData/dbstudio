@@ -95,13 +95,23 @@ async function acceptCompletion(index = completionIndex.value) {
   await nextTick(); editor.value.focus(); editor.value.setSelectionRange(next, next); caret.value = next
 }
 function keydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault()
+    completionOpen.value = false
+    execute(event.shiftKey)
+    return
+  }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && event.key === 'Enter') {
+    event.preventDefault()
+    completionOpen.value = false
+    execute(true)
+    return
+  }
   if (completionOpen.value) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); completionIndex.value = (completionIndex.value + (event.key === 'ArrowDown' ? 1 : -1) + Math.max(1, candidates.value.length)) % Math.max(1, candidates.value.length); return }
     if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); void acceptCompletion(); return }
     if (event.key === 'Escape') { event.preventDefault(); completionOpen.value = false; return }
   }
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); execute(event.shiftKey); return }
-  if (!event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && event.key === 'Enter') { event.preventDefault(); execute(true); return }
   if (event.shiftKey && event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); void format(); return }
   if ((event.ctrlKey || event.metaKey) && event.code === 'Space') { event.preventDefault(); updateCaret(); completionIndex.value = 0; completionOpen.value = true; return }
   if (event.key === 'Tab') {

@@ -39,6 +39,8 @@ jobs:
         run: brew install pkg-config openssl@3 libssh2
       - name: Install locked frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Test MySQL acceptance storage regressions
+        run: node --test scripts/mysql-acceptance-storage.test.mjs
       - name: Check native architecture boundaries
         run: pnpm test:native-architecture
       - name: Test native candidate integrity and tamper rejection

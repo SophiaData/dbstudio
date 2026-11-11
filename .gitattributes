@@ -1,0 +1,4 @@
+# Preserve recorded acceptance evidence bytes and SHA-256 values.
+docs/support/acceptance/v0.8.1/** -text
+docs/support/acceptance/v0.8.1/performance.csv whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+docs/support/mysql-parity/evidence/** -text

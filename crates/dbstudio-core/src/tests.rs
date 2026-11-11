@@ -99,6 +99,67 @@ fn disconnect_invalidates_result_and_native_cursor_generation() {
     app.close().unwrap();
 }
 
+#[test]
+fn mysql_deadlock_error_redaction_is_exact_and_closed() {
+    let exact = "MySQL操作失败(SQLSTATE 40001, code 1213)";
+    let generic = "数据库操作失败，请检查连接或查询配置";
+    let cases = [
+        ("mysql", "driver-error", exact, "driver-error", exact),
+        ("postgresql", "driver-error", exact, "driver-failed", generic),
+        ("sqlite", "driver-error", exact, "driver-failed", generic),
+        ("mariadb", "driver-error", exact, "driver-failed", generic),
+        ("mysql", "network", exact, "driver-failed", generic),
+        ("mysql", "driver-failed", exact, "driver-failed", generic),
+        ("mysql", "unsupported", exact, "unsupported", "当前驱动不支持此操作"),
+        ("mysql", "cancelled", exact, "cancelled", "操作已取消"),
+        ("mysql", "driver-error", " MySQL操作失败(SQLSTATE 40001, code 1213)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 40001, code 1213) ", "driver-failed", generic),
+        ("mysql", "driver-error", "\nMySQL操作失败(SQLSTATE 40001, code 1213)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 40001, code 1213)\n", "driver-failed", generic),
+        ("mysql", "driver-error", "synthetic-query[MySQL操作失败(SQLSTATE 40001, code 1213)]synthetic-private", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 40001, code 1213) synthetic-private", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE HY000, code 1213)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 40001, code 1062)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 23000, code 1062)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE HY000, code 1205)", "driver-failed", generic),
+        ("mysql", "driver-error", "MySQL操作失败(SQLSTATE 42S22, code 1054)", "driver-failed", generic),
+    ];
+    for (dialect, code, message, expected_code, expected_message) in cases {
+        let actual = safe_driver_error(dialect, AppError::new(code, message));
+        assert_eq!(actual.code, expected_code); assert_eq!(actual.message, expected_message);
+    }
+    let unchanged_default = safe_error(AppError::new("driver-error", exact));
+    assert_eq!(unchanged_default.code, "driver-failed"); assert_eq!(unchanged_default.message, generic);
+}
+#[test]
+fn mysql_deadlock_error_redaction_binds_actual_session_driver() {
+    struct ErrorDriver { dialect: &'static str }
+    impl Driver for ErrorDriver {
+        fn dialect_id(&self) -> &str { self.dialect }
+        fn capabilities(&self) -> Value { json!({}) }
+        fn cancel_handle(&self) -> CancelHandle { Arc::new(|| Ok(false)) }
+        fn call(&mut self, _: &str, _: Vec<Value>) -> DriverResult<Value> {
+            Err(AppError::new("driver-error", "MySQL操作失败(SQLSTATE 40001, code 1213)"))
+        }
+        fn disconnect(&mut self) -> DriverResult<()> { Ok(()) }
+    }
+    let (app, _, _) = fixture();
+    let id = Uuid::new_v4().to_string();
+    for dialect in ["mysql", "postgresql", "sqlite"] {
+        let session = Session::new(id.clone(), Box::new(ErrorDriver { dialect }));
+        lock(&app.state).unwrap().sessions.insert(id.clone(), session);
+        // A claimed SQL/argument dialect must not override the actual Session driver dialect.
+        let claimed = if dialect == "mysql" { "sqlite" } else { "mysql" };
+        let actual = app.driver_call(&format!("connection:{id}"), "applyEdits", vec![json!({"dialectId":claimed})]).unwrap_err();
+        if dialect == "mysql" {
+            assert_eq!(actual.code, "driver-error"); assert_eq!(actual.message, "MySQL操作失败(SQLSTATE 40001, code 1213)");
+        } else {
+            assert_eq!(actual.code, "driver-failed"); assert_eq!(actual.message, "数据库操作失败，请检查连接或查询配置");
+        }
+    }
+    app.close().unwrap();
+}
+
 struct UnavailableSecrets;
 impl SecretStore for UnavailableSecrets {
     fn get(&self, _: &str) -> Result<Option<SecretMap>, AppError> { Err(AppError::new("secret-storage-unavailable", "synthetic-secret-provider-detail")) }

@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-initial-real-ui-chain",
+  "runId": "b51c7485c6364ad1b6a4cc52f09619de",
+  "phase": "initial",
+  "actionDriver": "native-dom-synthetic",
+  "chainPassed": true,
+  "productionReady": false,
+  "osTrustedKeyboardVerified": false,
+  "restartVerified": false,
+  "soakVerified": false,
+  "referenceProductOperated": false,
+  "mysql84Verified": false,
+  "windowsVerified": false,
+  "checks": {
+    "storage_preflight": true,
+    "connection_form": true,
+    "sql_select41": true,
+    "page_first": true,
+    "page_next": true,
+    "page_back": true
+  },
+  "pages": {
+    "first": {
+      "offset": 0,
+      "count": 200,
+      "firstId": 1,
+      "lastId": 200,
+      "idsSha256": "2066223c021d5fe0c60e02fcc68bfe6f618de108f9e5afc21200d86b620c305b",
+      "visibleMs": 93
+    },
+    "next": {
+      "offset": 200,
+      "count": 200,
+      "firstId": 201,
+      "lastId": 400,
+      "idsSha256": "eb5d75f1a3f6a828c4aa24b5b45cc2c0d2deab3fa8257063fa6377401c0e58c6",
+      "visibleMs": 44
+    },
+    "back": {
+      "offset": 0,
+      "count": 200,
+      "firstId": 1,
+      "lastId": 200,
+      "idsSha256": "2066223c021d5fe0c60e02fcc68bfe6f618de108f9e5afc21200d86b620c305b",
+      "visibleMs": 41
+    }
+  },
+  "actions": {
+    "click": 7,
+    "input": 9,
+    "keydown": 0
+  },
+  "elapsedMs": 502,
+  "native": {
+    "scope": "test-host-observation-only",
+    "runId": "b51c7485c6364ad1b6a4cc52f09619de",
+    "phase": "initial",
+    "methods": {
+      "addConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 62
+      },
+      "executeStatement": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 24
+      },
+      "fetchResultPage": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 13
+      },
+      "listChildren": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 6
+      },
+      "listConnections": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 4
+      },
+      "listDialects": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 1
+      },
+      "migrationStatus": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 0
+      },
+      "recordSqlHistory": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 10
+      },
+      "testConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 39
+      },
+      "transactionState": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 0
+      }
+    },
+    "keyringGets": 4,
+    "keyringHits": 4,
+    "keyringSets": 1,
+    "guiVerified": false,
+    "mysqlVerified": false,
+    "storePersistenceVerified": false
+  },
+  "observer": {
+    "counts": {
+      "paging": 805,
+      "precision": 1,
+      "composite": 2,
+      "import": 0
+    },
+    "autocommit": true,
+    "readOnly": true,
+    "precisionChecks": 11,
+    "pagingChecks": 9,
+    "independentConnections": 3
+  },
+  "lifecycle": {
+    "exitCode": 0,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": false
+  },
+  "provenance": {
+    "manifestSha256": "ad80c6250022db8bb165c76d0955727624bf2c41ed9ab9dae6153b88ea6833a9",
+    "containerId": "e5db8a8460a876df9cb2b9b89b2978772ab6366c74765fa7b0c997bb3ab63d46",
+    "imageSha256": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+    "fixtureSourceSha256": "e85026e9bc6ed87ba0ce38118a60ad3575b878fcee08a424f9ee0d9694b00ae2",
+    "binarySha256": "7b8f92b25fd8077a614fa5ef70dc01fd60457b7c2aea5d7bfa5e4d91a2bbabb3",
+    "frontendIndexSha256": "5897b613a94c314bba10cf01d66f7b1802d1f4bf0242d1a4a93f1a26f6356c6f",
+    "frontendAssetsSha256": "c873f4fd12f0df338e764739500faa543e70ba17569ad16bfcf621391c40bda7",
+    "source": {
+      "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+      "files": {
+        "apps/desktop/src/main.ts": "385eac811e3206a2d8f3793c8f2115cded53e3987b66a01ef0727ad133ab9b7b",
+        "apps/desktop/src/App.vue": "6b8d51c497661b54f2e8bc26191c5c3acb0c9d0d41779c08f02bc0955e8f72cd",
+        "apps/desktop/src/mysql-parity-dom.ts": "5d85b66387db7eb8ca9b741634bc470bfe617a25b9bd2574101e520221478516",
+        "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+        "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+        "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+        "apps/desktop/src/workbench.ts": "635b020785663ceea26cb31433549dfd435ebc4e44b94cc55967667ab33e2428",
+        "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+        "src-tauri/src/lib.rs": "d5506254902f32a652f5028b148aa84fe45cc8ee12ae4a9d63703164b6e0b18d",
+        "src-tauri/src/mysql_acceptance.rs": "d970497a4de5f15d123a69602c4c04f0663286ef22ba14fc837b0a51f4ba9387",
+        "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+        "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+        "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+        "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+        "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+        "scripts/build-mysql-acceptance.mjs": "bdda3760d2484d461fa8b0441735cf3a88c23b3a00904957129a0b39bbe24979",
+        "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+        "crates/dbstudio-drivers/src/mysql.rs": "97ad9f2f4d2998ea7d9f8bbcc051b9df09059df689d52fc91c64fff93e8a693e"
+      },
+      "diffSha256": "58a03df2592d628f566ec6b8e1917c059d8e7bbf0393ceaf9cd69bff16270f59",
+      "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+    }
+  }
+}

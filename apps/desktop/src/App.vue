@@ -118,9 +118,26 @@ async function requestExit() {
   finally { exitBusy.value = false }
 }
 onMounted(async () => {
+  const trace = async (stage: import('./mysql-parity-dom').StartupStage) => {
+    if (import.meta.env.VITE_MYSQL_PARITY === '1') {
+      try { const { traceMysqlStartup } = await import('./mysql-parity-dom'); await traceMysqlStartup(stage) }
+      catch { /* Keep the original mounted failure visible to Vue. */ }
+    }
+  }
+  try {
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('app_mounted')
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('listener_enter')
   unlisten = await listen('dbstudio:exit-requested', () => { void requestExit() })
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('listener_passed')
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('boot_enter')
   await wb.boot()
-  if (import.meta.env.VITE_DBSTUDIO_TEST_HOOKS === '1') {
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('boot_passed')
+  if (import.meta.env.VITE_MYSQL_PARITY === '1') {
+    await nextTick()
+    const { runMysqlParityDom } = await import('./mysql-parity-dom')
+    if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('dom_enter')
+    void runMysqlParityDom()
+  } else if (import.meta.env.VITE_DBSTUDIO_TEST_HOOKS === '1') {
     const { installNativeSmoke } = await import('./native-smoke')
     installNativeSmoke(wb, {
       async connection(connection) { connectionEditor.value = connection; await nextTick(); if (!connectionController.value) throw new Error('Connection dialog unavailable'); return connectionController.value },
@@ -138,6 +155,7 @@ onMounted(async () => {
       async close() { if (transferController.value?.running) throw new Error('Transfer still running'); transfer.value = null; connectionEditor.value = undefined; ddl.value = null; toolPanel.value = null; await nextTick() }
     })
   }
+  } catch (error) { if (import.meta.env.VITE_MYSQL_PARITY === '1') await trace('mounted_failed'); throw error }
 })
 onBeforeUnmount(() => unlisten?.())
 </script>

@@ -50,6 +50,14 @@ fn param(value:&Value)->DriverResult<MValue>{
     })
 }
 fn params(values:&[Value])->DriverResult<Params>{Ok(Params::Positional(values.iter().map(param).collect::<DriverResult<Vec<_>>>()?))}
+fn is_session_timezone_offset_statement(sql:&str)->bool{
+    let body=sql.trim();let body=body.strip_suffix(';').unwrap_or(body).trim_end();
+    let Some((left,right))=body.split_once('=')else{return false};
+    let words=left.split_whitespace().collect::<Vec<_>>();
+    if words.len()!=3||!words[0].eq_ignore_ascii_case("set")||!words[1].eq_ignore_ascii_case("session")||!words[2].eq_ignore_ascii_case("time_zone"){return false;}
+    let value=right.trim().as_bytes();
+    value.len()==8&&value[0]==b'\''&&matches!(value[1],b'+'|b'-')&&value[2..4].iter().all(u8::is_ascii_digit)&&value[4]==b':'&&value[5..7].iter().all(u8::is_ascii_digit)&&value[7]==b'\''
+}
 fn cell(value:&MValue,column:&mysql::Column,full:bool)->DriverResult<Value>{
     let number=|v:f64|if v.is_finite(){json!({"kind":"number","value":v})}else{n::text_cell(&v.to_string(),full)};
     Ok(match value {
@@ -58,11 +66,107 @@ fn cell(value:&MValue,column:&mysql::Column,full:bool)->DriverResult<Value>{
         MValue::UInt(v)=>if *v>9_007_199_254_740_991{n::text_cell(&v.to_string(),full)}else{json!({"kind":"number","value":v})},
         MValue::Float(v)=>number(*v as f64),MValue::Double(v)=>number(*v),
         MValue::Bytes(v)=>if column.character_set()==63&&!matches!(column.column_type(),mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_JSON){n::blob_cell(v,full)}else{n::text_cell(std::str::from_utf8(v).map_err(|_|DriverError::unsupported("文本编码不是UTF8"))?,full)},
-        MValue::Date(y,m,d,h,min,s,micros)=>n::text_cell(&format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}.{micros:06}"),full),
-        MValue::Time(neg,days,h,m,s,micros)=>n::text_cell(&format!("{}{}:{m:02}:{s:02}.{micros:06}",if *neg{"-"}else{""},(*days as u64)*24+*h as u64),full)
+        MValue::Date(y,m,d,h,min,s,micros)=>if column.column_type()==mysql::consts::ColumnType::MYSQL_TYPE_DATE{
+            n::text_cell(&format!("{y:04}-{m:02}-{d:02}"),full)
+        }else{n::text_cell(&format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}.{micros:06}"),full)},
+        MValue::Time(neg,days,h,m,s,micros)=>n::text_cell(&format!("{}{:02}:{m:02}:{s:02}.{micros:06}",if *neg{"-"}else{""},(*days as u64)*24+*h as u64),full)
     })
 }
-struct Cursor {sql:String,values:Vec<Value>}
+const MANAGEMENT_MAX_ROWS:usize=10_000;
+const MANAGEMENT_MAX_BYTES:usize=8*1024*1024;
+const MANAGEMENT_CONNECTION_BYTES:usize=32*1024*1024;
+const MANAGEMENT_MAX_CURSORS:usize=16;
+// Budgets cover retained encoded cells/metadata, not allocator RSS or drained wire rows.
+struct ManagementSnapshot {columns:Vec<Value>,rows:Vec<Vec<Value>>,bytes:usize}
+enum Cursor {Query{sql:String,values:Vec<Value>},Management(ManagementSnapshot)}
+fn management_limit()->DriverError{DriverError::new("resource-limit","管理结果超过快照保留上限，请缩小范围或关闭已有管理结果")}
+fn management_retention(count:usize,retained:usize,additional:usize)->DriverResult<()>{
+    if count>=MANAGEMENT_MAX_CURSORS||retained.saturating_add(additional)>MANAGEMENT_CONNECTION_BYTES{return Err(management_limit());}Ok(())
+}
+fn management_statement(sql:&str)->DriverResult<bool>{
+    let mut words=sql.split_whitespace();let first=words.next().unwrap_or("").to_ascii_lowercase();
+    let second=words.next().unwrap_or("").to_ascii_lowercase();
+    match first.as_str(){
+        "show"=>if second=="tables"||(second=="create"&&words.next().is_some_and(|w|w.eq_ignore_ascii_case("table"))){Ok(true)}else{Err(DriverError::unsupported("当前管理查询只支持SHOW TABLES和SHOW CREATE TABLE"))},
+        "describe"|"desc"=>Ok(true),
+        "explain"=>if second=="select"{Ok(true)}else{Err(DriverError::unsupported("当前只支持EXPLAIN SELECT；ANALYZE会执行查询，尚未开放"))},
+        "call"=>Err(DriverError::unsupported("CALL及多结果集尚未支持")),
+        _=>Ok(false)
+    }
+}
+fn management_columns(columns:&[mysql::Column])->Vec<Value>{
+    columns.iter().map(|c|json!({"name":c.name_str(),"type":match c.column_type(){
+        mysql::consts::ColumnType::MYSQL_TYPE_TINY|mysql::consts::ColumnType::MYSQL_TYPE_SHORT|mysql::consts::ColumnType::MYSQL_TYPE_LONG|mysql::consts::ColumnType::MYSQL_TYPE_INT24=>"integer",
+        mysql::consts::ColumnType::MYSQL_TYPE_FLOAT|mysql::consts::ColumnType::MYSQL_TYPE_DOUBLE=>"real",
+        mysql::consts::ColumnType::MYSQL_TYPE_DATE|mysql::consts::ColumnType::MYSQL_TYPE_DATETIME|mysql::consts::ColumnType::MYSQL_TYPE_TIMESTAMP=>"date",
+        mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_LONGLONG|mysql::consts::ColumnType::MYSQL_TYPE_JSON|mysql::consts::ColumnType::MYSQL_TYPE_TIME=>"text",
+        _=>if c.character_set()==63{"blob"}else{"text"}
+    }})).collect()
+}
+fn management_real(bytes:&[u8],float32:bool)->DriverResult<MValue>{
+    let text=std::str::from_utf8(bytes).map_err(|_|DriverError::unsupported("管理结果浮点数无效"))?;
+    if float32{text.parse::<f32>().map(MValue::Float).map_err(|_|DriverError::unsupported("管理结果浮点数无效"))}
+    else{text.parse::<f64>().map(MValue::Double).map_err(|_|DriverError::unsupported("管理结果浮点数无效"))}
+}
+fn management_cell(value:&MValue,column:&mysql::Column)->DriverResult<Value>{
+    // COM_QUERY represents numeric fields as Bytes; COM_STMT_EXECUTE uses typed values.
+    if let MValue::Bytes(bytes)=value{
+        use mysql::consts::ColumnType::*;
+        match column.column_type(){
+            MYSQL_TYPE_TINY|MYSQL_TYPE_SHORT|MYSQL_TYPE_LONG|MYSQL_TYPE_INT24|MYSQL_TYPE_LONGLONG=>{
+                let text=std::str::from_utf8(bytes).map_err(|_|DriverError::unsupported("管理结果数值编码无效"))?;
+                if let Ok(v)=text.parse::<i64>(){return cell(&MValue::Int(v),column,true);}
+                let v=text.parse::<u64>().map_err(|_|DriverError::unsupported("管理结果整数无效"))?;return cell(&MValue::UInt(v),column,true);
+            },
+            MYSQL_TYPE_FLOAT|MYSQL_TYPE_DOUBLE=>return cell(&management_real(bytes,column.column_type()==MYSQL_TYPE_FLOAT)?,column,true),
+            _=>{}
+        }
+    }
+    cell(value,column,true)
+}
+fn management_preview(full:&Value)->DriverResult<Value>{
+    match full.get("kind").and_then(Value::as_str){
+        Some("text")=>Ok(n::text_cell(full.get("text").and_then(Value::as_str).ok_or_else(||DriverError::invalid("管理快照文本无效"))?,false)),
+        Some("blob")=>{let bytes=STANDARD.decode(full.get("previewBase64").and_then(Value::as_str).ok_or_else(||DriverError::invalid("管理快照二进制无效"))?).map_err(|_|DriverError::invalid("管理快照二进制无效"))?;Ok(n::blob_cell(&bytes,false))},
+        _=>Ok(full.clone())
+    }
+}
+impl ManagementSnapshot{
+    fn new(columns:Vec<Value>)->DriverResult<Self>{
+        let bytes=serde_json::to_vec(&columns).map_err(|_|DriverError::invalid("管理结果列无效"))?.len().saturating_add(2);
+        if bytes>MANAGEMENT_MAX_BYTES{return Err(management_limit());}Ok(Self{columns,rows:vec![],bytes})
+    }
+    fn push(&mut self,cells:Vec<Value>)->DriverResult<()>{
+        let bytes=self.bytes.saturating_add(serde_json::to_vec(&cells).map_err(|_|DriverError::invalid("管理结果行无效"))?.len()).saturating_add(1);
+        if self.rows.len()>=MANAGEMENT_MAX_ROWS||bytes>MANAGEMENT_MAX_BYTES{return Err(management_limit());}
+        self.bytes=bytes;self.rows.push(cells);Ok(())
+    }
+    fn page(&self,offset:usize,limit:usize)->DriverResult<Value>{
+        let rows:DriverResult<Vec<Value>>=self.rows.iter().skip(offset).take(limit).enumerate().map(|(i,cells)|{
+            let cells:DriverResult<Vec<_>>=cells.iter().map(management_preview).collect();Ok(json!({"index":offset+i,"cells":cells?}))
+        }).collect();let rows=rows?;
+        Ok(json!({"columns":self.columns,"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":offset.saturating_add(limit)<self.rows.len()}))
+    }
+    fn full_cell(&self,row:usize,column:usize)->DriverResult<Value>{
+        self.rows.get(row).ok_or_else(||DriverError::new("not-found","行不存在"))?.get(column).cloned().ok_or_else(||DriverError::invalid("列下标越界"))
+    }
+}
+fn management_snapshot<T:mysql::prelude::Protocol>(mut stream:mysql::QueryResult<'_, '_, '_,T>)->DriverResult<ManagementSnapshot>{
+    let columns=stream.columns().as_ref().to_vec();
+    if columns.is_empty(){return Err(DriverError::unsupported("管理查询没有返回列"));}
+    let mut snapshot=ManagementSnapshot::new(management_columns(&columns))?;
+    {
+        let set=stream.iter().ok_or_else(||DriverError::unsupported("管理查询没有结果集"))?;
+        for row in set{
+            let row=row.map_err(error)?;
+            if row.len()!=columns.len(){return Err(DriverError::invalid("管理结果列数发生变化"));}
+            let cells:DriverResult<Vec<_>>=(0..row.len()).map(|i|management_cell(row.as_ref(i).unwrap(),&columns[i])).collect();
+            snapshot.push(cells?)?;
+        }
+    }
+    if stream.iter().is_some(){return Err(DriverError::unsupported("管理查询多结果集尚未支持"));}
+    Ok(snapshot)
+}
 pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<SshTunnel>}
 pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dyn Driver>>{
     let host=n::option(config,"host","127.0.0.1");let port=n::port(config,"port",3306)?;
@@ -93,8 +197,11 @@ impl MysqlDriver {
         let params=params(values)?;self.running.store(true,Ordering::SeqCst);
         // COM_STMT_PREPARE does not support all transaction/savepoint control statements.
         // Values remain bound with exec_drop; static/control SQL uses COM_QUERY.
-        let result=if values.is_empty(){self.conn.query_drop(sql)}else{self.conn.exec_drop(sql,params)}.map_err(error);
-        self.running.store(false,Ordering::SeqCst);result?;Ok(self.conn.affected_rows())
+        let result=if values.is_empty(){self.conn.query_drop(sql)}else{self.conn.exec_drop(sql,params)};
+        self.running.store(false,Ordering::SeqCst);
+        // InnoDB 1213 rolls back the whole transaction; 1205/1062 do not have that default scope.
+        if matches!(&result,Err(mysql::Error::MySqlError(e))if e.code==1213){self.active=false;self.pending=0;}
+        result.map_err(error)?;Ok(self.conn.affected_rows())
     }
     fn begin(&mut self)->DriverResult<()>{if !self.active{self.execute("START TRANSACTION",&[])?;self.active=true;self.pending=0;}Ok(())}
     fn page(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<Value>{
@@ -115,18 +222,47 @@ impl MysqlDriver {
             mysql::consts::ColumnType::MYSQL_TYPE_TINY|mysql::consts::ColumnType::MYSQL_TYPE_SHORT|mysql::consts::ColumnType::MYSQL_TYPE_LONG|mysql::consts::ColumnType::MYSQL_TYPE_INT24=>"integer",
             mysql::consts::ColumnType::MYSQL_TYPE_FLOAT|mysql::consts::ColumnType::MYSQL_TYPE_DOUBLE=>"real",
             mysql::consts::ColumnType::MYSQL_TYPE_DATE|mysql::consts::ColumnType::MYSQL_TYPE_DATETIME|mysql::consts::ColumnType::MYSQL_TYPE_TIMESTAMP=>"date",
-            mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_LONGLONG|mysql::consts::ColumnType::MYSQL_TYPE_JSON=>"text",
+            mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_LONGLONG|mysql::consts::ColumnType::MYSQL_TYPE_JSON|mysql::consts::ColumnType::MYSQL_TYPE_TIME=>"text",
             _=>if c.character_set()==63{"blob"}else{"text"}
         }})).collect();
         Ok(json!({"columns":columns,"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":has_more}))
     }
+    fn management_query(&mut self,sql:String,values:Vec<Value>,options:&Value,started:Instant)->DriverResult<Value>{
+        let keep=options.get("keepCursor").and_then(Value::as_bool)!=Some(false);
+        let(count,retained)=self.cursors.values().fold((0usize,0usize),|(count,bytes),cursor|match cursor{Cursor::Management(s)=>(count+1,bytes.saturating_add(s.bytes)),_=>(count,bytes)});
+        if keep{management_retention(count,retained,0)?;}
+        self.running.store(true,Ordering::SeqCst);
+        let snapshot=(||{
+            if values.is_empty(){management_snapshot(self.conn.query_iter(&sql).map_err(error)?)}
+            else{management_snapshot(self.conn.exec_iter(&sql,params(&values)?).map_err(error)?)}
+        })();
+        self.running.store(false,Ordering::SeqCst);let snapshot=snapshot?;
+        if keep{management_retention(count,retained,snapshot.bytes)?;}
+        let(offset,limit)=n::page_options(options);let mut page=snapshot.page(offset,limit)?;
+        let cursor=if keep{self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor::Management(snapshot));json!(id)}else{Value::Null};
+        page["cursorId"]=cursor;page["executedSql"]=json!(sql);page["elapsedMs"]=json!(started.elapsed().as_millis()as u64);Ok(page)
+    }
+    fn explain(&mut self,sql:&str)->DriverResult<Value>{
+        let(sql,values)=n::bind_named(sql,&Value::Null,false)?;
+        if !values.is_empty()||!sql.split_whitespace().next().is_some_and(|word|word.eq_ignore_ascii_case("select")){
+            return Err(DriverError::unsupported("执行计划只接受单条无绑定SELECT；ANALYZE、CALL和其他计划格式尚未开放"));
+        }
+        let executed_sql=format!("EXPLAIN {sql}");
+        self.running.store(true,Ordering::SeqCst);
+        let snapshot=(||management_snapshot(self.conn.query_iter(&executed_sql).map_err(error)?))();
+        self.running.store(false,Ordering::SeqCst);let snapshot=snapshot?;
+        // Dedicated ExplainResult has no cursor/full-cell channel: return bounded complete cells.
+        let rows:Vec<Value>=snapshot.rows.into_iter().enumerate().map(|(index,cells)|json!({"index":index,"cells":cells})).collect();
+        Ok(json!({"dialectId":"mysql","format":"tabular","executedSql":executed_sql,"columns":snapshot.columns,"rows":rows}))
+    }
     fn run_query(&mut self,sql:&str,options:&Value)->DriverResult<Value>{
         let started=Instant::now();let(sql,values)=n::bind_named(sql,options,false)?;
+        if management_statement(&sql)?{return self.management_query(sql,values,options,started);}
         let first=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if !["select","with"].contains(&first.as_str()){return Err(DriverError::unsupported("分页查询只接受单条查询语句"));}
         let(offset,limit)=n::page_options(options);let mut page=self.page(&sql,&values,offset,limit)?;
         let cursor=if options.get("keepCursor").and_then(Value::as_bool)==Some(false){Value::Null}else{
-            self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor{sql:sql.clone(),values});json!(id)};
+            self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor::Query{sql:sql.clone(),values});json!(id)};
         page["cursorId"]=cursor;page["executedSql"]=json!(sql);page["elapsedMs"]=json!(started.elapsed().as_millis()as u64);Ok(page)
     }
     fn describe(&mut self,id:&str)->DriverResult<Value>{
@@ -255,7 +391,7 @@ impl MysqlDriver {
                 }
             };
             self.execute("SAVEPOINT dbstudio_edit",&[])?;
-            match self.execute(&sql,&values){Ok(n)if method=="insertRow"||n<=1=>{self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;total+=n;outcomes.push(json!({"index":index,"affected":n,"error":null,"sql":sql}));},result=>{
+            match self.execute(&sql,&values){Ok(n)if method=="insertRow"||n<=1=>{self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;total+=n;outcomes.push(json!({"index":index,"affected":n,"error":null,"sql":sql}));},Err(e)if !self.active=>return Err(e),result=>{
                 self.execute("ROLLBACK TO SAVEPOINT dbstudio_edit",&[])?;self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;let message=match result{Err(e)=>e.message,_=>"主键编辑影响多行，已回滚该行".into()};outcomes.push(json!({"index":index,"affected":0,"error":message,"sql":sql}));
             }}
         }
@@ -267,6 +403,44 @@ impl MysqlDriver {
 mod tests{
     use super::*;
     fn address(value:&str)->SocketAddr{value.parse().unwrap()}
+    #[test]
+    fn management_float_text_binary_consistent(){
+        let text=management_real(b"0.1",true).unwrap();
+        assert_eq!(text,MValue::Float(0.1_f32));
+        let MValue::Float(value)=text else{panic!("FLOAT metadata must retain f32 precision")};
+        assert_eq!(value as f64,0.1_f32 as f64);assert_ne!(value as f64,0.1_f64);
+        assert_eq!(management_real(b"0.1",false).unwrap(),MValue::Double(0.1_f64));
+        let column=mysql::Column::new(mysql::consts::ColumnType::MYSQL_TYPE_FLOAT);
+        assert_eq!(management_cell(&MValue::Bytes(b"0.1".to_vec()),&column).unwrap(),management_cell(&MValue::Float(0.1_f32),&column).unwrap());
+    }
+    #[test]
+    fn management_snapshot_retained_budgets_are_enforced(){
+        let mut snapshot=ManagementSnapshot::new(vec![json!({"name":"x","type":"text"})]).unwrap();
+        for _ in 0..10_000{snapshot.push(vec![json!({"kind":"null"})]).unwrap();}
+        assert_eq!(snapshot.push(vec![json!({"kind":"null"})]).err().unwrap().code,"resource-limit");
+        let mut large=ManagementSnapshot::new(vec![]).unwrap();
+        assert_eq!(large.push(vec![json!({"kind":"text","text":"a".repeat(8*1024*1024)})]).err().unwrap().code,"resource-limit");
+        assert!(large.rows.is_empty());
+        assert!(management_retention(15,32*1024*1024-1,1).is_ok());
+        assert_eq!(management_retention(15,32*1024*1024,1).err().unwrap().code,"resource-limit");
+        assert_eq!(management_retention(16,0,0).err().unwrap().code,"resource-limit");
+    }
+    #[test]
+    fn management_snapshot_page_preview_and_full_cell_are_distinct(){
+        let mut snapshot=ManagementSnapshot::new(vec![json!({"name":"ddl","type":"text"})]).unwrap();
+        let text="ddl".repeat(600);snapshot.push(vec![n::text_cell(&text,true)]).unwrap();
+        let first=snapshot.page(0,1).unwrap();assert_eq!(first["hasMore"],false);assert_eq!(first["rows"][0]["cells"][0]["truncated"],true);
+        assert_eq!(snapshot.full_cell(0,0).unwrap()["text"],text);
+        let last=snapshot.page(1,1).unwrap();assert_eq!(last["returned"],0);assert_eq!(last["offset"],1);assert_eq!(last["hasMore"],false);
+    }
+    #[test]
+    fn management_statement_policy_does_not_enable_execution_variants(){
+        for sql in ["SHOW TABLES","SHOW CREATE TABLE t","DESCRIBE t","EXPLAIN SELECT id FROM t"]{assert!(management_statement(sql).unwrap());}
+        for sql in ["EXPLAIN ANALYZE SELECT 1","EXPLAIN FORMAT=JSON SELECT 1","EXPLAIN WITH x AS(SELECT 1) SELECT * FROM x","CALL p()"]{
+            assert_eq!(management_statement(sql).err().unwrap().code,"unsupported");
+        }
+        assert!(!management_statement("SELECT 1").unwrap());
+    }
     #[test]
     fn address_family_binds_follow_resolver_order_and_dedupe(){
         assert_eq!(family_binds([address("[::1]:3306"),address("127.0.0.1:3306"),address("[::2]:3306"),address("127.0.0.2:3306")]),vec![address("[::]:0"),address("0.0.0.0:0")]);
@@ -301,13 +475,15 @@ impl Driver for MysqlDriver {
         match method{
             "listChildren"=>self.children(args.first().and_then(Value::as_str)),
             "describeTable"=>self.describe(string_argument(&args,0,"tableId")?),
+            "explain"=>{if args.len()!=1{return Err(DriverError::invalid("执行计划仅接受SQL，不接受绑定或尾随选项"));}self.explain(string_argument(&args,0,"sql")?)},
             "runQuery"|"query"=>self.run_query(string_argument(&args,0,"sql")?,args.get(1).unwrap_or(&Value::Null)),
             "previewTable"=>{let sql=format!("SELECT * FROM {}",n::qualified(string_argument(&args,0,"tableId")?,true)?);self.run_query(&sql,&json!({"limit":args.get(1).and_then(Value::as_u64).unwrap_or(200)}))},
-            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let(sql,values)=(c.sql.clone(),c.values.clone());let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;self.page(&sql,&values,offset,limit)},
+            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.page(offset,limit),Cursor::Query{sql,values}=>(sql.clone(),values.clone())};self.page(&sql,&values,offset,limit)},
             "closeCursor"=>{self.cursors.remove(string_argument(&args,0,"cursorId")?);Ok(Value::Null)},
             "fetchCellValue"=>{
-                let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let(sql,values)=(c.sql.clone(),c.values.clone());
+                let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;
                 let row=args.get(1).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("行下标无效"))?;let column=args.get(2).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("列下标无效"))? as usize;
+                let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.full_cell(usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column),Cursor::Query{sql,values}=>(sql.clone(),values.clone())};
                 self.running.store(true,Ordering::SeqCst);
                 let result=(||->DriverResult<Value>{let args=params(&values)?;let stmt=self.conn.prep(&sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let mut stream=self.conn.exec_iter(&stmt,args).map_err(error)?;
                     for _ in 0..row{match stream.next(){Some(row)=>{row.map_err(error)?;},None=>return Err(DriverError::new("not-found","行不存在"))}}
@@ -322,7 +498,14 @@ impl Driver for MysqlDriver {
                 Ok(json!(rows.iter().map(|r|json!({"schema":r.get::<String,_>(0).unwrap_or_default(),"name":r.get::<String,_>(1).unwrap_or_default(),"kind":if r.get::<String,_>(2).unwrap_or_default()=="PROCEDURE"{"procedure"}else{"function"},"definition":r.get::<Option<String>,_>(3).flatten()})).collect::<Vec<_>>()))
             },
             "executeStatement"=>{
-                let original=string_argument(&args,0,"sql")?;let options=args.get(1).unwrap_or(&Value::Null);let(sql,values)=n::bind_named(original,options,false)?;let started=Instant::now();let stmt=self.conn.prep(&sql).map_err(error)?;
+                let original=string_argument(&args,0,"sql")?;let options=args.get(1).unwrap_or(&Value::Null);let(sql,values)=n::bind_named(original,options,false)?;let started=Instant::now();
+                if management_statement(&sql)?{return Ok(json!({"kind":"rows","result":self.management_query(sql,values,options,started)?}));}
+                // Session timezone offsets do not begin or end the managed transaction.
+                if values.is_empty()&&is_session_timezone_offset_statement(&sql){
+                    let affected=self.execute(&sql,&values)?;
+                    return Ok(json!({"kind":"affected","affected":affected,"inTransaction":self.active,"transactionState":n::transaction_state(self.active,self.pending),"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64}));
+                }
+                let stmt=self.conn.prep(&sql).map_err(error)?;
                 if !stmt.columns().is_empty(){return Ok(json!({"kind":"rows","result":self.run_query(original,options)?}));}
                 let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
                 if ["begin","start","commit","rollback","savepoint","release","set"].contains(&keyword.as_str()){return Err(DriverError::unsupported("请使用事务API控制事务"));}
@@ -354,6 +537,87 @@ impl Driver for MysqlDriver {
             },
             "cancelQuery"=>Ok(json!((self.cancel)()?)),
             _=>Err(DriverError::unsupported("MySQL方法尚未迁移到Rust"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_timezone_tests {
+    use super::is_session_timezone_offset_statement;
+
+    #[test]
+    fn accepts_explicit_session_timezone_offset_literals(){
+        for sql in ["SET SESSION time_zone = '+08:00'","set session TIME_ZONE='-05:30'","  SeT\tSESSION\ntime_zone = '+00:00' ;  "]{
+            assert!(is_session_timezone_offset_statement(sql),"{sql}");
+        }
+    }
+    #[test]
+    fn retains_other_set_and_transaction_guards(){
+        for sql in ["SET GLOBAL time_zone = '+08:00'","SET @@session.time_zone = '+08:00'","SET time_zone = '+08:00'","SET SESSION autocommit = 0","SET autocommit = 1","SET NAMES utf8mb4","BEGIN","COMMIT","ROLLBACK","SET SESSION time_zone = ?","SET SESSION time_zone = 'Asia/Shanghai'"]{
+            assert!(!is_session_timezone_offset_statement(sql),"{sql}");
+        }
+    }
+    #[test]
+    fn rejects_extra_statements_tokens_and_malformed_literals(){
+        for sql in ["SET SESSION time_zone = '+08:00'; COMMIT","SET SESSION time_zone = '+08:00';;","SET SESSION time_zone = '+08:00' -- suffix","SET SESSION time_zone = '+08:00', autocommit = 0","SET SESSION time_zone = '+08:00' OR 1","SET SESSION time_zone = '+8:00'","SET SESSION time_zone = '+08:0x'","SET SESSION time_zone = '+08:00\\'x'","SET SESSION time_zone = \"+08:00\"","SET /* comment */ SESSION time_zone = '+08:00'"]{
+            assert!(!is_session_timezone_offset_statement(sql),"{sql}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod temporal_cell_tests {
+    use super::{cell,MValue};
+    use mysql::consts::ColumnType;
+    use serde_json::json;
+
+    #[test]
+    fn date_cell_preserves_date_only_and_datetime_microseconds(){
+        for full in [false,true]{
+            for kind in [ColumnType::MYSQL_TYPE_DATETIME,ColumnType::MYSQL_TYPE_TIMESTAMP]{
+                let column=mysql::Column::new(kind);
+                assert_eq!(cell(&MValue::Date(2024,2,29,12,34,56,1),&column,full).unwrap(),json!({"kind":"text","text":"2024-02-29 12:34:56.000001"}));
+            }
+            let column=mysql::Column::new(ColumnType::MYSQL_TYPE_DATE);
+            assert_eq!(cell(&MValue::Date(2024,2,29,0,0,0,0),&column,full).unwrap(),json!({"kind":"text","text":"2024-02-29"}));
+        }
+    }
+    #[test]
+    fn time_cell_preserves_hour_padding_sign_days_and_microseconds(){
+        let column=mysql::Column::new(ColumnType::MYSQL_TYPE_TIME);
+        for full in [false,true]{
+            for (value,text) in [
+                (MValue::Time(true,1,1,2,3,2),"-25:02:03.000002"),
+                (MValue::Time(false,2,1,3,4,999998),"49:03:04.999998"),
+                (MValue::Time(false,0,1,2,3,3),"01:02:03.000003"),
+                (MValue::Time(true,0,2,3,4,999997),"-02:03:04.999997"),
+                (MValue::Time(false,0,0,0,0,1),"00:00:00.000001")
+            ]{
+                assert_eq!(cell(&value,&column,full).unwrap(),json!({"kind":"text","text":text}));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod column_type_metadata_tests {
+    use super::management_columns;
+    use mysql::consts::ColumnType;
+    use serde_json::json;
+
+    fn metadata_type(column_type:ColumnType,character_set:u16)->serde_json::Value{
+        let column=mysql::Column::new(column_type).with_character_set(character_set);
+        management_columns(&[column])[0]["type"].clone()
+    }
+
+    #[test]
+    fn time_result_metadata_is_text_without_weakening_binary_columns(){
+        assert_eq!(metadata_type(ColumnType::MYSQL_TYPE_TIME,63),json!("text"));
+        assert_eq!(metadata_type(ColumnType::MYSQL_TYPE_BLOB,63),json!("blob"));
+        assert_eq!(metadata_type(ColumnType::MYSQL_TYPE_VAR_STRING,63),json!("blob"));
+        assert_eq!(metadata_type(ColumnType::MYSQL_TYPE_VAR_STRING,45),json!("text"));
+        for kind in [ColumnType::MYSQL_TYPE_DATE,ColumnType::MYSQL_TYPE_DATETIME,ColumnType::MYSQL_TYPE_TIMESTAMP]{
+            assert_eq!(metadata_type(kind,63),json!("date"));
         }
     }
 }

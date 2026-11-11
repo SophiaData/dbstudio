@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-initial-real-ui-chain",
+  "runId": "5f5e7d2ea41f48ea843bb88d892e2165",
+  "phase": "initial",
+  "actionDriver": "native-dom-synthetic",
+  "chainPassed": true,
+  "productionReady": false,
+  "osTrustedKeyboardVerified": false,
+  "restartVerified": false,
+  "soakVerified": false,
+  "referenceProductOperated": false,
+  "mysql84Verified": false,
+  "windowsVerified": false,
+  "checks": {
+    "storage_preflight": true,
+    "connection_form": true,
+    "sql_select41": true,
+    "page_first": true,
+    "page_next": true,
+    "page_back": true
+  },
+  "pages": {
+    "first": {
+      "offset": 0,
+      "count": 200,
+      "firstId": 1,
+      "lastId": 200,
+      "idsSha256": "2066223c021d5fe0c60e02fcc68bfe6f618de108f9e5afc21200d86b620c305b",
+      "visibleMs": 49
+    },
+    "next": {
+      "offset": 200,
+      "count": 200,
+      "firstId": 201,
+      "lastId": 400,
+      "idsSha256": "eb5d75f1a3f6a828c4aa24b5b45cc2c0d2deab3fa8257063fa6377401c0e58c6",
+      "visibleMs": 43
+    },
+    "back": {
+      "offset": 0,
+      "count": 200,
+      "firstId": 1,
+      "lastId": 200,
+      "idsSha256": "2066223c021d5fe0c60e02fcc68bfe6f618de108f9e5afc21200d86b620c305b",
+      "visibleMs": 42
+    }
+  },
+  "actions": {
+    "click": 7,
+    "input": 9,
+    "keydown": 0
+  },
+  "elapsedMs": 434,
+  "native": {
+    "scope": "test-host-observation-only",
+    "runId": "5f5e7d2ea41f48ea843bb88d892e2165",
+    "phase": "initial",
+    "methods": {
+      "addConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 48
+      },
+      "executeStatement": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 15
+      },
+      "fetchResultPage": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 14
+      },
+      "listChildren": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 7
+      },
+      "listConnections": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 4
+      },
+      "listDialects": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 0
+      },
+      "migrationStatus": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 0
+      },
+      "recordSqlHistory": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 9
+      },
+      "testConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 29
+      },
+      "transactionState": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 0
+      }
+    },
+    "keyringGets": 4,
+    "keyringHits": 4,
+    "keyringSets": 1,
+    "guiVerified": false,
+    "mysqlVerified": false,
+    "storePersistenceVerified": false
+  },
+  "observer": {
+    "counts": {
+      "paging": 805,
+      "precision": 1,
+      "composite": 2,
+      "import": 0
+    },
+    "autocommit": true,
+    "readOnly": true,
+    "precisionChecks": 11,
+    "pagingChecks": 9,
+    "independentConnections": 3
+  },
+  "lifecycle": {
+    "exitCode": 0,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": false
+  },
+  "provenance": {
+    "runnerSourceSha256": "3dff1f4feb3f6c24ffcd4080dcb3d18e0f4a13ebf5dff164a7528b65de6aa34c",
+    "fixturePinSha256": "fbc2d5757db915ec1995eb4efec5ab0c2fbef4b1a345c7c52fbfd7dcf6a7831b",
+    "artifactReceiptSha256": "5da02c5878aa860bb35af365fe37f3e9542240fd06b3630190f45ec969c0ba2e",
+    "manifestSha256": "e8829010972a5c5caa5fd667c2ee9ba484733211caf6db265d012fddbf2786b4",
+    "containerId": "c696e2e079eeaa138526beed4cdeefbc283f64e70fc99811057c9fdc563453cf",
+    "imageSha256": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+    "fixtureSourceSha256": "cc946c63a5a51f391bac46b2fe740fbe4b421b0fe381be7b2a233dbed076e34d",
+    "binarySha256": "04c821c93b1e0e88c313e7a1c749a8480b150bb5bd95d90eb86a335d0fb9d0b8",
+    "frontendIndexSha256": "b45cd217974269ced2a8516bdd7a5e3cdd447064ead25150b80d12553b5d1e03",
+    "frontendAssetsSha256": "32c6e7cb2405c7993de73fb024631914b1205e1fe0c1e578a2bf1ebc7240e15e",
+    "source": {
+      "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+      "files": {
+        "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+        "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+        "apps/desktop/src/mysql-parity-dom.ts": "d3bb44030faff9c2b36016242fb648df34a9dc644a5bc3ab33c6008dee693cce",
+        "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+        "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+        "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+        "apps/desktop/src/workbench.ts": "4b8ba5ed4f481012de8ef259d80204b7886c7aaaa5a46590f6ae4d3746b39cdd",
+        "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+        "src-tauri/src/lib.rs": "e581b045575181c50b4013313c4a5dc84509311a5fb179887f4af84fe85f0378",
+        "src-tauri/src/mysql_acceptance.rs": "d72388300878becd98fd0f125c4cd8e4bf9d77efc26190ba251fdd4247bad962",
+        "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+        "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+        "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+        "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+        "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+        "scripts/build-mysql-acceptance.mjs": "9bcbead8161489a652df3f60afad8c64797dc9e86bf5a114a162cb44312e0d1c",
+        "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+        "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+        "crates/dbstudio-core/src/lib.rs": "b4b4a089f4a4bc4754c8dc77f00cb432d51668e2bee6d4dc5864707a0477e534"
+      },
+      "diffSha256": "51bd35eacfb6e0b25767ce739ae92b9ddbfe660e0a5debfaf152890198d4af84",
+      "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+    }
+  }
+}

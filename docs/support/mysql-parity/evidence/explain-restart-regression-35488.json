@@ -1,0 +1,705 @@
+{
+  "schemaVersion": 1,
+  "scope": "mysql-restart-edit-real-ui-attempt",
+  "runId": "dd714960179e4c9383867a9b5aa64573",
+  "phase": "restart",
+  "actionDriver": "native-dom-synthetic",
+  "chainPassed": true,
+  "productionReady": false,
+  "credentialRestartVerified": true,
+  "rollbackVerified": true,
+  "preCommitObserverVisibilityVerified": false,
+  "commitVerified": false,
+  "osTrustedKeyboardVerified": false,
+  "soakVerified": false,
+  "referenceProductOperated": false,
+  "mysql84Verified": false,
+  "windowsVerified": false,
+  "checks": {
+    "storage_marker": true,
+    "persisted_connection": true,
+    "credential_reconnect": true,
+    "sql_select41": true,
+    "table_open": true,
+    "local_edit": true,
+    "dirty_guard_cancel": true,
+    "applied_pending": true,
+    "rollback_restored": true
+  },
+  "row": {
+    "id": 1,
+    "beforeSha256": "fc380884c681cc11da32f2e8e99eb5b91220faee981d9a685d8daee501f34604",
+    "localSha256": "069832c2b4f077af631e7d1827207f31cd9d9bed7e33f9a03128091bf234232d",
+    "appliedSha256": "069832c2b4f077af631e7d1827207f31cd9d9bed7e33f9a03128091bf234232d",
+    "rolledBackSha256": "fc380884c681cc11da32f2e8e99eb5b91220faee981d9a685d8daee501f34604"
+  },
+  "actions": {
+    "click": 15,
+    "input": 2,
+    "keydown": 0,
+    "dblclick": 2
+  },
+  "elapsedMs": 941,
+  "native": {
+    "scope": "test-host-observation-only",
+    "runId": "dd714960179e4c9383867a9b5aa64573",
+    "phase": "restart",
+    "methods": {
+      "applyEdits": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 47
+      },
+      "closeCursor": {
+        "success": 4,
+        "failure": 0,
+        "totalElapsedMs": 30
+      },
+      "connectConnection": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 46
+      },
+      "describeTable": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 26
+      },
+      "executeStatement": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 8
+      },
+      "listChildren": {
+        "success": 6,
+        "failure": 0,
+        "totalElapsedMs": 115
+      },
+      "listConnections": {
+        "success": 2,
+        "failure": 0,
+        "totalElapsedMs": 63
+      },
+      "listDialects": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 7
+      },
+      "migrationStatus": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 6
+      },
+      "recordSqlHistory": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 11
+      },
+      "rollbackTransaction": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 11
+      },
+      "runQuery": {
+        "success": 5,
+        "failure": 0,
+        "totalElapsedMs": 88
+      },
+      "tableSelectSql": {
+        "success": 1,
+        "failure": 0,
+        "totalElapsedMs": 6
+      },
+      "transactionState": {
+        "success": 4,
+        "failure": 0,
+        "totalElapsedMs": 29
+      }
+    },
+    "keyringGets": 6,
+    "keyringHits": 6,
+    "keyringSets": 0,
+    "guiVerified": false,
+    "mysqlVerified": false,
+    "storePersistenceVerified": false
+  },
+  "lifecycle": {
+    "pid": 35488,
+    "exitCode": 0,
+    "stdoutBytes": 0,
+    "stderrBytes": 0,
+    "timedOut": false
+  },
+  "trace": {
+    "records": [
+      {
+        "schemaVersion": 1,
+        "seq": 1,
+        "stage": "main_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 2,
+        "stage": "preflight_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 3,
+        "stage": "app_import_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 4,
+        "stage": "app_import_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 5,
+        "stage": "app_mount_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 6,
+        "stage": "app_mounted",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 7,
+        "stage": "listener_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 8,
+        "stage": "listener_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 9,
+        "stage": "boot_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 10,
+        "stage": "native_enter",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 11,
+        "stage": "native_returned",
+        "method": "listDialects"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 12,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 13,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 14,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 15,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 16,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 17,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 18,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 19,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 20,
+        "stage": "native_enter",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 21,
+        "stage": "native_returned",
+        "method": "migrationStatus"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 22,
+        "stage": "boot_passed",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 23,
+        "stage": "dom_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 24,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 25,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 26,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 27,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 28,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 29,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 30,
+        "stage": "native_enter",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 31,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 32,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 33,
+        "stage": "keyring_get_enter",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 34,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 35,
+        "stage": "native_returned",
+        "method": "listConnections"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 36,
+        "stage": "keyring_get_returned",
+        "method": "none"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 37,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 38,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 39,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 40,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 41,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 42,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 43,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 44,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 45,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 46,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 47,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 48,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 49,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 50,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 51,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 52,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 53,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 54,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 55,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 56,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 57,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 58,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 59,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 60,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 61,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 62,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 63,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 64,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 65,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 66,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 67,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 68,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 69,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 70,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 71,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 72,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 73,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 74,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 75,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 76,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 77,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 78,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 79,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 80,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 81,
+        "stage": "native_returned",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 82,
+        "stage": "native_enter",
+        "method": "other"
+      },
+      {
+        "schemaVersion": 1,
+        "seq": 83,
+        "stage": "native_returned",
+        "method": "other"
+      }
+    ],
+    "sha256": "9f72302682796d6c245bc17613aef0e29bd209c458973e4d53072d8af2ed47ba"
+  },
+  "observer": {
+    "status": "OBSERVER_READBACK_OK",
+    "runId": "dd714960179e4c9383867a9b5aa64573",
+    "counts": {
+      "paging": 805,
+      "precision": 1,
+      "composite": 2,
+      "import": 0
+    },
+    "autocommit": true,
+    "readOnly": true,
+    "precisionChecks": 11,
+    "pagingChecks": 9,
+    "independentConnections": 3,
+    "guiPassed": false
+  },
+  "rollbackObserver": {
+    "status": "ROLLBACK_BASELINE_VERIFIED",
+    "runId": "dd714960179e4c9383867a9b5aa64573",
+    "counts": {
+      "paging": 805
+    },
+    "baselineBodyRows": 805,
+    "firstBodySha256": "fc380884c681cc11da32f2e8e99eb5b91220faee981d9a685d8daee501f34604",
+    "autocommit": true,
+    "readOnly": true,
+    "guiPassed": false
+  },
+  "provenance": {
+    "runnerSourceSha256": "9d39ec3bc406548d69f2d4d7aea408922949a47e2926eeb93338101525543939",
+    "fixturePinSha256": "e4a0a93e5ce8242319971c1271bcf468379e4c731509dd5e3dbaec7b08df2e51",
+    "artifactReceiptSha256": "040744c7c425176cceeba5dffb8507d0f34c5b92d5e3957464e270b0877a631c",
+    "manifestSha256": "b0f436b2bbf3794e0b20055b26063bd3ae858a992f6d51d3dbb9810da5a12727",
+    "containerId": "be2fdf93e7d239c233834f31eb83cf13591ebf1749f06c3aec6a78a116765b91",
+    "imageSha256": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+    "fixtureSourceSha256": "cc946c63a5a51f391bac46b2fe740fbe4b421b0fe381be7b2a233dbed076e34d",
+    "hostManifestSha256": "a235bfa62a4181ed2b14d8faacda352e2d6b05e749003b896b13b82c15c4f2e0",
+    "initialReportSha256": "bffce2334c0fea9356399236b69def11ec04b8b0f79c6e4fb6235472e678ba72",
+    "initialUiSha256": "4fe037e83780da507416a9ae9482ce16f5836b112dd542dab5b92e668bdabe4f",
+    "failedRestartSha256": null,
+    "binarySha256": "f7623236ccd1948f75fc9b21acdf8211b7f097c68a4dc513fbfc71cfb026e799",
+    "frontendIndexSha256": "f829fb34a2d9e3c70270bff8f6e800280b43b217586f8aaaee2a98f3cf604caa",
+    "frontendAssetsSha256": "c9c53da648d99ac8ea6be46b1e1f2b8d96a6352276e84ec42176f7965f87f6e6",
+    "source": {
+      "head": "7fadb00d6f9ee2cbf87949e9f908517c508a2956",
+      "files": {
+        "apps/desktop/src/main.ts": "d414e455b19f23b350ec236f7488b9450f54d729feb602e0bb11d5690300b23c",
+        "apps/desktop/src/App.vue": "a2b615b089bf9e1f31bdd02a324f4c11b915c7f3b5400e9452355e3c8d1d66bc",
+        "apps/desktop/src/mysql-parity-dom.ts": "0abccdd3edb644cdd931d8d97151722c60d1b36ba16ae61ec37730d607310016",
+        "apps/desktop/src/components/ConnectionDialog.vue": "51a1f5f4811e2893a19787b2f11d7c5b61ed22dc131b40a5e05c8335b126abb8",
+        "apps/desktop/src/components/SqlEditor.vue": "2641cb47118e9da3e307f714d634fceaf218ca6f6bef7cb5ea8a7029a85e5e2c",
+        "apps/desktop/src/components/ResultGrid.vue": "f672851f67b264c619f6274074c46af3e27f9e750bf806067d2598edecc7e031",
+        "apps/desktop/src/workbench.ts": "635b020785663ceea26cb31433549dfd435ebc4e44b94cc55967667ab33e2428",
+        "apps/desktop/src/backend.ts": "e6af4ab99077ec7493774c11dd455a34b4338bf5b0ba4e2b76221877dfb3e1d3",
+        "src-tauri/src/lib.rs": "840e1f3f1531625bf23696db62dc70e407d99b4362c5b217bf1636e43ffc0ebe",
+        "src-tauri/src/mysql_acceptance.rs": "3ae7303676d5acd424565d7234e593e38c89e84ee2f5500c763f393ad8f06c25",
+        "src-tauri/Cargo.toml": "cf8853c41cad4e5fb38caaa460eb6150b63bfb465beec34c3413a9129ae1321b",
+        "src-tauri/build.rs": "b079dfddc6495459e9963805b9f04005bce8057a07476af5e7fb8b3ead92ee2e",
+        "src-tauri/tauri.conf.json": "7c8265251704d838fd2eebf52db659ceb89a577cb796ea593fc0a5507e933bf3",
+        "src-tauri/tauri.mysql-acceptance.conf.json": "84be7382c365df822bc0b256fe8396891f48131f4646875220750ac01ba7a2d2",
+        "src-tauri/capabilities/main.json": "5dc06b0fea9fbf15ef3f5acfcca4a1ed8c149525a267bb7f68d5c38e5180ebf0",
+        "scripts/build-mysql-acceptance.mjs": "4fdd006cbdb7ec318dfa07ac6bde42c0affc13f81a570082001185d9c677e2ba",
+        "Cargo.lock": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e",
+        "crates/dbstudio-drivers/src/mysql.rs": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b"
+      },
+      "diffSha256": "1edbf40ec72a3b1295f0c54c4529b255079a2a487af8ddf9482ca08a95b5e307",
+      "cargoLockSha256": "e2329d9bab37351fc25198a83f2e0775c815fd03c792f1a16223ef9a9da5b59e"
+    }
+  }
+}

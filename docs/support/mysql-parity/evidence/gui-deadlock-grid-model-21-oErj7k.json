@@ -1,0 +1,102 @@
+{
+  "scope": "real-component-script-and-workbench-with-memory-ipc",
+  "mounted_gui": false,
+  "native_driver": false,
+  "total": 21,
+  "passed": 21,
+  "failed": 0,
+  "cases": [
+    {
+      "name": "late_success_preserves_new_editor_draft_without_table_busy",
+      "passed": true
+    },
+    {
+      "name": "late_error_does_not_replace_new_editor_error",
+      "passed": true
+    },
+    {
+      "name": "two_full_reads_keep_latest_editor_when_resolved_backwards",
+      "passed": true
+    },
+    {
+      "name": "late_success_ignored_after_new_page",
+      "passed": true
+    },
+    {
+      "name": "late_error_ignored_after_generation_change",
+      "passed": true
+    },
+    {
+      "name": "late_error_ignored_after_new_page",
+      "passed": true
+    },
+    {
+      "name": "late_success_ignored_after_generation_change",
+      "passed": true
+    },
+    {
+      "name": "current_full_read_error_remains_visible",
+      "passed": true
+    },
+    {
+      "name": "late_success_ignored_after_cursor_result_change",
+      "passed": true
+    },
+    {
+      "name": "late_error_ignored_after_invalidation",
+      "passed": true
+    },
+    {
+      "name": "late_success_cannot_reopen_after_unmount",
+      "passed": true
+    },
+    {
+      "name": "late_error_ignored_after_unmount",
+      "passed": true
+    },
+    {
+      "name": "begin_insert_invalidates_pending_cell_success",
+      "passed": true
+    },
+    {
+      "name": "begin_insert_invalidates_pending_cell_error",
+      "passed": true
+    },
+    {
+      "name": "cancel_dirty_guard_preserves_insert_values_include_and_nulls",
+      "passed": true
+    },
+    {
+      "name": "successful_insert_true_closes_form_and_keeps_typed_values",
+      "passed": true
+    },
+    {
+      "name": "insert_error_preserves_form_and_all_input",
+      "passed": true
+    },
+    {
+      "name": "apply_deadlock_reject_refreshes_transaction_and_preserves_draft",
+      "passed": true
+    },
+    {
+      "name": "apply_reject_preserves_original_error_when_transaction_read_fails",
+      "passed": true
+    },
+    {
+      "name": "apply_reject_does_not_infer_whole_rollback_without_exact_evidence",
+      "passed": true
+    },
+    {
+      "name": "partial_apply_failure_preserves_all_drafts_and_prior_transaction",
+      "passed": true
+    }
+  ],
+  "ipc_methods": [
+    "applyEdits",
+    "closeCursor",
+    "fetchCellValue",
+    "insertRow",
+    "runQuery",
+    "transactionState"
+  ]
+}

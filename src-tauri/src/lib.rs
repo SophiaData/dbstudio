@@ -2,6 +2,18 @@
 mod secrets;
 #[cfg(feature = "test-hooks")]
 mod smoke;
+#[cfg(feature = "mysql-acceptance")]
+mod mysql_acceptance;
+
+const MYSQL_ACCEPTANCE_ENV: &[&str] = &[
+    "DBSTUDIO_MYSQL_ACCEPTANCE_ROOT", "DBSTUDIO_MYSQL_ACCEPTANCE_RUN_ID",
+    "DBSTUDIO_MYSQL_ACCEPTANCE_PHASE", "DBSTUDIO_MYSQL_ACCEPTANCE_MANIFEST",
+    "DBSTUDIO_MYSQL_HOST", "DBSTUDIO_MYSQL_PORT", "DBSTUDIO_MYSQL_DATABASE",
+    "DBSTUDIO_MYSQL_USER", "DBSTUDIO_MYSQL_PASSWORD", "DBSTUDIO_MYSQL_OBSERVER_PASSWORD", "DBSTUDIO_MYSQL_CA_FILE",
+];
+fn mysql_mode_environment_present() -> bool {
+    MYSQL_ACCEPTANCE_ENV.iter().any(|name| std::env::var_os(name).is_some())
+}
 
 use dbstudio_core::{AppError, Application, SecretStore};
 use serde_json::Value;
@@ -14,6 +26,10 @@ struct DesktopState {
     exit_authorized: AtomicBool,
     #[cfg(feature = "test-hooks")]
     smoke: Option<smoke::SmokeRun>,
+    #[cfg(feature = "mysql-acceptance")]
+    mysql: Arc<mysql_acceptance::AcceptanceRun>,
+    #[cfg(feature = "mysql-acceptance")]
+    mysql_secrets: Arc<mysql_acceptance::AcceptanceSecrets>,
 }
 
 // Explicit native boundary. Unsupported core methods fail closed in the core as well.
@@ -79,10 +95,125 @@ async fn backend_call(
     if args.len() > 32 || serde_json::to_vec(&args).map_err(|_| internal_error())?.len() > argument_limit {
         return Err(AppError::invalid("后端参数超过大小上限"));
     }
+    #[cfg(feature = "mysql-acceptance")]
+    if !state.mysql.probe_method_allowed(&method) {
+        return Err(AppError::unsupported("存储探针阶段禁止业务与凭据操作"));
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method.starts_with("mysqlAcceptance") {
+        let url=window.url().map_err(|_|AppError::new("unauthorized","无法确认测试窗口来源"))?;
+        if !mysql_acceptance::bridge_window_allowed(window.label(),url.as_str()) {
+            return Err(AppError::new("unauthorized","测试桥仅限本轮本地主窗口"));
+        }
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceTimeCheckpoint" || method == "mysqlAcceptanceTimeContinue" {
+        if args.len()!=1{return Err(AppError::invalid("时间网格检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceTimeCheckpoint"{state.mysql.time_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.time_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceBinaryCheckpoint" || method == "mysqlAcceptanceBinaryContinue" {
+        if args.len()!=1{return Err(AppError::invalid("二进制检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceBinaryCheckpoint"{state.mysql.binary_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.binary_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceCrosszoneCheckpoint" || method == "mysqlAcceptanceCrosszoneContinue" {
+        if args.len()!=1{return Err(AppError::invalid("跨时区检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceCrosszoneCheckpoint"{state.mysql.crosszone_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.crosszone_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceSessionTimezoneCheckpoint" || method == "mysqlAcceptanceSessionTimezoneContinue" {
+        if args.len()!=1{return Err(AppError::invalid("会话时区检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceSessionTimezoneCheckpoint"{state.mysql.session_timezone_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.session_timezone_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceTextCheckpoint" || method == "mysqlAcceptanceTextContinue" {
+        if args.len()!=1{return Err(AppError::invalid("全文检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceTextCheckpoint"{state.mysql.text_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.text_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptancePrecisionCheckpoint" || method == "mysqlAcceptancePrecisionContinue" {
+        if args.len()!=1{return Err(AppError::invalid("精确值检查点只接受一个对象"));}
+        if method=="mysqlAcceptancePrecisionCheckpoint"{state.mysql.precision_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.precision_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceTimeoutCheckpoint" || method == "mysqlAcceptanceTimeoutContinue" {
+        if args.len()!=1{return Err(AppError::invalid("锁等待检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceTimeoutCheckpoint"{state.mysql.timeout_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.timeout_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceDuplicateCheckpoint" || method == "mysqlAcceptanceDuplicateContinue" {
+        if args.len()!=1{return Err(AppError::invalid("唯一键检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceDuplicateCheckpoint"{state.mysql.duplicate_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.duplicate_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceDeadlockCheckpoint" || method == "mysqlAcceptanceDeadlockContinue" {
+        if args.len()!=1 {return Err(AppError::invalid("网格故障检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceDeadlockCheckpoint" {state.mysql.deadlock_checkpoint(&args[0],&state.mysql_secrets)?;return Ok(Value::Null);}
+        return state.mysql.deadlock_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceCommitCheckpoint" || method == "mysqlAcceptanceCommitContinue" {
+        if args.len()!=1 {return Err(AppError::invalid("提交检查点只接受一个对象"));}
+        if method=="mysqlAcceptanceCommitCheckpoint" {
+            state.mysql.commit_checkpoint(&args[0],&state.mysql_secrets)?;
+            return Ok(Value::Null);
+        }
+        return state.mysql.commit_continue(&args[0]);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceStartupTrace" {
+        if args.len()!=1 {return Err(AppError::invalid("启动追踪只接受一个对象"));}
+        state.mysql.frontend_startup_trace(&args[0])?;
+        return Ok(Value::Null);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceProbeReport" {
+        if args.len()!=1 {return Err(AppError::invalid("存储探针只接受一个对象"));}
+        state.mysql.retain_probe_report(&args[0],&state.mysql_secrets)?;
+        let application=state.application.clone();
+        tauri::async_runtime::spawn_blocking(move||application.close()).await.map_err(|_|internal_error())??;
+        state.exit_authorized.store(true,Ordering::SeqCst);
+        app.exit(0);
+        return Ok(Value::Null);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceFillAppPassword" {
+        if !args.is_empty() {return Err(AppError::invalid("密码控件桥不接受参数"));}
+        let script=state.mysql.password_script()?;
+        window.eval(&script).map_err(|_|AppError::new("internal","密码控件脚本未能排队"))?;
+        return Ok(serde_json::json!({"scheduled":true}));
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceReport" {
+        if args.len()!=1 {return Err(AppError::invalid("验收报告只接受一个对象"));}
+        let reported_success=state.mysql.retain_ui_report(&args[0],&state.mysql_secrets)?;
+        let application=state.application.clone();
+        let closed=tauri::async_runtime::spawn_blocking(move||application.close()).await.map_err(|_|internal_error())?;
+        state.exit_authorized.store(true,Ordering::SeqCst);
+        app.exit(if reported_success&&closed.is_ok(){0}else{1});
+        return Ok(Value::Null);
+    }
+    #[cfg(feature = "mysql-acceptance")]
+    if method == "mysqlAcceptanceContext" || method == "mysqlAcceptanceObservations" {
+        if !args.is_empty() { return Err(AppError::invalid("验收观察接口不接受参数")); }
+        return if method == "mysqlAcceptanceContext" { Ok(state.mysql.context()) }
+            else { state.mysql.snapshot(&state.mysql_secrets) };
+    }
     if method == "confirmExit" {
         if !args.is_empty() { return Err(AppError::invalid("confirmExit 不接受参数")); }
         let application = state.application.clone();
         tauri::async_runtime::spawn_blocking(move || application.close()).await.map_err(|_| internal_error())??;
+        #[cfg(feature = "mysql-acceptance")]
+        state.mysql.retain_snapshot(&state.mysql_secrets)?;
         state.exit_authorized.store(true, Ordering::SeqCst);
         app.exit(0);
         return Ok(Value::Null);
@@ -151,8 +282,34 @@ async fn backend_call(
     let application = state.application.clone();
     #[cfg(feature = "test-hooks")]
     let observed_method = method.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || application.call(&method, args))
-        .await.map_err(|_| internal_error())?;
+    #[cfg(feature = "mysql-acceptance")]
+    let observed_started = std::time::Instant::now();
+    #[cfg(feature = "mysql-acceptance")]
+    let _=state.mysql.native_startup_trace("native_enter",&method);
+    let joined = tauri::async_runtime::spawn_blocking(move || application.call(&method, args)).await;
+    #[cfg(feature = "mysql-acceptance")]
+    let _=state.mysql.native_startup_trace(if matches!(&joined,Ok(Ok(_))) {"native_returned"}else{"native_failed"},&observed_method);
+    let result=joined.map_err(|_|internal_error())?;
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record(&observed_method, result.is_ok(), observed_started.elapsed().as_millis());
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_deadlock_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_duplicate_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_timeout_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_precision_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_text_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_session_timezone_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_time_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_crosszone_result(&observed_method,&result);
+    #[cfg(feature = "mysql-acceptance")]
+    state.mysql.record_binary_result(&observed_method,&result);
     #[cfg(feature = "test-hooks")]
     if result.is_ok() {
         if let Some(fixture) = &state.smoke {
@@ -163,17 +320,44 @@ async fn backend_call(
 }
 
 pub fn run() {
+    // Reject test-mode environment before Tauri can create any configured window or read app data.
+    #[cfg(not(feature = "mysql-acceptance"))]
+    if mysql_mode_environment_present() {
+        eprintln!("MySQL acceptance environment requires its dedicated test artifact");
+        std::process::exit(2);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    if std::env::var_os("DBSTUDIO_NATIVE_SMOKE_ROOT").is_some() {
+        eprintln!("Native smoke environment requires a test artifact");
+        std::process::exit(2);
+    }
+    let context = tauri::generate_context!();
+    #[cfg(feature = "mysql-acceptance")]
+    let mysql = {
+        if context.config().identifier != "io.dbstudio.mysql-acceptance" || !context.config().app.windows.is_empty() {
+            eprintln!("MySQL acceptance requires a dedicated config with no automatic windows");
+            std::process::exit(2);
+        }
+        match mysql_acceptance::AcceptanceRun::from_environment() {
+            Ok(run) => Arc::new(run),
+            Err(_) => { eprintln!("MySQL acceptance isolation preflight rejected"); std::process::exit(2); }
+        }
+    };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![backend_call])
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(feature = "test-hooks")]
             let smoke = smoke::SmokeRun::from_environment()?;
             #[cfg(not(feature = "test-hooks"))]
             if std::env::var_os("DBSTUDIO_NATIVE_SMOKE_ROOT").is_some() {
                 return Err("此构建未启用原生测试入口".into());
             }
-            #[cfg(feature = "test-hooks")]
+            #[cfg(feature = "mysql-acceptance")]
+            let mysql_secrets = Arc::new(mysql_acceptance::AcceptanceSecrets::new(&mysql));
+            #[cfg(feature = "mysql-acceptance")]
+            let (base_dir, secrets): (_, Arc<dyn SecretStore>) = (mysql.root.join("data"), mysql_secrets.clone());
+            #[cfg(all(feature = "test-hooks", not(feature = "mysql-acceptance")))]
             let (base_dir, secrets): (_, Arc<dyn SecretStore>) = match &smoke {
                 Some(fixture) => (fixture.root.join("data"), Arc::new(smoke::FixtureSecrets::default())),
                 None => (app.path().app_data_dir()?, Arc::new(secrets::OsSecretStore)),
@@ -192,7 +376,28 @@ pub fn run() {
                 exit_authorized: AtomicBool::new(false),
                 #[cfg(feature = "test-hooks")]
                 smoke,
+                #[cfg(feature = "mysql-acceptance")]
+                mysql: mysql.clone(),
+                #[cfg(feature = "mysql-acceptance")]
+                mysql_secrets,
             });
+            #[cfg(feature = "mysql-acceptance")]
+            {
+                #[cfg(not(target_os = "macos"))]
+                return Err("This isolation slice requires macOS 14+ WKWebView data stores".into());
+                #[cfg(target_os = "macos")]
+                {
+                    let version = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output()?;
+                    let major = std::str::from_utf8(&version.stdout).ok().and_then(|value| value.trim().split('.').next()).and_then(|value| value.parse::<u32>().ok());
+                    if !version.status.success() || !major.is_some_and(|value| value >= 14) { return Err("WKWebView store isolation requires macOS 14+".into()); }
+                    // No configured window exists. Configure the store before any Vue/localStorage access.
+                    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+                        .title("dbstudio · isolated MySQL acceptance")
+                        .inner_size(1180.0, 760.0)
+                        .data_store_identifier(mysql.store_id)
+                        .build()?;
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -206,13 +411,23 @@ pub fn run() {
         });
     #[cfg(feature = "test-hooks")]
     let builder = builder.on_page_load(|webview, payload| {
+        #[cfg(feature = "mysql-acceptance")]
+        if matches!(payload.event(),tauri::webview::PageLoadEvent::Finished) {
+            if let Some(state)=webview.try_state::<DesktopState>() {
+                if state.mysql.phase=="restart-probe" {
+                    let allowed=webview.url().ok().and_then(|url|state.mysql.retain_probe_checkpoint(webview.label(),url.as_str()).ok()).unwrap_or(false);
+                    if allowed {if let Ok(script)=state.mysql.probe_script(){let _=webview.eval(&script);}}
+                    return;
+                }
+            }
+        }
         if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             && webview.try_state::<DesktopState>().is_some_and(|state| state.smoke.is_some())
         {
             let _ = webview.eval(smoke::RUN_SCRIPT);
         }
     });
-    let app = builder.build(tauri::generate_context!()).expect("无法初始化 dbstudio 桌面宿主");
+    let app = builder.build(context).expect("无法初始化 dbstudio 桌面宿主");
     app.run(|handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let state = handle.state::<DesktopState>();

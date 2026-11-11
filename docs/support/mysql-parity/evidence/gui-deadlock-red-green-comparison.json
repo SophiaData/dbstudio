@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scope": "actual-gui-deadlock-product-fix-comparison",
+  "redRunId": "dd57df9a7d4242fbaef34fabdac1c64c",
+  "redPid": 61745,
+  "greenRunId": "c5da587fdca64f64a871c1582154e0cf",
+  "greenPid": 97008,
+  "redClassification": "KNOWN_GAP_RED",
+  "redFailureCode": "MYSQL_ERROR_DETAILS_LOST",
+  "greenClassification": "VERIFIED",
+  "greenFailureCode": "NONE",
+  "serverError": {
+    "code": 1213,
+    "sqlState": "40001"
+  },
+  "harnessUnchanged": true,
+  "driverAndFixtureUnchanged": true,
+  "changedProductionSourcesWithin19": [
+    "apps/desktop/src/workbench.ts",
+    "crates/dbstudio-core/src/lib.rs"
+  ],
+  "redState": {
+    "guiErrorClass": "other",
+    "uiActive": true,
+    "uiPendingAffected": 1,
+    "dirtyRows": 1,
+    "transactionReadCountBefore": 4,
+    "transactionReadCountAfter": 4,
+    "noticeVerified": false,
+    "recoveryVerified": false
+  },
+  "greenState": {
+    "guiErrorClass": "1213",
+    "uiActive": false,
+    "uiPendingAffected": 0,
+    "dirtyRows": 1,
+    "transactionReadCountBefore": 4,
+    "transactionReadCountAfter": 5,
+    "noticeVerified": true,
+    "recoveryVerified": true
+  },
+  "redJointSha256": "92e3e8d45cdfbdae2659a28c8eeaf6179525215464b7a154f35cd0b3548d2d9a",
+  "greenJointSha256": "8a26da73a69c9df88c9756a945b817beb513bf0c5daa3ffb6fc83cda833880ae",
+  "greenSummarySha256": "dbc68ddf428c3f4052c6dd00e91d03d4703e448f3aeac192793488735a429373",
+  "productionReady": false
+}

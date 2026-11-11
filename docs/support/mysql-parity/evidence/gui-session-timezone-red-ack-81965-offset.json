@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"59ba845c44c94e8a8d7bc05d80ad7756","phase":"session-timezone","pid":81965,"step":"offset","proof":{"schemaVersion":1,"step":"offset","uiActive":false,"uiPendingAffected":0,"projectionSha256":"9b367770ccec642acf5bbcbd63b26037877489020e6a19f045a044079faf5d89","connectionId":5207,"setFailed":true,"autocommit":true},"verified":true}

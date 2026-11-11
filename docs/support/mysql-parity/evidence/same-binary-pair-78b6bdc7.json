@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scope": "same-binary-initial-and-restart-real-ui-pair",
+  "runId": "78b6bdc7111946c9b207da92213bbcef",
+  "pairPassed": true,
+  "productionReady": false,
+  "binarySha256": "f9c0e3831096d5894b7000a4109e303f7d16e5b9f0ba87f85a0710c41749ece1",
+  "provenance": {
+    "runnerSourceSha256": "e4242226f831ce5f1000a761d29c206634b8f9c5f56f47b45d83c19b9109905f",
+    "fixturePinSha256": "a9abcdf798312f071567d18ca88997ae3eeee71b097a845bf17e90d58881140c",
+    "artifactReceiptSha256": "553d90dd1fc655a9d7cd275dc6822f057d6caa8721dc89771d6dd70f4a6065cb"
+  },
+  "checks": {
+    "storage_marker": true,
+    "persisted_connection": true,
+    "credential_reconnect": true,
+    "sql_select41": true,
+    "table_open": true,
+    "local_edit": true,
+    "dirty_guard_cancel": true,
+    "applied_pending": true,
+    "rollback_restored": true
+  },
+  "actions": {
+    "click": 15,
+    "input": 2,
+    "keydown": 0,
+    "dblclick": 2
+  },
+  "keyring": {
+    "gets": 6,
+    "hits": 6,
+    "sets": 0
+  },
+  "finalBaselineBodyRows": 805,
+  "crossBuildCredentialRecoveryVerified": false,
+  "commitVerified": false,
+  "preCommitObserverVisibilityVerified": false,
+  "osTrustedKeyboardVerified": false,
+  "soakVerified": false,
+  "sourceReportSha256": {
+    "same-binary-initial-78b6bdc7.json": "a47ab15d95b04fe3483fb42d633fb667528faa754fd7356100aaa2ef79e8ece7",
+    "same-binary-restart-73656.json": "52fd3ed02c0aabc45eec037533b5768331024b4cb873aee8e0573ce3fa625442",
+    "same-binary-ui-73656.json": "1cd8696aa16d7ed9a4ff765744a7137ae6fb4cf97bf9654c616cffb90cd9c032"
+  }
+}

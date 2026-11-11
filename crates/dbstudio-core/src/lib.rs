@@ -88,6 +88,12 @@ pub(crate) fn safe_error(error: AppError) -> AppError {
     };
     AppError::new(code, message)
 }
+fn safe_driver_error(dialect_id: &str, error: AppError) -> AppError {
+    if dialect_id == "mysql" && error.code == "driver-error" && error.message == "MySQL操作失败(SQLSTATE 40001, code 1213)" {
+        return AppError::new("driver-error", "MySQL操作失败(SQLSTATE 40001, code 1213)")
+    }
+    safe_error(error)
+}
 impl Application {
     pub fn open(base_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Result<Self, AppError> {
         Self::open_with_legacy(base_dir, secrets, None)
@@ -239,7 +245,7 @@ impl Application {
     }
     pub(crate) fn driver_call(&self, node_id: &str, method: &str, args: Vec<Value>) -> Result<Value, AppError> {
         let session = self.capture_session(node_id)?;
-        let result = session.call(method, args).map_err(safe_error)?;
+        let result = session.call(method, args).map_err(|error| safe_driver_error(&session.dialect_id, error))?;
         self.ensure_session(&session)?;
         Ok(result)
     }

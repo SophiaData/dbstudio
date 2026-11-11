@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "caseId": "mysql_lock_wait_timeout_preserves_prior_transaction",
+  "containerId": "e5db8a8460a876df9cb2b9b89b2978772ab6366c74765fa7b0c997bb3ab63d46",
+  "originalTimeout": 50,
+  "requestedTimeout": 1,
+  "rollbackOnTimeoutOff": true
+}

@@ -14,7 +14,7 @@
     "test:native-architecture": "node scripts/check-native-architecture.mjs",
     "test:native-desktop": "node scripts/native-desktop-smoke.mjs",
     "test:native-release": "node tests/native-release-gate.mjs",
-    "test:native-ui-models": "node apps/desktop/tests/pure-regressions.mjs",
+    "test:native-ui-models": "node apps/desktop/tests/pure-regressions.mjs && node apps/desktop/tests/sql-workflow-regressions.mjs && node apps/desktop/tests/grid-workflow-regressions.mjs",
     "dev": "tauri dev",
     "legacy:dev": "pnpm run build:driver-host && electron-vite dev",
     "build:driver-host": "node scripts/build-driver-host.mjs",

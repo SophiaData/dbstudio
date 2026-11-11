@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "scope": "same-candidate-initial-restart-explain-commit-real-ui",
+  "runId": "2b5e9357044940bba267f79abfc0cd99",
+  "allFourPhasesPassed": true,
+  "preCommitObserverVisibilityVerified": true,
+  "commitVerified": true,
+  "productionReady": false,
+  "binarySha256": "2b1979fee13256152415e34c227f0a49670c67251ef3b963f91e7b2661a44e9c",
+  "driverSourceSha256": "8cf4a09bde1a2b58f5977e175adf064d87c8b13c121fd3e177e0179d8e1c090b",
+  "checks": {
+    "storage_marker": true,
+    "persisted_connection": true,
+    "credential_reconnect": true,
+    "table_created": true,
+    "baseline_committed": true,
+    "baseline_observed": true,
+    "pending_visible": true,
+    "pending_isolated": true,
+    "commit_clicked": true,
+    "result_refreshed": true,
+    "committed_observed": true,
+    "nontransactional": true
+  },
+  "row": {
+    "id": 1,
+    "baselineSha256": "32cde3607c142824a2d0d043fb0789b3b63ff0be74dfebf997e3aed8cfc52ff7",
+    "pendingSha256": "f3c8457d08b822e533ab9d3da7603304e8b3e5115c87fb17f3b3fc6f4e925f0b",
+    "committedSha256": "f3c8457d08b822e533ab9d3da7603304e8b3e5115c87fb17f3b3fc6f4e925f0b"
+  },
+  "actions": {
+    "click": 9,
+    "input": 5,
+    "keydown": 0
+  },
+  "flowWithObserverWaitElapsedMs": 2330,
+  "nativeExecuteSuccesses": 5,
+  "nativeCommitSuccesses": 2,
+  "keyringGets": 8,
+  "keyringHits": 8,
+  "keyringSets": 0,
+  "sourceReportSha256": {
+    "gui-commit-initial-2b5e9357.json": "7ab77f85da5c0aa5cff5925e6afaa67c194ea5633f062639c170f7efa86f4c6a",
+    "gui-commit-initial-ui-2b5e9357.json": "3d5335c6a391b4e0003f5d56201bf1314b83d3db313d3d5a641606caedd7f14e",
+    "gui-commit-restart-8040.json": "b948e76cf69876a25749f020c2c67af7d6a3f8d503bdde8925307c714e6c38ad",
+    "gui-commit-explain-8449.json": "f90354cb10fd9c67a2c55dbc6632d88308723bc0a98abcc2e3504c3bcee80ba3",
+    "gui-commit-ui-9131.json": "b9a813bcbf358dd81a1c6e5f5d619fe6a690139ffb5e6db2847d2cac78c76730",
+    "gui-commit-joint-9131.json": "180dece5e635a1598522fe362bc0b5032bdd791ddef4de776baea61a0f9833da",
+    "gui-commit-checkpoint-9131-baseline.json": "0d1c2aa02d2248bc26674412b781d597fc86ecef051074f1b9853abe1d5ccad7",
+    "gui-commit-ack-9131-baseline.json": "f86ce2a4e923b1657ccbe220a7c1b0fab039ee3083a5a6f8e5399dbaed2c5762",
+    "gui-commit-checkpoint-9131-pending.json": "556a949ea73456ce1f649dd106f31e70eb1b58c662cdd5f1f3d45eac1c170018",
+    "gui-commit-ack-9131-pending.json": "17dbbe69dc2af0143378242987358d6db930a1632164892e6ae8ad4823408834",
+    "gui-commit-checkpoint-9131-committed.json": "09bbc3df68ce55415df23325f967c5bca08bcac2dfc8178c22aa6761ebf2a20f",
+    "gui-commit-ack-9131-committed.json": "4a4dd5bf846819937e991da977e452088bcb73b7164090d11a612e5551d12905"
+  },
+  "osTrustedInputVerified": false,
+  "crossBuildCredentialRecoveryVerified": false,
+  "guiErrorRecoveryVerified": false,
+  "referenceProductsOperated": false,
+  "soakVerified": false
+}
