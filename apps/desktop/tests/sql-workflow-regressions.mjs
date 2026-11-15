@@ -204,11 +204,16 @@ await check('insert_backend_failure_still_throws', async () => {
   assert.equal(wb.locks.has('a'), false)
 })
 
-await check('insert_refresh_failure_still_throws_instead_of_success', async () => {
+await check('insert_refresh_failure_reports_insert_succeeded_and_refresh_failed', async () => {
   const { wb, tab, backend, calls } = fixture()
   backend.transactionState = async () => { throw new Error('SYNTHETIC_INSERT_REFRESH_FAILED') }
-  await assert.rejects(wb.insertRow(tab, { body: text('new-row') }), /SYNTHETIC_INSERT_REFRESH_FAILED/)
+  // The row was written before the refresh step; a refresh failure must not be reported as a failed insert.
+  assert.equal(await wb.insertRow(tab, { body: text('new-row') }), true)
   assert.equal(calls.inserts, 1)
+  assert.equal(wb.statusError.value, true)
+  assert.match(wb.status.value, /已插入 1 行/)
+  assert.match(wb.status.value, /刷新失败/)
+  assert.match(wb.status.value, /SYNTHETIC_INSERT_REFRESH_FAILED/)
   assert.equal(wb.locks.has('a'), false)
 })
 
