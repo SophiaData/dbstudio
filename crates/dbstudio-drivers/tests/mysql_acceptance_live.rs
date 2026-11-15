@@ -1,3 +1,7 @@
+//! 这组用例依赖 Unix 文件权限与硬链接语义（mode/nlink），在 Windows 上无法编译。
+//! 整个文件限定 Unix，避免拖垮整个包的 `cargo test` 在 Windows 上失败。
+#![cfg(unix)]
+
 //! Retain-only native MySQL baseline. Run only through scripts/mysql-driver-acceptance.mjs.
 //! All cases are deliberately ignored in ordinary suites. No GUI or performance claim.
 use dbstudio_protocol::{ConnectionConfig, Driver, DriverError, SecretMap};
