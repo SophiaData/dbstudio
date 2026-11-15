@@ -42,6 +42,15 @@ const scopeTable = ref('')
 const newDatabase = ref('')
 const objectSourceText = ref('')
 const confirmAction = ref<{ title: string; run: () => Promise<void> } | null>(null)
+/** 授权/回收的目标账号，形如 `user@host`；用户列表变化时回落到第一条。 */
+const grantTarget = ref('')
+const grantTargetValue = computed(() => {
+  const list = users.value?.users ?? []
+  const hit = list.find((row) => `${row.user}@${row.host}` === grantTarget.value) ?? list[0]
+  return hit
+    ? { value: hit.user, host: hit.host, user: hit.user }
+    : { value: '', host: '', user: '' }
+})
 
 const partitionName = ref('')
 const partitionBound = ref('MAXVALUE')
@@ -302,6 +311,12 @@ void switchTab(tab.value)
             <span v-if="row.locked"> · 已锁定</span>
             <span v-if="row.passwordExpired"> · 密码已过期</span>
             <span v-if="row.plugin"> · {{ row.plugin }}</span>
+            <button
+              type="button"
+              class="danger"
+              :disabled="busy"
+              @click="askConfirm(`确认删除账号 ${row.user}@${row.host}？该账号的权限会一并移除。`, () => submitDropUser(row.user, row.host))"
+            >删除</button>
           </li>
         </ul>
         <p v-if="users" class="muted">共 {{ users.privileges.length }} 条全局权限记录</p>
@@ -311,13 +326,16 @@ void switchTab(tab.value)
           <label>口令<input v-model="newUserPassword" type="password" placeholder="留空表示无口令" /></label>
           <button type="submit" :disabled="busy">新建账号</button>
         </form>
-        <form @submit.prevent="users && users.users.length ? submitGrant(users.users[0].user, users.users[0].host) : undefined">
+        <form @submit.prevent="submitGrant(grantTargetValue.user, grantTargetValue.host)">
+          <label>目标账号<select v-model="grantTarget">
+            <option v-for="row in users?.users ?? []" :key="`${row.user}@${row.host}`" :value="`${row.user}@${row.host}`">{{ row.user }}@{{ row.host }}</option>
+          </select></label>
           <label>权限<input v-model="privilegeText" placeholder="SELECT, INSERT" required /></label>
           <label>范围<select v-model="scopeKind"><option value="global">全局</option><option value="database">库</option><option value="table">表</option></select></label>
           <label v-if="scopeKind !== 'global'">库名<input v-model="scopeDatabase" maxlength="64" /></label>
           <label v-if="scopeKind === 'table'">表名<input v-model="scopeTable" maxlength="64" /></label>
-          <button type="submit" :disabled="busy || !users?.users.length">授权给首个账号</button>
-          <button type="button" :disabled="busy || !users?.users.length" @click="users && submitRevoke(users.users[0].user, users.users[0].host)">回收</button>
+          <button type="submit" :disabled="busy || !users?.users.length">授权</button>
+          <button type="button" :disabled="busy || !users?.users.length" @click="askConfirm(`确认回收 ${grantTargetValue.user}@${grantTargetValue.host} 的 ${privilegeText} 权限？`, () => submitRevoke(grantTargetValue.user, grantTargetValue.host))">回收</button>
         </form>
 
       </div>
@@ -383,6 +401,10 @@ void switchTab(tab.value)
           <label>边界值<input v-model="partitionBound" maxlength="64" placeholder="MAXVALUE 或 2027" required /></label>
           <button type="submit" :disabled="busy">新增分区</button>
         </form>
+        <form @submit.prevent="partitionName && askConfirm(`确认删除分区 ${partitionName}？该分区内的数据会一并删除。`, () => dropPartition(partitionName.trim()))">
+          <label>删除分区<input v-model="partitionName" maxlength="64" placeholder="输入已有分区名" required /></label>
+          <button type="submit" class="danger" :disabled="busy">删除分区</button>
+        </form>
         <p v-if="!tableNodeId" class="muted">请先在目录树中选择一张表</p>
       </div>
 
@@ -394,9 +416,9 @@ void switchTab(tab.value)
           <button type="button" :disabled="busy" @click="addIndex(true)">新增唯一索引</button>
         </form>
         <p class="muted">已有索引的列在表结构里可见；删除或修改请使用下方输入。</p>
-        <form @submit.prevent="indexName && dropIndex(indexName.trim())">
+        <form @submit.prevent="indexName && askConfirm(`确认删除索引 ${indexName}？`, () => dropIndex(indexName.trim()))">
           <label>删除索引<input v-model="indexName" maxlength="64" placeholder="输入已有索引名" /></label>
-          <button type="submit" :disabled="busy || !indexName">删除索引</button>
+          <button type="submit" class="danger" :disabled="busy || !indexName">删除索引</button>
         </form>
       </div>
     </section>
