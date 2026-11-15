@@ -19,6 +19,11 @@ fn schema_name() -> String {
     std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
 }
 
+/// 当前测试账号：本机与 CI 夹具不同，不能写死。
+fn account_name() -> String {
+    std::env::var("PARTITION_TEST_USER").unwrap_or_else(|_| "dbstudio".into())
+}
+
 fn test_config(name: &str) -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -58,7 +63,7 @@ fn list_sessions_reports_real_processlist_and_marks_current() {
     assert!(me.get("id").and_then(|v| v.as_u64()).is_some(), "会话必须带数值 id");
     assert_eq!(
         me.get("user").and_then(|v| v.as_str()),
-        Some("dbstudio"),
+        Some(account_name().as_str()),
         "当前会话的 user 必须与连接账号一致"
     );
     assert!(

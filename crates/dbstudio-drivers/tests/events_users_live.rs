@@ -19,6 +19,11 @@ fn schema_name() -> String {
     std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
 }
 
+/// 当前测试账号：本机与 CI 夹具不同，不能写死。
+fn account_name() -> String {
+    std::env::var("PARTITION_TEST_USER").unwrap_or_else(|_| "dbstudio".into())
+}
+
 fn test_config(name: &str) -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -98,7 +103,7 @@ fn list_users_reports_accounts_and_privileges_without_secrets() {
     let users = listed.get("users").and_then(|v| v.as_array()).expect("users 必须是数组");
     let me = users
         .iter()
-        .find(|item| item.get("user").and_then(|v| v.as_str()) == Some("dbstudio"))
+        .find(|item| item.get("user").and_then(|v| v.as_str()) == Some(account_name().as_str()))
         .unwrap_or_else(|| panic!("未读到当前账号：{users:?}"));
     assert_eq!(me.get("host").and_then(|v| v.as_str()), Some("%"));
     assert!(me.get("locked").and_then(|v| v.as_bool()).is_some(), "锁定状态必须是布尔值");
@@ -116,7 +121,7 @@ fn list_users_reports_accounts_and_privileges_without_secrets() {
     let privileges = listed.get("privileges").and_then(|v| v.as_array()).expect("privileges 必须是数组");
     let mine: Vec<&serde_json::Value> = privileges
         .iter()
-        .filter(|item| item.get("grantee").and_then(|v| v.as_str()).is_some_and(|g| g.contains("dbstudio")))
+        .filter(|item| item.get("grantee").and_then(|v| v.as_str()).is_some_and(|g| g.contains(&account_name())))
         .collect();
     assert!(!mine.is_empty(), "当前账号必须能读到自己的全局权限");
     let names: Vec<&str> = mine
