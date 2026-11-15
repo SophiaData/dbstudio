@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -93,20 +98,20 @@ fn object_source_reads_real_routine_view_and_trigger_text() {
     }
 
     let view = driver
-        .call("objectSource", vec![json!("view:testdb.source_view_demo")])
+        .call("objectSource", vec![json!(format!("view:{}.source_view_demo", schema_name()))])
         .expect("读取视图源码失败");
     let view_sql = view.get("sql").and_then(|v| v.as_str()).unwrap_or_default();
     assert!(view_sql.contains("source_table_demo"), "视图源码必须来自真实库：{view_sql}");
 
     let routine = driver
-        .call("objectSource", vec![json!("routine:testdb.PROCEDURE.source_routine_demo")])
+        .call("objectSource", vec![json!(format!("routine:{}.PROCEDURE.source_routine_demo", schema_name()))])
         .expect("读取例程源码失败");
     let definition = routine.get("definition").and_then(|v| v.as_str()).unwrap_or_default();
     assert!(definition.contains("COUNT"), "例程源码必须来自真实库：{definition}");
     assert_eq!(routine.get("routineType").and_then(|v| v.as_str()), Some("PROCEDURE"));
 
     let trigger = driver
-        .call("objectSource", vec![json!("trigger:testdb.source_trigger_demo")])
+        .call("objectSource", vec![json!(format!("trigger:{}.source_trigger_demo", schema_name()))])
         .expect("读取触发器源码失败");
     assert_eq!(trigger.get("timing").and_then(|v| v.as_str()), Some("BEFORE"));
     assert_eq!(trigger.get("event").and_then(|v| v.as_str()), Some("INSERT"));
@@ -117,7 +122,7 @@ fn object_source_reads_real_routine_view_and_trigger_text() {
 
     // 不存在的对象必须明确报错，不能返回空源码。
     driver
-        .call("objectSource", vec![json!("routine:testdb.PROCEDURE.not_exists")])
+        .call("objectSource", vec![json!(format!("routine:{}.PROCEDURE.not_exists", schema_name()))])
         .expect_err("不存在的例程必须报错");
 
     for sql in [

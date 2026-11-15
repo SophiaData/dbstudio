@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -62,7 +67,7 @@ fn index_ddl_adds_replaces_and_drops_real_indexes() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.index_admin_demo";
+    let table = format!("table:{}.index_admin_demo", schema_name());
 
     driver
         .call("executeStatement", vec![json!("DROP TABLE IF EXISTS index_admin_demo"), json!({})])
@@ -82,7 +87,7 @@ fn index_ddl_adds_replaces_and_drops_real_indexes() {
         )
         .expect("新增索引失败");
     assert!(
-        index_names(&mut driver, table).iter().any(|(name, columns)| name == "idx_a" && columns == &vec!["a".to_owned()]),
+        index_names(&mut driver, &table).iter().any(|(name, columns)| name == "idx_a" && columns == &vec!["a".to_owned()]),
         "idx_a 必须出现在真实索引里"
     );
 
@@ -98,7 +103,7 @@ fn index_ddl_adds_replaces_and_drops_real_indexes() {
         executed.contains("DROP INDEX") && executed.contains("ADD INDEX"),
         "修改必须是单条 ALTER：{executed}"
     );
-    let after = index_names(&mut driver, table);
+    let after = index_names(&mut driver, &table);
     assert!(after.iter().any(|(name, columns)| name == "idx_ab" && columns == &vec!["a".to_owned(), "b".to_owned()]), "idx_ab 必须存在：{after:?}");
     assert!(!after.iter().any(|(name, _)| name == "idx_a"), "旧索引必须已删除：{after:?}");
 
@@ -106,7 +111,7 @@ fn index_ddl_adds_replaces_and_drops_real_indexes() {
     driver
         .call("indexTable", vec![json!(table), json!({"action": "drop", "name": "idx_ab"})])
         .expect("删除索引失败");
-    assert!(!index_names(&mut driver, table).iter().any(|(name, _)| name == "idx_ab"), "idx_ab 应已删除");
+    assert!(!index_names(&mut driver, &table).iter().any(|(name, _)| name == "idx_ab"), "idx_ab 应已删除");
 
     driver
         .call("executeStatement", vec![json!("DROP TABLE IF EXISTS index_admin_demo"), json!({})])
@@ -120,7 +125,7 @@ fn index_ddl_rejects_injected_names_columns_and_unknown_actions() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.index_injection_demo";
+    let table = format!("table:{}.index_injection_demo", schema_name());
     driver
         .call(
             "executeStatement",

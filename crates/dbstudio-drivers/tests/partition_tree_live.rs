@@ -12,6 +12,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -37,7 +42,7 @@ fn tree_exposes_partition_nodes_before_columns() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.partition_tree_demo";
+    let table = format!("table:{}.partition_tree_demo", schema_name());
 
     driver
         .call("executeStatement", vec![json!("DROP TABLE IF EXISTS partition_tree_demo"), json!({})])
@@ -83,7 +88,7 @@ fn tree_has_no_partition_nodes_for_plain_tables() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.plain_tree_demo";
+    let table = format!("table:{}.plain_tree_demo", schema_name());
     driver
         .call(
             "executeStatement",

@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -81,7 +86,7 @@ fn user_management_creates_grants_revokes_and_drops_real_account() {
                 json!(account.as_str()),
                 json!("%"),
                 json!(["SELECT"]),
-                json!({"kind": "database", "database": "testdb"}),
+                json!({"kind": "database", "database": schema_name()}),
                 json!({}),
             ],
         )
@@ -92,7 +97,7 @@ fn user_management_creates_grants_revokes_and_drops_real_account() {
         .expect("读取授权失败");
     let rendered = grants.to_string();
     assert!(rendered.contains("SELECT"), "授权必须真实生效：{rendered}");
-    assert!(rendered.contains("testdb"), "授权必须落在 testdb：{rendered}");
+    assert!(rendered.contains(&schema_name()), "授权必须落在目标库：{rendered}");
 
     driver
         .call(
@@ -101,7 +106,7 @@ fn user_management_creates_grants_revokes_and_drops_real_account() {
                 json!(account.as_str()),
                 json!("%"),
                 json!(["SELECT"]),
-                json!({"kind": "database", "database": "testdb"}),
+                json!({"kind": "database", "database": schema_name()}),
             ],
         )
         .expect("回收权限失败");

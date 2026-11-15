@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config(name: &str) -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -62,7 +67,7 @@ fn list_sessions_reports_real_processlist_and_marks_current() {
     );
     assert_eq!(
         me.get("database").and_then(|v| v.as_str()),
-        Some("testdb"),
+        Some(schema_name().as_str()),
         "会话应报告当前库"
     );
 }

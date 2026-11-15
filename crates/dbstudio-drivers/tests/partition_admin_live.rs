@@ -15,6 +15,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -54,7 +59,7 @@ fn partition_ddl_adds_reorganizes_and_drops_real_partitions() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.partition_admin_demo";
+    let table = format!("table:{}.partition_admin_demo", schema_name());
 
     driver
         .call("executeStatement", vec![json!("DROP TABLE IF EXISTS partition_admin_demo"), json!({})])
@@ -130,7 +135,7 @@ fn partition_ddl_rejects_injected_names_and_bounds() {
         return;
     };
     let mut driver = dbstudio_drivers::connect(&config, &secret_map()).expect("连接测试库失败");
-    let table = "table:testdb.partition_injection_demo";
+    let table = format!("table:{}.partition_injection_demo", schema_name());
     driver
         .call(
             "executeStatement",

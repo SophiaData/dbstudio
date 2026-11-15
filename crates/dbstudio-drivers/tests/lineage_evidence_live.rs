@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -63,7 +68,7 @@ fn lineage_evidence_reports_real_foreign_keys_columns_and_views() {
     let child_evidence = driver
         .call(
             "lineageEvidence",
-            vec![json!({"schema": "testdb", "table": child, "column": "parent_id"})],
+            vec![json!({"schema": schema_name(), "table": child, "column": "parent_id"})],
         )
         .expect("读取血缘证据失败");
     let keys = child_evidence
@@ -82,7 +87,7 @@ fn lineage_evidence_reports_real_foreign_keys_columns_and_views() {
     let parent_evidence = driver
         .call(
             "lineageEvidence",
-            vec![json!({"schema": "testdb", "table": parent, "column": "id"})],
+            vec![json!({"schema": schema_name(), "table": parent, "column": "id"})],
         )
         .expect("读取父表血缘失败");
     let parent_keys = parent_evidence

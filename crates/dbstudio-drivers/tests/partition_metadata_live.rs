@@ -15,6 +15,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -59,7 +64,7 @@ fn describe_table_reports_real_mysql_partitions() {
     }
 
     let described = driver
-        .call("describeTable", vec![json!("table:testdb.partition_meta_demo")])
+        .call("describeTable", vec![json!(format!("table:{}.partition_meta_demo", schema_name()))])
         .expect("读取分区表元数据失败");
     let partitions = described.get("partitions").expect("分区表必须返回 partitions");
     assert_eq!(
@@ -95,7 +100,7 @@ fn describe_table_reports_real_mysql_partitions() {
             .expect("建立普通表失败");
     }
     let plain = driver
-        .call("describeTable", vec![json!("table:testdb.partition_meta_plain")])
+        .call("describeTable", vec![json!(format!("table:{}.partition_meta_plain", schema_name()))])
         .expect("读取普通表元数据失败");
     assert!(
         plain.get("partitions").is_none(),
@@ -134,7 +139,7 @@ fn subpartitioned_table_reports_each_partition_once() {
     }
 
     let described = driver
-        .call("describeTable", vec![json!(format!("table:testdb.{table}"))])
+        .call("describeTable", vec![json!(format!("table:{}.{table}", schema_name()))])
         .expect("读取表结构失败");
     let items = described
         .get("partitions")

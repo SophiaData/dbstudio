@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config() -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -206,7 +211,7 @@ fn search_node_ids_survive_dots_in_identifiers() {
         .expect("必须搜到表");
     assert_eq!(
         table_item.get("nodeId").and_then(|v| v.as_str()),
-        Some(format!("table:testdb.{}", table.replace('.', "\\.")).as_str()),
+        Some(format!("table:{}.{}", schema_name(), table.replace('.', "\\.")).as_str()),
         "表 nodeId 必须转义名字里的点：{table_item:?}"
     );
 
@@ -223,7 +228,7 @@ fn search_node_ids_survive_dots_in_identifiers() {
 
     // 视图的列必须标成 view。
     let view_found = driver
-        .call("searchObjects", vec![json!({"keyword": "view", "kinds": ["column"], "schema": "testdb"})])
+        .call("searchObjects", vec![json!({"keyword": "view", "kinds": ["column"], "schema": schema_name()})])
         .expect("搜索失败");
     let view_columns = view_found.get("items").and_then(|value| value.as_array()).cloned().unwrap_or_default();
     assert!(

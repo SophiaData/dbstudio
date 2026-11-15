@@ -14,6 +14,11 @@ fn secret_map() -> SecretMap {
     map
 }
 
+/// 当前测试库名：本机与 CI 夹具不同，不能写死。
+fn schema_name() -> String {
+    std::env::var("PARTITION_TEST_DATABASE").unwrap_or_else(|_| "testdb".into())
+}
+
 fn test_config(name: &str) -> Option<ConnectionConfig> {
     std::env::var("PARTITION_TEST_HOST").ok()?;
     let mut options = serde_json::Map::new();
@@ -54,7 +59,7 @@ fn list_events_reports_scheduler_state_and_real_events() {
         .expect("创建事件失败");
 
     let listed = driver
-        .call("listEvents", vec![json!({"schema": "testdb"})])
+        .call("listEvents", vec![json!({"schema": schema_name()})])
         .expect("读取事件失败");
     let scheduler = listed.get("scheduler").and_then(|v| v.as_str());
     assert!(
@@ -66,7 +71,7 @@ fn list_events_reports_scheduler_state_and_real_events() {
         .iter()
         .find(|item| item.get("name").and_then(|v| v.as_str()) == Some("event_demo"))
         .unwrap_or_else(|| panic!("未读到刚创建的事件：{items:?}"));
-    assert_eq!(demo.get("schema").and_then(|v| v.as_str()), Some("testdb"));
+    assert_eq!(demo.get("schema").and_then(|v| v.as_str()), Some(schema_name().as_str()));
     assert_eq!(demo.get("status").and_then(|v| v.as_str()), Some("DISABLED"));
     assert_eq!(demo.get("intervalValue").and_then(|v| v.as_str()), Some("1"));
     assert_eq!(demo.get("intervalField").and_then(|v| v.as_str()), Some("DAY"));
