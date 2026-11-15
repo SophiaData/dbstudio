@@ -92,8 +92,9 @@ try {
   }
   // 用户管理类测试要读 mysql.user 与 USER_PRIVILEGES，还要能建号授权；
   // 夹具默认只给库级权限，这里显式补上所需的全局权限。
-  docker(['exec', mysqlFixture.name, 'mysql', '--user=root', '--protocol=TCP', '--host=127.0.0.1',
-    `--password=${mysqlFixture.rootPassword}`, '--execute',
+  // 口令不走命令行：它会出现在进程列表里。用环境变量传入。
+  docker(['exec', '--env', `MYSQL_PWD=${mysqlFixture.rootPassword}`, mysqlFixture.name,
+    'mysql', '--user=root', '--protocol=TCP', '--host=127.0.0.1', '--execute',
     `GRANT SELECT ON mysql.* TO '${mysqlFixture.user}'@'%';
      GRANT CREATE USER, GRANT OPTION, RELOAD, PROCESS ON *.* TO '${mysqlFixture.user}'@'%';
      FLUSH PRIVILEGES;`], 60000)
