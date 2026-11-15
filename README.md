@@ -159,7 +159,6 @@ tests/
 | [元数据、ER 图与结构比较](docs/user-guide/metadata-and-er.md) | 表结构、ER 关系、结构/数据比较 |
 | [MySQL 管理与诊断](docs/user-guide/mysql-management.md) | 分区、索引、会话、事件、用户权限、对象搜索、字段血缘、对象源码、新建库 |
 | [数据库支持矩阵](docs/support/database-matrix.md) | 每个数据库支持什么、不支持什么，及对应验证条目 |
-| [MySQL 能力矩阵](docs/support/mysql-capability-matrix.md) | 对照 dbx 与 DBeaver 的 MySQL 能力覆盖与界面验证记录 |
 | [Backend contract 与 transport 边界](docs/architecture/backend-contract.md) | application services、Electron/HTTP capability、wire 与 driver-host handshake |
 
 ---

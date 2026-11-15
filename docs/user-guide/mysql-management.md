@@ -158,4 +158,4 @@ node apps/desktop/tests/audit-ui-regressions.mjs
 
 未设置 `PARTITION_TEST_HOST` 时真库用例会显式跳过，不会静默通过。
 
-各项能力与 dbx / DBeaver 的对照见 [MySQL 能力矩阵](../support/mysql-capability-matrix.md)。
+各项能力与 dbx / DBeaver 的覆盖对照、以及界面实测记录见 [MySQL 能力矩阵](../support/mysql-capability-matrix.md)。

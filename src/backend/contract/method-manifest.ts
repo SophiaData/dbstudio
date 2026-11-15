@@ -117,6 +117,7 @@ export const BACKEND_METHOD_MANIFEST = [
  */
 const REMOTE_EXCLUDED_METHODS: ReadonlySet<string> = new Set([
   'chooseImportFile',
+  'chooseSqlFile',
   'addConnection',
   'testConnection',
   'updateConnection',
