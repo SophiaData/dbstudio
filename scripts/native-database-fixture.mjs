@@ -5,6 +5,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertNativeTestsExecuted } from './native-test-output.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runId = randomUUID().replaceAll('-', '').slice(0, 16)
@@ -63,12 +64,64 @@ try {
     env[`${prefix}_PORT`] = fixture.hostPort
     env[`${prefix}_PASSWORD`] = fixture.password
   }
+  let output = ''
   const result = await new Promise((done, reject) => {
-    const child = spawn('cargo', ['test', '-p', 'dbstudio-drivers', '--test', 'network_live', '--', '--ignored', '--test-threads=1'], { cwd: root, env, stdio: 'inherit' })
+    const child = spawn('cargo', ['test', '--locked', '-p', 'dbstudio-drivers', '--test', 'network_live', '--', '--ignored', '--test-threads=1'], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      output = (output + chunk).slice(-65536)
+      process.stdout.write(chunk)
+    })
     child.once('error', () => reject(new Error('无法启动原生数据库测试')))
-    child.once('exit', (code) => done(code))
+    child.once('close', (code) => done(code))
   })
   assert.equal(result, 0, '原生真实数据库验收失败')
+  assertNativeTestsExecuted(output, ['postgresql_native_factory_lifecycle', 'mysql_native_factory_lifecycle'])
+  // MySQL 管理与诊断能力必须有真库证据：这些测试在缺少 PARTITION_TEST_* 时
+  // 会显式跳过，cargo 退出码 0 不能作为"已执行"的证据，所以要逐名核对并
+  // 要求 ignored 为 0。
+  const mysqlFixture = fixtures.find((item) => item.kind === 'mysql')
+  assert.ok(mysqlFixture?.hostPort, 'MySQL 夹具备用端口缺失')
+  const managementEnv = {
+    ...env,
+    PARTITION_TEST_HOST: '127.0.0.1',
+    PARTITION_TEST_PORT: mysqlFixture.hostPort,
+    PARTITION_TEST_DATABASE: mysqlFixture.database,
+    PARTITION_TEST_USER: mysqlFixture.user,
+    PARTITION_TEST_PASSWORD: mysqlFixture.password
+  }
+  const managementTests = [
+    'events_users_live', 'index_admin_live', 'lineage_evidence_live', 'object_source_live',
+    'partition_admin_live', 'partition_metadata_live', 'partition_tree_live',
+    'script_execution_live', 'search_objects_live', 'session_admin_live', 'user_admin_live'
+  ]
+  for (const name of managementTests) {
+    const collected = await new Promise((done, reject) => {
+      const child = spawn('cargo',
+        // --nocapture 必需：否则跳过路径的 eprintln 输出不会到 stdout，
+        // 下面的"\u8df3\u8fc7"排查就永远命中不到。
+        ['test', '--locked', '-p', 'dbstudio-drivers', '--test', name, '--', '--nocapture', '--test-threads=1'],
+        { cwd: root, env: managementEnv, stdio: ['ignore', 'pipe', 'inherit'] })
+      let buffer = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', (chunk) => {
+        buffer = (buffer + chunk).slice(-65536)
+        process.stdout.write(chunk)
+      })
+      child.once('error', () => reject(new Error(`无法启动 ${name}`)))
+      child.once('close', (code) => done({ code, buffer }))
+    })
+    assert.equal(collected.code, 0, `MySQL 管理测试失败：${name}`)
+    // 必须有真实执行：至少一条 "test ... ok"，且不得出现 ignored 计数。
+    assert.match(collected.buffer, /^test [A-Za-z0-9_:]+ \.\.\. ok$/m,
+      `MySQL 管理测试未真正执行（可能因缺少环境变量被跳过）：${name}`)
+    assert.match(collected.buffer, /^test result: ok\. \d+ passed; 0 failed; 0 ignored;/m,
+      `MySQL 管理测试存在跳过或失败：${name}`)
+    // 跳过路径是在测试体内 eprintln 后 return，
+    // 统计里仍然是 passed，所以必须另外排查跳过标记。
+    assert.ok(!collected.buffer.includes('\u8df3\u8fc7'),
+      `MySQL 管理测试被跳过而不是真实执行：${name}`)
+  }
   passed = true
 } finally {
   const report = { runId, testsPassed: passed, cleanupPassed: true, passed: false, fixtures: [] }
