@@ -34,15 +34,18 @@
  *    「连接节点没有表结构…」逐字保留。
  * 4. **快照遍历**：只下钻 schema / folder / catalog，深度上限 4；
  *    schema 过滤只作用于 schema 节点；表按 schema+name 排序。
- * 5. **失败降级**：`viewDefinition` / `listRoutines` 单次失败不拖垮整次快照，
- *    分别退化为 `definition: null` 与空例程列表。
+ * 5. **读取失败**：`viewDefinition` 失败保留视图身份与 `definition: null`；
+ *    `listRoutines` 失败拒绝快照，不能把未知列表当成空列表生成 DROP。
  * 6. **SQL 方言守卫**：只允许 sqlite / postgresql / mysql 生成结构快照，
  *    浏览型数据源（Redis / Kafka）必须拒绝，避免生成「删光目标端」的 DROP 计划。
  */
 
 import { NodeId, type ConnectionSummary } from '../../core/api'
 import type { RoutineDefinition, SchemaSnapshot, SnapshotTable } from '../../core/compare'
-import type { ObjectRef, TableDescription } from '../../core/model'
+import type {
+  EventListing, LineageEvidence, ObjectRef, ObjectSource, SearchObjectsResult, SessionListing,
+  TableDescription, UserListing
+} from '../../core/model'
 import type { ConnectionResolver } from './connection-resolver'
 import type { LiveConnection } from './types'
 
@@ -120,6 +123,48 @@ export class MetadataApplicationService {
     }))
   }
 
+  /**
+   * MySQL 会话列表、事件与用户权限。
+   * 全部是只读读取，不经过写通道或事务守卫。
+   */
+  listSessions(connectionId: string): Promise<SessionListing> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.listSessions()
+  }
+
+  killSession(connectionId: string, sessionId: number): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.killSession(sessionId)
+  }
+
+  listEvents(connectionId: string, filter?: { schema?: string }): Promise<EventListing> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.listEvents(filter ?? {})
+  }
+
+  /** 跨库按名称搜索对象。 */
+  searchObjects(connectionId: string, request: { keyword: string; kinds?: readonly string[]; schema?: string; limit?: number }): Promise<SearchObjectsResult> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.searchObjects(request)
+  }
+
+  /** 读取字段血缘证据。 */
+  lineageEvidence(connectionId: string, request: { table: string; column: string; schema?: string }): Promise<LineageEvidence> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.lineageEvidence(request)
+  }
+
+  /** 读取对象源码：视图、例程、触发器。 */
+  objectSource(nodeId: string): Promise<ObjectSource> {
+    const { conn, adapterId } = this.#ctx.resolver.resolveConnection(nodeId)
+    if (adapterId === null) throw new Error('连接节点不能读取对象源码，请选择具体对象')
+    return conn.host.objectSource(adapterId)
+  }
+
+  listUsers(connectionId: string): Promise<UserListing> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    return conn.host.listUsers()
+  }
   describeTable(nodeId: string): Promise<TableDescription> {
     const parsed = NodeId.parse(nodeId)
     if (!parsed) return Promise.reject(new Error(`无法解析的节点 id: ${nodeId}`))
@@ -206,22 +251,17 @@ export class MetadataApplicationService {
      * 所以单独查一次。驱动不支持时 host 会返回空数组（见 driver-host 的
      * listRoutines 分支），SQLite 就是这种情况——它没有持久化例程。
      *
-     * 同样按「失败不拖垮快照」处理：查不到就当没有例程，不抛错。
+     * 列表读取失败时必须拒绝快照；比较器把空列表解释为确实不存在例程。
      */
-    let routines: RoutineDefinition[] = []
-    try {
-      const raw = await conn.host.listRoutines({ schema: schema ?? null })
-      routines = raw.map((routine) => ({
-        schema: routine.schema,
-        name: routine.name,
-        kind: routine.kind,
-        definition: routine.definition,
-        // 签名原样透传给比较器：它是区分重载的唯一依据，不能在中间层丢掉。
-        ...(routine.signature === undefined ? {} : { signature: routine.signature })
-      }))
-    } catch {
-      routines = []
-    }
+    const raw = await conn.host.listRoutines({ schema: schema ?? null })
+    const routines: RoutineDefinition[] = raw.map((routine) => ({
+      schema: routine.schema,
+      name: routine.name,
+      kind: routine.kind,
+      definition: routine.definition,
+      // 签名原样透传给比较器：它是区分重载的唯一依据，不能在中间层丢掉。
+      ...(routine.signature === undefined ? {} : { signature: routine.signature })
+    }))
     return {
       source: { connectionId, schema: schema ?? null },
       tables,

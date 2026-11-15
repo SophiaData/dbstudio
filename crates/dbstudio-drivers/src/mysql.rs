@@ -6,6 +6,18 @@ use base64::{engine::general_purpose::STANDARD,Engine};
 use crate::{network as n,tls::{self,TlsMode},tunnel::{self,SshTunnel}};
 use std::{collections::HashMap,net::{IpAddr,Ipv4Addr,Ipv6Addr,SocketAddr,ToSocketAddrs},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Instant};
 
+/// CREATE/DROP EVENT 需要库名限定：未带库名时
+/// 按当前连接的库补齐，否则真实 MySQL 会以 1044 拒绝。
+fn qualify_event_ddl(sql:&str,keyword:&str,object_kind:&str,current_db:&str)->Option<String>{
+    let trimmed=sql.trim_start();
+    let mut parts=trimmed.splitn(4,char::is_whitespace);
+    let first=parts.next()?;let second=parts.next()?;let name=parts.next()?;let tail=parts.next().unwrap_or("");
+    if !first.eq_ignore_ascii_case(keyword)||!second.eq_ignore_ascii_case(object_kind){return None;}
+    if name.contains('.')||current_db.is_empty(){return None;}
+    let bare=name.trim_matches('`');
+    if bare.is_empty(){return None;}
+    Some(format!("{} {} {}.{} {}",keyword,object_kind,n::quote(current_db,true),n::quote(bare,true),tail).trim_end().to_owned())
+}
 fn error(error:mysql::Error)->DriverError{
     match error {
         mysql::Error::MySqlError(e)=>{
@@ -13,6 +25,16 @@ fn error(error:mysql::Error)->DriverError{
             DriverError::new("driver-error",format!("MySQL操作失败(SQLSTATE {}, code {})",e.state,e.code))
         },_=>DriverError::new("connection_failed","MySQL连接或协议操作失败")
     }
+}
+// InnoDB 1213 (deadlock) rolls back the whole transaction on the server; 1205
+// (lock wait timeout) and 1062 (duplicate entry) roll back only the failing
+// statement, so a transaction the driver owns remains valid for those codes.
+const MYSQL_ER_LOCK_DEADLOCK:u16=1213;
+fn error_aborts_transaction(error:&mysql::Error)->bool{
+    matches!(error,mysql::Error::MySqlError(e)if e.code==MYSQL_ER_LOCK_DEADLOCK)
+}
+fn transaction_state_after_error(active:bool,pending:u64,error:&mysql::Error)->(bool,u64){
+    if error_aborts_transaction(error){(false,0)}else{(active,pending)}
 }
 fn retryable_connect_error(error:&mysql::Error)->bool{
     matches!(error,mysql::Error::DriverError(mysql::DriverError::CouldNotConnect(_)|mysql::DriverError::ConnectTimeout))
@@ -76,9 +98,14 @@ const MANAGEMENT_MAX_ROWS:usize=10_000;
 const MANAGEMENT_MAX_BYTES:usize=8*1024*1024;
 const MANAGEMENT_CONNECTION_BYTES:usize=32*1024*1024;
 const MANAGEMENT_MAX_CURSORS:usize=16;
+// A query cursor keeps the raw rows of one execution so paging and full-value reads never re-run the
+// statement. Beyond either budget the cursor falls back to live re-query and reports stable=false.
+const SNAPSHOT_MAX_ROWS:usize=5_000;
+const SNAPSHOT_MAX_BYTES:usize=16*1024*1024;
 // Budgets cover retained encoded cells/metadata, not allocator RSS or drained wire rows.
 struct ManagementSnapshot {columns:Vec<Value>,rows:Vec<Vec<Value>>,bytes:usize}
-enum Cursor {Query{sql:String,values:Vec<Value>},Management(ManagementSnapshot)}
+struct Snapshot{columns:Vec<mysql::Column>,rows:Vec<Vec<MValue>>}
+enum Cursor {Query{sql:String,values:Vec<Value>,snapshot:Option<Snapshot>},Management(ManagementSnapshot)}
 fn management_limit()->DriverError{DriverError::new("resource-limit","管理结果超过快照保留上限，请缩小范围或关闭已有管理结果")}
 fn management_retention(count:usize,retained:usize,additional:usize)->DriverResult<()>{
     if count>=MANAGEMENT_MAX_CURSORS||retained.saturating_add(additional)>MANAGEMENT_CONNECTION_BYTES{return Err(management_limit());}Ok(())
@@ -87,7 +114,8 @@ fn management_statement(sql:&str)->DriverResult<bool>{
     let mut words=sql.split_whitespace();let first=words.next().unwrap_or("").to_ascii_lowercase();
     let second=words.next().unwrap_or("").to_ascii_lowercase();
     match first.as_str(){
-        "show"=>if second=="tables"||(second=="create"&&words.next().is_some_and(|w|w.eq_ignore_ascii_case("table"))){Ok(true)}else{Err(DriverError::unsupported("当前管理查询只支持SHOW TABLES和SHOW CREATE TABLE"))},
+            // SHOW 只放行元数据类只读语句；GRANTS/USERS 等用于用户管理面板。
+            "show"=>if second=="tables"||(second=="create"&&words.next().is_some_and(|w|w.eq_ignore_ascii_case("table")))||matches!(second.as_str(),"grants"|"databases"|"status"|"variables"|"processlist"|"events"|"triggers"|"full"){Ok(true)}else{Err(DriverError::unsupported("当前管理查询只支持限定的 SHOW 语句"))},
         "describe"|"desc"=>Ok(true),
         "explain"=>if second=="select"{Ok(true)}else{Err(DriverError::unsupported("当前只支持EXPLAIN SELECT；ANALYZE会执行查询，尚未开放"))},
         "call"=>Err(DriverError::unsupported("CALL及多结果集尚未支持")),
@@ -167,7 +195,66 @@ fn management_snapshot<T:mysql::prelude::Protocol>(mut stream:mysql::QueryResult
     if stream.iter().is_some(){return Err(DriverError::unsupported("管理查询多结果集尚未支持"));}
     Ok(snapshot)
 }
-pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<SshTunnel>}
+fn page_columns(columns:&[mysql::Column])->Vec<Value>{
+    columns.iter().map(|c|json!({"name":c.name_str(),"type":match c.column_type(){
+        mysql::consts::ColumnType::MYSQL_TYPE_TINY|mysql::consts::ColumnType::MYSQL_TYPE_SHORT|mysql::consts::ColumnType::MYSQL_TYPE_LONG|mysql::consts::ColumnType::MYSQL_TYPE_INT24=>"integer",
+        mysql::consts::ColumnType::MYSQL_TYPE_FLOAT|mysql::consts::ColumnType::MYSQL_TYPE_DOUBLE=>"real",
+        mysql::consts::ColumnType::MYSQL_TYPE_DATE|mysql::consts::ColumnType::MYSQL_TYPE_DATETIME|mysql::consts::ColumnType::MYSQL_TYPE_TIMESTAMP=>"date",
+        mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_LONGLONG|mysql::consts::ColumnType::MYSQL_TYPE_JSON|mysql::consts::ColumnType::MYSQL_TYPE_TIME=>"text",
+        _=>if c.character_set()==63{"blob"}else{"text"}
+    }})).collect()
+}
+/// Raw byte estimate charged by the snapshot budget; NULL and fixed-size scalar values count as constants.
+fn value_bytes(value:&MValue)->usize{
+    match value{
+        MValue::NULL=>0,
+        MValue::Int(_)|MValue::UInt(_)|MValue::Float(_)|MValue::Double(_)=>8,
+        MValue::Date(..)|MValue::Time(..)=>16,
+        MValue::Bytes(bytes)=>bytes.len()
+    }
+}
+fn values_bytes(values:&[MValue])->usize{values.iter().fold(0usize,|total,value|total.saturating_add(value_bytes(value)))}
+/// A cursor only attempts the snapshot when the first page fits the row budget; otherwise the page
+/// stays on the existing live re-query path. `keepCursor=false` never retains a snapshot.
+fn snapshot_page_supported(keep:bool,offset:usize,limit:usize)->bool{
+    keep&&offset.saturating_add(limit)<=SNAPSHOT_MAX_ROWS
+}
+/// Retains one raw row while both budgets allow it. A rejected row releases the retained rows so the
+/// cursor keeps the live re-query path instead of serving inconsistent slices.
+fn retain_snapshot_row(snapshot:&mut Option<Vec<Vec<MValue>>>,bytes:&mut usize,values:Vec<MValue>)->bool{
+    let row_bytes=values_bytes(&values);
+    let fits=match snapshot.as_ref(){Some(rows)=>rows.len()<SNAPSHOT_MAX_ROWS&&(*bytes).saturating_add(row_bytes)<=SNAPSHOT_MAX_BYTES,None=>false};
+    if fits{
+        *bytes=(*bytes).saturating_add(row_bytes);
+        if let Some(rows)=snapshot.as_mut(){rows.push(values);}
+        true
+    }else{*snapshot=None;false}
+}
+fn snapshot_page(snapshot:&Snapshot,offset:usize,limit:usize)->DriverResult<Value>{
+    let rows:DriverResult<Vec<Value>>=snapshot.rows.iter().skip(offset).take(limit).enumerate().map(|(index,values)|{
+        let cells:DriverResult<Vec<_>>=values.iter().enumerate().map(|(column,value)|cell(value,snapshot.columns.get(column).ok_or_else(||DriverError::invalid("列下标越界"))?,false)).collect();
+        Ok(json!({"index":offset+index,"cells":cells?}))
+    }).collect();let rows=rows?;
+    Ok(json!({"columns":page_columns(&snapshot.columns),"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":offset.saturating_add(limit)<snapshot.rows.len()}))
+}
+fn snapshot_full_cell(snapshot:&Snapshot,row:usize,column:usize)->DriverResult<Value>{
+    let values=snapshot.rows.get(row).ok_or_else(||DriverError::new("not-found","行不存在"))?;
+    let value=values.get(column).ok_or_else(||DriverError::invalid("列下标越界"))?;
+    cell(value,snapshot.columns.get(column).ok_or_else(||DriverError::invalid("列下标越界"))?,true)
+}
+fn query_page_payload(page:&mut Value,cursor:Value,executed_sql:&str,elapsed_ms:u64,stable:bool)->DriverResult<()>{
+    let object=page.as_object_mut().ok_or_else(||DriverError::invalid("查询结果无效"))?;
+    object.insert("cursorId".into(),cursor);object.insert("executedSql".into(),json!(executed_sql));
+    object.insert("elapsedMs".into(),json!(elapsed_ms));object.insert("stable".into(),json!(stable));Ok(())
+}
+fn row_outcome(index:usize,affected:u64,error:Option<String>,sql:&str)->Value{
+    json!({"index":index,"affected":affected,"error":error,"sql":sql})
+}
+fn edit_result(total:u64,outcomes:Vec<Value>,in_transaction:bool)->Value{
+    let ok=outcomes.iter().all(|outcome|outcome["error"].is_null());
+    json!({"affected":total,"ok":ok,"outcomes":outcomes,"inTransaction":in_transaction})
+}
+pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<SshTunnel>,database:String}
 pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dyn Driver>>{
     let host=n::option(config,"host","127.0.0.1");let port=n::port(config,"port",3306)?;
     let database=n::option(config,"database","");if database.is_empty(){return Err(DriverError::invalid("缺少数据库名"));}
@@ -180,18 +267,27 @@ pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dy
     };
     let opts=Opts::from(OptsBuilder::default().ip_or_hostname(Some(if tunnel.is_some(){"127.0.0.1".into()}else{host})).tcp_port(tunnel.as_ref().map(|t|t.port).unwrap_or(port))
         .user(Some(n::option(config,"user","root"))).pass(secrets.get("dbPassword").and_then(Value::as_str).map(str::to_owned))
-        .db_name(Some(database)).ssl_opts(ssl).tcp_connect_timeout(Some(n::timeout())).read_timeout(Some(n::timeout())).write_timeout(Some(n::timeout())).prefer_socket(false));
+        .db_name(Some(database.clone())).ssl_opts(ssl).tcp_connect_timeout(Some(n::timeout())).read_timeout(Some(n::timeout())).write_timeout(Some(n::timeout())).prefer_socket(false));
     let mut conn=connect_options(&opts).map_err(error)?;conn.query_drop("SET NAMES utf8mb4").map_err(error)?;
     let id=conn.connection_id();let running=Arc::new(AtomicBool::new(false));let flag=running.clone();
     let cancel:CancelHandle=Arc::new(move||{
         if !flag.load(Ordering::SeqCst){return Ok(false);}let mut control=connect_options(&opts).map_err(error)?;
         control.query_drop(format!("KILL QUERY {id}")).map_err(error)?;Ok(true)
     });
-    Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel}))
+    Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel,database:database.clone()}))
 }
 impl MysqlDriver {
+    /// Single error→transaction-state mapping shared by every MySQL execution
+    /// path, so a server-side deadlock rollback cannot leave a stale
+    /// `active`/`pending` pair behind.
+    fn note_mysql_error<T>(&mut self,result:&mysql::Result<T>){
+        if let Err(error)=result{
+            let(active,pending)=transaction_state_after_error(self.active,self.pending,error);
+            self.active=active;self.pending=pending;
+        }
+    }
     fn query(&mut self,sql:&str,values:&[Value])->DriverResult<Vec<Row>>{
-        let params=params(values)?;self.running.store(true,Ordering::SeqCst);let result=self.conn.exec(sql,params).map_err(error);self.running.store(false,Ordering::SeqCst);result
+        let params=params(values)?;self.running.store(true,Ordering::SeqCst);let result=self.conn.exec(sql,params);self.running.store(false,Ordering::SeqCst);self.note_mysql_error(&result);result.map_err(error)
     }
     fn execute(&mut self,sql:&str,values:&[Value])->DriverResult<u64>{
         let params=params(values)?;self.running.store(true,Ordering::SeqCst);
@@ -199,8 +295,7 @@ impl MysqlDriver {
         // Values remain bound with exec_drop; static/control SQL uses COM_QUERY.
         let result=if values.is_empty(){self.conn.query_drop(sql)}else{self.conn.exec_drop(sql,params)};
         self.running.store(false,Ordering::SeqCst);
-        // InnoDB 1213 rolls back the whole transaction; 1205/1062 do not have that default scope.
-        if matches!(&result,Err(mysql::Error::MySqlError(e))if e.code==1213){self.active=false;self.pending=0;}
+        self.note_mysql_error(&result);
         result.map_err(error)?;Ok(self.conn.affected_rows())
     }
     fn begin(&mut self)->DriverResult<()>{if !self.active{self.execute("START TRANSACTION",&[])?;self.active=true;self.pending=0;}Ok(())}
@@ -209,23 +304,45 @@ impl MysqlDriver {
         self.running.store(true,Ordering::SeqCst);
         // Original column names may repeat: a derived-table wrapper would reject valid SQL.
         // Keep only a page in memory; QueryResult drains the remaining wire rows on drop.
-        let result=(||->DriverResult<Vec<Row>>{
-            let mut stream=self.conn.exec_iter(&stmt,args).map_err(error)?;
-            for _ in 0..offset{match stream.next(){Some(row)=>{row.map_err(error)?;},None=>return Ok(vec![])}}
-            let mut rows=vec![];for _ in 0..=limit{match stream.next(){Some(row)=>rows.push(row.map_err(error)?),None=>break}}Ok(rows)
-        })();self.running.store(false,Ordering::SeqCst);let rows=result?;
+        let result=(||->mysql::Result<Vec<Row>>{
+            let mut stream=self.conn.exec_iter(&stmt,args)?;
+            for _ in 0..offset{match stream.next(){Some(row)=>{row?;},None=>return Ok(vec![])}}
+            let mut rows=vec![];for _ in 0..=limit{match stream.next(){Some(row)=>rows.push(row?),None=>break}}Ok(rows)
+        })();self.running.store(false,Ordering::SeqCst);self.note_mysql_error(&result);let rows=result.map_err(error)?;
         let has_more=rows.len()>limit;
         let result:DriverResult<Vec<Value>>=rows.iter().take(limit).enumerate().map(|(ix,row)|{
             let cells:DriverResult<Vec<_>>=(0..row.len()).map(|i|cell(row.as_ref(i).unwrap(),&columns[i],false)).collect();Ok(json!({"index":offset+ix,"cells":cells?}))
         }).collect();let rows=result?;
-        let columns:Vec<_>=columns.iter().map(|c|json!({"name":c.name_str(),"type":match c.column_type(){
-            mysql::consts::ColumnType::MYSQL_TYPE_TINY|mysql::consts::ColumnType::MYSQL_TYPE_SHORT|mysql::consts::ColumnType::MYSQL_TYPE_LONG|mysql::consts::ColumnType::MYSQL_TYPE_INT24=>"integer",
-            mysql::consts::ColumnType::MYSQL_TYPE_FLOAT|mysql::consts::ColumnType::MYSQL_TYPE_DOUBLE=>"real",
-            mysql::consts::ColumnType::MYSQL_TYPE_DATE|mysql::consts::ColumnType::MYSQL_TYPE_DATETIME|mysql::consts::ColumnType::MYSQL_TYPE_TIMESTAMP=>"date",
-            mysql::consts::ColumnType::MYSQL_TYPE_DECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_NEWDECIMAL|mysql::consts::ColumnType::MYSQL_TYPE_LONGLONG|mysql::consts::ColumnType::MYSQL_TYPE_JSON|mysql::consts::ColumnType::MYSQL_TYPE_TIME=>"text",
-            _=>if c.character_set()==63{"blob"}else{"text"}
-        }})).collect();
-        Ok(json!({"columns":columns,"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":has_more}))
+        Ok(json!({"columns":page_columns(&columns),"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":has_more}))
+    }
+    /// Streams one execution of the statement, rendering the requested page and retaining the raw
+    /// rows in a bounded snapshot. A rejected row releases the snapshot so later pages and full-value
+    /// reads keep the existing live re-query path.
+    fn page_with_snapshot(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<(Value,Option<Snapshot>)>{
+        let stmt=self.conn.prep(sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let columns=stmt.columns().to_vec();let args=params(values)?;
+        self.running.store(true,Ordering::SeqCst);
+        // Original column names may repeat: a derived-table wrapper would reject valid SQL.
+        let result=(||->mysql::Result<(Vec<DriverResult<Vec<Value>>>,Option<Vec<Vec<MValue>>>,usize)>{
+            let mut stream=self.conn.exec_iter(&stmt,args)?;
+            let mut page=vec![];let mut snapshot=Some(vec![]);let mut bytes=0usize;let mut read=0usize;
+            loop{
+                let Some(row)=stream.next()else{break};let row=row?;
+                if read>=offset&&page.len()<limit{
+                    let cells:DriverResult<Vec<_>>=(0..row.len()).map(|i|cell(row.as_ref(i).unwrap(),&columns[i],false)).collect();page.push(cells);
+                }
+                if snapshot.is_some(){
+                    let values=row.unwrap_raw().into_iter().map(|value|value.unwrap_or(MValue::NULL)).collect::<Vec<_>>();
+                    retain_snapshot_row(&mut snapshot,&mut bytes,values);
+                }
+                read+=1;
+                if snapshot.is_none()&&read>offset.saturating_add(limit){break;}
+            }
+            Ok((page,snapshot,read))
+        })();self.running.store(false,Ordering::SeqCst);self.note_mysql_error(&result);let(page,snapshot,read)=result.map_err(error)?;
+        let has_more=match &snapshot{Some(rows)=>offset.saturating_add(limit)<rows.len(),None=>read>offset.saturating_add(limit)};
+        let rows:DriverResult<Vec<_>>=page.into_iter().enumerate().map(|(index,cells)|Ok(json!({"index":offset+index,"cells":cells?}))).collect();let rows=rows?;
+        let page=json!({"columns":page_columns(&columns),"returned":rows.len(),"rows":rows,"offset":offset,"hasMore":has_more});
+        Ok((page,snapshot.map(|rows|Snapshot{columns,rows})))
     }
     fn management_query(&mut self,sql:String,values:Vec<Value>,options:&Value,started:Instant)->DriverResult<Value>{
         let keep=options.get("keepCursor").and_then(Value::as_bool)!=Some(false);
@@ -240,7 +357,7 @@ impl MysqlDriver {
         if keep{management_retention(count,retained,snapshot.bytes)?;}
         let(offset,limit)=n::page_options(options);let mut page=snapshot.page(offset,limit)?;
         let cursor=if keep{self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor::Management(snapshot));json!(id)}else{Value::Null};
-        page["cursorId"]=cursor;page["executedSql"]=json!(sql);page["elapsedMs"]=json!(started.elapsed().as_millis()as u64);Ok(page)
+        query_page_payload(&mut page,cursor,&sql,started.elapsed().as_millis()as u64,true)?;Ok(page)
     }
     fn explain(&mut self,sql:&str)->DriverResult<Value>{
         let(sql,values)=n::bind_named(sql,&Value::Null,false)?;
@@ -260,18 +377,55 @@ impl MysqlDriver {
         if management_statement(&sql)?{return self.management_query(sql,values,options,started);}
         let first=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if !["select","with"].contains(&first.as_str()){return Err(DriverError::unsupported("分页查询只接受单条查询语句"));}
-        let(offset,limit)=n::page_options(options);let mut page=self.page(&sql,&values,offset,limit)?;
-        let cursor=if options.get("keepCursor").and_then(Value::as_bool)==Some(false){Value::Null}else{
-            self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor::Query{sql:sql.clone(),values});json!(id)};
-        page["cursorId"]=cursor;page["executedSql"]=json!(sql);page["elapsedMs"]=json!(started.elapsed().as_millis()as u64);Ok(page)
+        let(offset,limit)=n::page_options(options);let keep=options.get("keepCursor").and_then(Value::as_bool)!=Some(false);
+        // One execution feeds both the first page and the bounded snapshot. A first page beyond the
+        // row budget skips the snapshot attempt and keeps the live path.
+        let(mut page,snapshot)=if snapshot_page_supported(keep,offset,limit){self.page_with_snapshot(&sql,&values,offset,limit)?}else{(self.page(&sql,&values,offset,limit)?,None)};
+        let stable=snapshot.is_some();
+        let cursor=if keep{self.sequence+=1;let id=format!("mysql-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor::Query{sql:sql.clone(),values,snapshot});json!(id)}else{Value::Null};
+        query_page_payload(&mut page,cursor,&sql,started.elapsed().as_millis()as u64,stable)?;Ok(page)
     }
     fn describe(&mut self,id:&str)->DriverResult<Value>{
         let(schema,table)=n::table_id(id)?;
         let rows=self.query("SELECT c.COLUMN_NAME,c.COLUMN_TYPE,c.IS_NULLABLE,c.COLUMN_DEFAULT,COALESCE(k.ORDINAL_POSITION,0),c.EXTRA FROM information_schema.COLUMNS c LEFT JOIN information_schema.KEY_COLUMN_USAGE k ON k.TABLE_SCHEMA=c.TABLE_SCHEMA AND k.TABLE_NAME=c.TABLE_NAME AND k.COLUMN_NAME=c.COLUMN_NAME AND k.CONSTRAINT_NAME='PRIMARY' WHERE c.TABLE_SCHEMA=? AND c.TABLE_NAME=? ORDER BY c.ORDINAL_POSITION",&[json!(schema),json!(table)])?;
         if rows.is_empty(){return Err(DriverError::new("not-found","表不存在"));}
-        let columns:Vec<_>=rows.iter().map(|r|{let ordinal:u64=r.get(4).unwrap_or(0);let extra:String=r.get(5).unwrap_or_default();json!({"name":r.get::<String,_>(0).unwrap_or_default(),"typeName":r.get::<String,_>(1).unwrap_or_default(),"nullable":r.get::<String,_>(2).unwrap_or_default()=="YES","defaultValue":r.get::<Option<String>,_>(3).flatten(),"primaryKeyOrdinal":if ordinal==0{Value::Null}else{json!(ordinal)},"generated":if extra.contains("VIRTUAL GENERATED"){json!("virtual")}else if extra.contains("STORED GENERATED"){json!("stored")}else{Value::Null},"autoIncrement":extra.contains("auto_increment"),"requiredOnInsert":r.get::<String,_>(2).unwrap_or_default()=="NO"&&r.get::<Option<String>,_>(3).flatten().is_none()&&!extra.contains("auto_increment")&&!extra.contains("GENERATED")})}).collect();
+        let columns:Vec<_>=rows.iter().map(|r|{let ordinal:u64=r.get(4).unwrap_or(0);let extra:String=r.get(5).unwrap_or_default();json!({"name":r.get::<String,_>(0).unwrap_or_default(),"typeName":r.get::<String,_>(1).unwrap_or_default(),"nullable":r.get::<String,_>(2).unwrap_or_default()=="YES","defaultValue":r.get::<Option<String>,_>(3).flatten(),"primaryKeyOrdinal":if ordinal==0{Value::Null}else{json!(ordinal)},"generated":if extra.to_ascii_lowercase().contains("virtual generated"){json!("virtual")}else if extra.to_ascii_lowercase().contains("stored generated"){json!("stored")}else{Value::Null},"identity":if extra.to_ascii_lowercase().contains("auto_increment"){json!("by-default")}else{Value::Null},"autoIncrement":extra.to_ascii_lowercase().contains("auto_increment"),"requiredOnInsert":r.get::<String,_>(2).unwrap_or_default()=="NO"&&r.get::<Option<String>,_>(3).flatten().is_none()&&!extra.contains("auto_increment")&&!extra.contains("GENERATED")})}).collect();
         let mut keys:Vec<_>=rows.iter().filter(|r|r.get::<u64,_>(4).unwrap_or(0)>0).collect();keys.sort_by_key(|r|r.get::<u64,_>(4).unwrap_or(0));let keys:Vec<String>=keys.into_iter().map(|r|r.get(0).unwrap_or_default()).collect();
         let mut result=json!({"id":id,"columns":columns,"primaryKey":keys,"hasUniqueKey":!keys.is_empty()});
+        // MySQL partitions are invisible in the column/index metadata above: a partitioned
+        // table reads exactly like a plain one. Read information_schema.PARTITIONS so the
+        // tree and the DDL dialog can show partitioning instead of silently dropping it.
+        if let Ok(rows)=self.query("SELECT PARTITION_NAME,PARTITION_METHOD,PARTITION_EXPRESSION,PARTITION_DESCRIPTION,SUBPARTITION_METHOD,SUBPARTITION_EXPRESSION,TABLE_ROWS,PARTITION_ORDINAL_POSITION FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY PARTITION_ORDINAL_POSITION",&[json!(schema),json!(table)]){
+            let mut partitions:Vec<Value>=Vec::new();let mut method=None;let mut expression=None;let mut sub_method=None;let mut sub_expression=None;
+            for row in rows{
+                let name:Option<String>=row.get::<Option<String>,_>(0).flatten();
+                let row_method:Option<String>=row.get::<Option<String>,_>(1).flatten();
+                let row_expression:Option<String>=row.get::<Option<String>,_>(2).flatten();
+                let description:Option<String>=row.get::<Option<String>,_>(3).flatten();
+                let row_sub_method:Option<String>=row.get::<Option<String>,_>(4).flatten();
+                let row_sub_expression:Option<String>=row.get::<Option<String>,_>(5).flatten();
+                let table_rows:Option<u64>=row.get::<Option<u64>,_>(6).flatten();
+                if method.is_none(){method=row_method.clone();}
+                if expression.is_none(){expression=row_expression.clone();}
+                if sub_method.is_none(){sub_method=row_sub_method.clone();}
+                if sub_expression.is_none(){sub_expression=row_sub_expression.clone();}
+                // A non-partitioned table still yields one row with a NULL partition name.
+                if let Some(name)=name{
+                    // 子分区表在信息架构里每个子分区一行：同一个分区会出现多次。
+                    // 按分区名聚合，行数相加，否则目录树会出现重复节点。
+                    if let Some(existing)=partitions.iter_mut().find(|item|item.get("name").and_then(Value::as_str)==Some(name.as_str())){
+                        let merged=existing.get("rows").and_then(Value::as_u64).unwrap_or(0)+table_rows.unwrap_or(0);
+                        existing["rows"]=json!(merged);
+                        existing["subpartitionCount"]=json!(existing.get("subpartitionCount").and_then(Value::as_u64).unwrap_or(1)+1);
+                    }else{
+                        partitions.push(json!({"name":name,"method":row_method,"expression":row_expression,"description":description,"subpartitionMethod":row_sub_method,"subpartitionExpression":row_sub_expression,"rows":table_rows,"subpartitionCount":1}));
+                    }
+                }
+            }
+            if !partitions.is_empty(){
+                result["partitions"]=json!({"method":method,"expression":expression,"subpartitionMethod":sub_method,"subpartitionExpression":sub_expression,"items":partitions});
+            }
+        }
         if let Ok(rows)=self.query("SELECT INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY INDEX_NAME,SEQ_IN_INDEX",&[json!(schema),json!(table)]){
             let mut groups:std::collections::BTreeMap<String,Value>=std::collections::BTreeMap::new();let mut has_expression=false;
             for row in rows{let name:String=row.get(0).unwrap_or_default();let non_unique:u64=row.get(1).unwrap_or(1);let col:Option<String>=row.get::<Option<String>,_>(3).flatten();
@@ -319,7 +473,20 @@ impl MysqlDriver {
             return Ok(json!(rows.iter().map(|r|{let name:String=r.get(0).unwrap_or_default();n::node(format!("{}:{}.{}",if view{"view"}else{"table"},n::escape_id(&parts[0]),n::escape_id(&name)),if view{"view"}else{"table"},&name,Some(id),true)}).collect::<Vec<_>>()));
         }
         let desc=self.describe(id)?;let(schema,table)=n::table_id(id)?;
-        Ok(json!(desc["columns"].as_array().unwrap().iter().map(|c|{let name=c["name"].as_str().unwrap_or("");n::node(format!("column:{}.{}.{}",n::escape_id(&schema),n::escape_id(&table),n::escape_id(name)),"column",name,Some(id),false)}).collect::<Vec<_>>()))
+        let mut nodes:Vec<Value>=Vec::new();
+        // 分区节点放在列之前：分区是表级结构，不属于列。
+        if let Some(items)=desc.get("partitions").and_then(|p|p.get("items")).and_then(|v|v.as_array()){
+            let method=desc.get("partitions").and_then(|p|p.get("method")).and_then(|v|v.as_str()).unwrap_or("PARTITION");
+            for item in items{
+                let name=item.get("name").and_then(|v|v.as_str()).unwrap_or("");
+                if name.is_empty(){continue;}
+                let bound=item.get("description").and_then(|v|v.as_str()).unwrap_or("-");
+                nodes.push(n::node(format!("partition:{}.{}.{}",n::escape_id(&schema),n::escape_id(&table),n::escape_id(name)),"partition",&format!("{name}  (< {bound})"),Some(id),false));
+            }
+            let _=method;
+        }
+        nodes.extend(desc["columns"].as_array().unwrap().iter().map(|c|{let name=c["name"].as_str().unwrap_or("");n::node(format!("column:{}.{}.{}",n::escape_id(&schema),n::escape_id(&table),n::escape_id(name)),"column",name,Some(id),false)}));
+        Ok(json!(nodes))
     }
     fn require_transactional_table(&mut self,id:&str)->DriverResult<()>{
         if !id.starts_with("table:"){return Err(DriverError::unsupported("事务编辑只接受表"));}
@@ -377,25 +544,44 @@ impl MysqlDriver {
         let target=n::qualified(id,true)?;let mut outcomes=vec![];let mut total=0;
         let rows=if method=="applyEdits"||method=="deleteRows"{input.as_array().ok_or_else(||DriverError::invalid("需要行数组"))?.clone()}else{vec![input.clone()]};self.begin()?;
         for(index,item)in rows.iter().enumerate(){
-            let(sql,values)=if method=="insertRow"{
-                let values=item.as_object().ok_or_else(||DriverError::invalid("插入值无效"))?;let desc=self.describe(id)?;let mut cols=vec![];let mut params=vec![];
-                for(name,value)in values{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}cols.push(n::quote(name,true));params.push(n::cell_param(value)?);}
-                (format!("INSERT INTO {target} ({}) VALUES ({})",cols.join(","),vec!["?";params.len()].join(",")),params)
-            }else{
-                let keys=if method=="applyEdits"{&item["keyValues"]}else{item};let(where_sql,key_values)=self.keys(id,keys)?;
-                if method=="deleteRows"{(format!("DELETE FROM {target} WHERE {where_sql}"),key_values)}else{
-                    let changes=item["changes"].as_object().ok_or_else(||DriverError::invalid("缺少修改列"))?;if changes.is_empty(){return Err(DriverError::invalid("修改列不能为空"));}
-                    let desc=self.describe(id)?;let mut set=vec![];let mut values=vec![];
-                    for(name,value)in changes{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}values.push(n::cell_param(value)?);set.push(format!("{}=?",n::quote(name,true)));}
-                    values.extend(key_values);(format!("UPDATE {target} SET {} WHERE {where_sql}",set.join(",")),values)
+            // Validation runs per row: earlier rows may already have executed, so a
+            // late bad row must land in its own outcome instead of aborting the call
+            // and leaving the reported state behind the real transaction.
+            let prepared=(||->DriverResult<(String,Vec<Value>)>{
+                if method=="insertRow"{
+                    let values=item.as_object().ok_or_else(||DriverError::invalid("插入值无效"))?;let desc=self.describe(id)?;let mut cols=vec![];let mut params=vec![];
+                    for(name,value)in values{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}cols.push(n::quote(name,true));params.push(n::cell_param(value)?);}
+                    Ok((format!("INSERT INTO {target} ({}) VALUES ({})",cols.join(","),vec!["?";params.len()].join(",")),params))
+                }else{
+                    let keys=if method=="applyEdits"{&item["keyValues"]}else{item};let(where_sql,key_values)=self.keys(id,keys)?;
+                    if method=="deleteRows"{Ok((format!("DELETE FROM {target} WHERE {where_sql}"),key_values))}else{
+                        let changes=item["changes"].as_object().ok_or_else(||DriverError::invalid("缺少修改列"))?;if changes.is_empty(){return Err(DriverError::invalid("修改列不能为空"));}
+                        let desc=self.describe(id)?;let mut set=vec![];let mut values=vec![];
+                        for(name,value)in changes{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}values.push(n::cell_param(value)?);set.push(format!("{}=?",n::quote(name,true)));}
+                        values.extend(key_values);Ok((format!("UPDATE {target} SET {} WHERE {where_sql}",set.join(",")),values))
+                    }
                 }
+            })();
+            let(sql,values)=match prepared{
+                Ok(prepared)=>prepared,
+                Err(error)=>{outcomes.push(row_outcome(index,0,Some(error.message),""));continue;}
             };
             self.execute("SAVEPOINT dbstudio_edit",&[])?;
-            match self.execute(&sql,&values){Ok(n)if method=="insertRow"||n<=1=>{self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;total+=n;outcomes.push(json!({"index":index,"affected":n,"error":null,"sql":sql}));},Err(e)if !self.active=>return Err(e),result=>{
-                self.execute("ROLLBACK TO SAVEPOINT dbstudio_edit",&[])?;self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;let message=match result{Err(e)=>e.message,_=>"主键编辑影响多行，已回滚该行".into()};outcomes.push(json!({"index":index,"affected":0,"error":message,"sql":sql}));
-            }}
+            match self.execute(&sql,&values){
+                Ok(n)if method=="insertRow"||n<=1=>{
+                    self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;
+                    total+=n;self.pending+=n;
+                    outcomes.push(row_outcome(index,n,None,&sql));
+                },
+                Err(error)if !self.active=>return Err(error),
+                result=>{
+                    self.execute("ROLLBACK TO SAVEPOINT dbstudio_edit",&[])?;self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;
+                    let message=match result{Err(error)=>error.message,_=>"主键编辑影响多行，已回滚该行".into()};
+                    outcomes.push(row_outcome(index,0,Some(message),&sql));
+                }
+            }
         }
-        self.pending+=total;Ok(json!({"affected":total,"ok":outcomes.iter().all(|v|v["error"].is_null()),"outcomes":outcomes,"inTransaction":self.active}))
+        Ok(edit_result(total,outcomes,self.active))
     }
 }
 
@@ -464,6 +650,127 @@ mod tests{
             assert_eq!(candidate.get_tcp_port(),3306);
         }
     }
+    #[test]
+    fn deadlock_aborts_transaction_but_statement_errors_preserve_it(){
+        let stream_error=|state:&str,code:u16|mysql::Error::MySqlError(mysql::MySqlError{state:state.into(),code,message:"statement failed".into()});
+        let deadlock=stream_error("40001",1213);
+        assert!(error_aborts_transaction(&deadlock));
+        assert_eq!(transaction_state_after_error(true,7,&deadlock),(false,0));
+        assert_eq!(transaction_state_after_error(false,0,&deadlock),(false,0));
+        // 1205 lock wait timeout and 1062 duplicate key only roll back the failed
+        // statement; the transaction the driver owns stays usable.
+        for(state,code)in [("HY000",1205_u16),("23000",1062)]{
+            let statement_error=stream_error(state,code);
+            assert!(!error_aborts_transaction(&statement_error),"{code}");
+            assert_eq!(transaction_state_after_error(true,7,&statement_error),(true,7),"{code}");
+        }
+        let io_error=mysql::Error::IoError(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"closed"));
+        assert!(!error_aborts_transaction(&io_error));
+        assert_eq!(transaction_state_after_error(true,7,&io_error),(true,7));
+    }
+    #[test]
+    fn edit_outcomes_report_each_row_and_aggregate_consistently(){
+        let outcomes=vec![
+            row_outcome(0,1,None,"UPDATE `s`.`t` SET `a`=? WHERE `id`=?"),
+            row_outcome(1,0,Some("未知列".into()),""),
+            row_outcome(2,0,Some("主键编辑影响多行，已回滚该行".into()),"DELETE FROM `s`.`t` WHERE `id`=?"),
+        ];
+        let result=edit_result(1,outcomes,true);
+        assert_eq!(result["affected"],1);
+        assert_eq!(result["ok"],false);
+        assert_eq!(result["inTransaction"],true);
+        let outcomes=result["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(),3);
+        assert_eq!(outcomes[0]["error"],Value::Null);
+        assert_eq!(outcomes[0]["affected"],1);
+        assert_eq!(outcomes[1]["index"],1);
+        assert_eq!(outcomes[1]["affected"],0);
+        assert_eq!(outcomes[1]["error"],"未知列");
+        assert_eq!(outcomes[2]["error"],"主键编辑影响多行，已回滚该行");
+        let clean=edit_result(2,vec![row_outcome(0,2,None,"DELETE FROM `s`.`t` WHERE `id`=?")],false);
+        assert_eq!(clean["ok"],true);
+        assert_eq!(clean["affected"],2);
+        let empty=edit_result(0,vec![],true);
+        assert_eq!(empty["ok"],true);
+        assert_eq!(empty["affected"],0);
+    }
+    fn snapshot_fixture(rows:Vec<Vec<MValue>>)->Snapshot{
+        Snapshot{columns:vec![mysql::Column::new(mysql::consts::ColumnType::MYSQL_TYPE_LONG)],rows}
+    }
+    #[test]
+    fn snapshot_page_slices_rows_offsets_and_has_more(){
+        let snapshot=snapshot_fixture((0..4).map(|value|vec![MValue::Int(value)]).collect());
+        let first=snapshot_page(&snapshot,0,2).unwrap();
+        assert_eq!(first["returned"],2);
+        assert_eq!(first["hasMore"],true,"a page followed by more rows must report hasMore");
+        assert_eq!(first["rows"][0]["index"],0);
+        assert_eq!(first["rows"][1]["index"],1);
+        assert_eq!(first["rows"][1]["cells"][0],json!({"kind":"number","value":1}));
+        let last=snapshot_page(&snapshot,2,2).unwrap();
+        assert_eq!(last["returned"],2);
+        assert_eq!(last["hasMore"],false,"a full final page must report no more rows");
+        assert_eq!(last["rows"][1]["index"],3);
+        let beyond=snapshot_page(&snapshot,4,2).unwrap();
+        assert_eq!(beyond["returned"],0);
+        assert_eq!(beyond["hasMore"],false);
+        assert!(beyond["rows"].as_array().unwrap().is_empty());
+        let overlap=snapshot_page(&snapshot,1,2).unwrap();
+        assert_eq!(overlap["rows"][0],first["rows"][1]);
+        assert_eq!(overlap["rows"][1],last["rows"][0]);
+    }
+    #[test]
+    fn snapshot_full_cell_keeps_raw_value_for_preview_and_full_reads(){
+        let text="值".repeat(1200);
+        let snapshot=Snapshot{columns:vec![mysql::Column::new(mysql::consts::ColumnType::MYSQL_TYPE_VAR_STRING)],rows:vec![vec![MValue::Bytes(text.as_bytes().to_vec())]]};
+        let page=snapshot_page(&snapshot,0,1).unwrap();
+        assert_eq!(page["rows"][0]["cells"][0]["truncated"],true);
+        assert_eq!(page["rows"][0]["cells"][0]["fullLength"],1200);
+        assert_eq!(snapshot_full_cell(&snapshot,0,0).unwrap(),json!({"kind":"text","text":text}));
+        assert_eq!(snapshot_full_cell(&snapshot,1,0).err().unwrap().code,"not-found");
+        assert_eq!(snapshot_full_cell(&snapshot,0,1).err().unwrap().code,"invalid-argument");
+        let blob=Snapshot{columns:vec![mysql::Column::new(mysql::consts::ColumnType::MYSQL_TYPE_BLOB).with_character_set(63)],rows:vec![vec![MValue::Bytes(vec![1,2,3])]]};
+        assert_eq!(snapshot_full_cell(&blob,0,0).unwrap(),json!({"kind":"blob","previewBase64":STANDARD.encode([1,2,3]),"length":3,"truncated":false}));
+    }
+    #[test]
+    fn snapshot_budget_rejects_over_budget_rows_and_releases_the_snapshot(){
+        assert_eq!(value_bytes(&MValue::NULL),0);
+        assert_eq!(value_bytes(&MValue::Int(7)),8);
+        assert_eq!(value_bytes(&MValue::Bytes(b"abc".to_vec())),3);
+        let mut snapshot=Some(Vec::new());let mut bytes=0usize;
+        for _ in 0..SNAPSHOT_MAX_ROWS{assert!(retain_snapshot_row(&mut snapshot,&mut bytes,vec![MValue::Int(1)]));}
+        assert_eq!(bytes,SNAPSHOT_MAX_ROWS*8);
+        assert!(!retain_snapshot_row(&mut snapshot,&mut bytes,vec![MValue::Int(1)]),"the row budget must reject one more row");
+        assert!(snapshot.is_none(),"rejecting a row must release the retained rows");
+        let mut snapshot=Some(Vec::new());let mut bytes=0usize;
+        assert!(retain_snapshot_row(&mut snapshot,&mut bytes,vec![MValue::Bytes(vec![0;SNAPSHOT_MAX_BYTES-8]),MValue::Int(1)]));
+        assert_eq!(bytes,SNAPSHOT_MAX_BYTES);
+        assert!(!retain_snapshot_row(&mut snapshot,&mut bytes,vec![MValue::Bytes(vec![1])]));
+        assert!(snapshot.is_none());
+        let mut snapshot=Some(Vec::new());let mut bytes=SNAPSHOT_MAX_BYTES;
+        assert!(!retain_snapshot_row(&mut snapshot,&mut bytes,vec![MValue::Bytes(vec![1])]));
+        assert!(snapshot.is_none());
+    }
+    #[test]
+    fn query_page_payload_marks_stable_only_for_snapshot_paths(){
+        let mut stable_page=json!({"columns":[],"rows":[],"returned":0,"offset":0,"hasMore":false});
+        query_page_payload(&mut stable_page,json!("mysql-cur-1"),"SELECT NOW()",3,true).unwrap();
+        assert_eq!(stable_page["stable"],true);
+        assert_eq!(stable_page["cursorId"],"mysql-cur-1");
+        assert_eq!(stable_page["executedSql"],"SELECT NOW()");
+        assert_eq!(stable_page["elapsedMs"],3);
+        let mut live_page=json!({});
+        query_page_payload(&mut live_page,Value::Null,"SELECT NOW()",4,false).unwrap();
+        assert_eq!(live_page["stable"],false);
+        assert_eq!(live_page["cursorId"],Value::Null);
+    }
+    #[test]
+    fn snapshot_gate_keeps_live_path_for_keep_cursor_off_and_oversized_pages(){
+        assert!(!snapshot_page_supported(false,0,200),"keepCursor=false must not retain a snapshot");
+        assert!(snapshot_page_supported(true,0,200));
+        assert!(snapshot_page_supported(true,SNAPSHOT_MAX_ROWS-200,200),"a page ending exactly at the row budget is supported");
+        assert!(!snapshot_page_supported(true,SNAPSHOT_MAX_ROWS-199,200),"a page beyond the row budget keeps the live path");
+        assert!(!snapshot_page_supported(true,1_000_000,200));
+    }
 }
 impl Driver for MysqlDriver {
     fn dialect_id(&self)->&str{"mysql"}
@@ -478,12 +785,12 @@ impl Driver for MysqlDriver {
             "explain"=>{if args.len()!=1{return Err(DriverError::invalid("执行计划仅接受SQL，不接受绑定或尾随选项"));}self.explain(string_argument(&args,0,"sql")?)},
             "runQuery"|"query"=>self.run_query(string_argument(&args,0,"sql")?,args.get(1).unwrap_or(&Value::Null)),
             "previewTable"=>{let sql=format!("SELECT * FROM {}",n::qualified(string_argument(&args,0,"tableId")?,true)?);self.run_query(&sql,&json!({"limit":args.get(1).and_then(Value::as_u64).unwrap_or(200)}))},
-            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.page(offset,limit),Cursor::Query{sql,values}=>(sql.clone(),values.clone())};self.page(&sql,&values,offset,limit)},
+            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.page(offset,limit),Cursor::Query{sql,values,snapshot}=>{if let Some(snapshot)=snapshot{return snapshot_page(snapshot,offset,limit);}(sql.clone(),values.clone())}};self.page(&sql,&values,offset,limit)},
             "closeCursor"=>{self.cursors.remove(string_argument(&args,0,"cursorId")?);Ok(Value::Null)},
             "fetchCellValue"=>{
                 let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;
                 let row=args.get(1).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("行下标无效"))?;let column=args.get(2).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("列下标无效"))? as usize;
-                let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.full_cell(usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column),Cursor::Query{sql,values}=>(sql.clone(),values.clone())};
+                let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.full_cell(usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column),Cursor::Query{sql,values,snapshot}=>{if let Some(snapshot)=snapshot{return snapshot_full_cell(snapshot,usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column);}(sql.clone(),values.clone())}};
                 self.running.store(true,Ordering::SeqCst);
                 let result=(||->DriverResult<Value>{let args=params(&values)?;let stmt=self.conn.prep(&sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let mut stream=self.conn.exec_iter(&stmt,args).map_err(error)?;
                     for _ in 0..row{match stream.next(){Some(row)=>{row.map_err(error)?;},None=>return Err(DriverError::new("not-found","行不存在"))}}
@@ -505,9 +812,16 @@ impl Driver for MysqlDriver {
                     let affected=self.execute(&sql,&values)?;
                     return Ok(json!({"kind":"affected","affected":affected,"inTransaction":self.active,"transactionState":n::transaction_state(self.active,self.pending),"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64}));
                 }
-                let stmt=self.conn.prep(&sql).map_err(error)?;
-                if !stmt.columns().is_empty(){return Ok(json!({"kind":"rows","result":self.run_query(original,options)?}));}
                 let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                // 部分 MySQL 语句（例如 CREATE/DROP EVENT）不支持预处理语句协议（错误 1295）。
+                // 这类语句直接走文本协议，不再用 prep 做列探测。
+                // CREATE/DROP EVENT 与 CREATE/DROP TRIGGER 都不支持预处理语句协议
+                // （错误 1295），这类语句必须走文本协议。
+                let text_protocol_only=["event","trigger","procedure","function"];let second=sql.split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();let text_only=text_protocol_only.contains(&second.as_str())||text_protocol_only.contains(&keyword.as_str());
+                if !text_only{
+                    let stmt=self.conn.prep(&sql).map_err(error)?;
+                    if !stmt.columns().is_empty(){return Ok(json!({"kind":"rows","result":self.run_query(original,options)?}));}
+                }
                 if ["begin","start","commit","rollback","savepoint","release","set"].contains(&keyword.as_str()){return Err(DriverError::unsupported("请使用事务API控制事务"));}
                 let ddl=["create","drop","alter","truncate","rename","grant","revoke"].contains(&keyword.as_str());
                 if ddl&&self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
@@ -534,6 +848,492 @@ impl Driver for MysqlDriver {
                     "dropTable"|"dropView"=>{let id=string_argument(&args,0,"objectId")?;if (method=="dropTable"&&!id.starts_with("table:"))||(method=="dropView"&&!id.starts_with("view:")){return Err(DriverError::invalid("对象种类不匹配"));}format!("DROP {} {}",if method=="dropTable"{"TABLE"}else{"VIEW"},n::qualified(id,true)?)},
                     _=>{let id=string_argument(&args,0,"tableId")?;if !id.starts_with("table:"){return Err(DriverError::invalid("需要表ID"));}let(schema,_)=n::table_id(id)?;let name=string_argument(&args,1,"newName")?;if name.is_empty()||name.contains('\0'){return Err(DriverError::invalid("表名无效"));}format!("RENAME TABLE {} TO {}.{}",n::qualified(id,true)?,n::quote(&schema,true),n::quote(name,true))}
                 };self.execute(&sql,&[])?;self.cursors.clear();Ok(Value::Null)
+            },
+            "indexTable"=>{
+                // 索引变更也是 ALTER TABLE，同样会隐式提交事务。
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let id=string_argument(&args,0,"tableId")?;
+                if !id.starts_with("table:"){return Err(DriverError::invalid("需要表ID"));}
+                let sql=n::index_ddl(&id,args.get(1).ok_or_else(||DriverError::invalid("缺少索引变更规格"))?)?;
+                self.execute(&sql,&[])?;self.cursors.clear();
+                Ok(json!({"executedSql":sql,"committed":true}))
+            },
+            "partitionTable"=>{
+                // Partition DDL is ALTER TABLE, so it shares the implicit-commit rule:
+                // never run it inside a managed transaction.
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let id=string_argument(&args,0,"tableId")?;
+                if !id.starts_with("table:"){return Err(DriverError::invalid("需要表ID"));}
+                let sql=n::partition_ddl(&id,args.get(1).ok_or_else(||DriverError::invalid("缺少分区变更规格"))?)?;
+                self.execute(&sql,&[])?;self.cursors.clear();
+                Ok(json!({"executedSql":sql,"committed":true}))
+            },
+            "createDatabase"=>{
+                // 建库是 DDL：隐式提交事务，所以与存在事务时拒绝。
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let name=string_argument(&args,0,"database")?;
+                let name=n::database_name(name)?;
+                let if_not_exists=args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                let sql=if if_not_exists{format!("CREATE DATABASE IF NOT EXISTS {}",n::quote(&name,true))}else{format!("CREATE DATABASE {}",n::quote(&name,true))};
+                self.execute(&sql,&[])?;
+                Ok(json!({"executedSql":sql,"committed":true}))
+            },
+            "createUser"=>{
+                // 用户管理写操作：账号名与主机走白名单，只接受合法标识符，不接受任何嵌入片段。
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let user=string_argument(&args,0,"user")?;
+                let host=args.get(1).and_then(Value::as_str).unwrap_or("%");
+                let user=n::account_name(user)?;
+                let host=n::account_host(host)?;
+                let password=args.get(2).and_then(Value::as_str).unwrap_or("");
+                let account=format!("{}@{}",n::quote(&user,true),n::quote(&host,true));
+                let mut sql=format!("CREATE USER {account}");
+                if !password.is_empty(){sql.push_str(&format!(" IDENTIFIED BY {}",n::string_literal(password)));}
+                self.execute(&sql,&[])?;
+                Ok(json!({"executedSql":format!("CREATE USER {account}"),"committed":true}))
+            },
+            "dropUser"=>{
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let user=string_argument(&args,0,"user")?;
+                let host=args.get(1).and_then(Value::as_str).unwrap_or("%");
+                let account=format!("{}@{}",n::quote(&n::account_name(user)?,true),n::quote(&n::account_host(host)?,true));
+                let sql=format!("DROP USER IF EXISTS {account}");
+                self.execute(&sql,&[])?;
+                Ok(json!({"executedSql":format!("DROP USER IF EXISTS {account}"),"committed":true}))
+            },
+            "grantPrivilege"=>{
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let user=string_argument(&args,0,"user")?;
+                let host=args.get(1).and_then(Value::as_str).unwrap_or("%");
+                let privileges=args.get(2).ok_or_else(||DriverError::invalid("缺少权限列表"))?;
+                let scope=args.get(3).ok_or_else(||DriverError::invalid("缺少授权范围"))?;
+                let account=format!("{}@{}",n::quote(&n::account_name(user)?,true),n::quote(&n::account_host(host)?,true));
+                let list=n::privilege_list(privileges)?;
+                let target=n::privilege_target(scope)?;
+                let mut sql=format!("GRANT {list} ON {target} TO {account}");
+                if args.get(4).and_then(Value::as_bool).unwrap_or(false){sql.push_str(" WITH GRANT OPTION");}
+                self.execute(&sql,&[])?;
+                Ok(json!({"executedSql":sql,"committed":true}))
+            },
+            "revokePrivilege"=>{
+                if self.active{return Err(DriverError::unsupported("MySQL DDL会隐式提交，请先提交或回滚当前事务"));}
+                let user=string_argument(&args,0,"user")?;
+                let host=args.get(1).and_then(Value::as_str).unwrap_or("%");
+                let privileges=args.get(2).ok_or_else(||DriverError::invalid("缺少权限列表"))?;
+                let scope=args.get(3).ok_or_else(||DriverError::invalid("缺少授权范围"))?;
+                let account=format!("{}@{}",n::quote(&n::account_name(user)?,true),n::quote(&n::account_host(host)?,true));
+                let list=n::privilege_list(privileges)?;
+                let target=n::privilege_target(scope)?;
+                let sql=format!("REVOKE {list} ON {target} FROM {account}");
+                self.execute(&sql,&[])?;
+                Ok(json!({"executedSql":sql,"committed":true}))
+            },
+            "lineageEvidence"=>{
+                // 字段血缘的证据来源：外键、列清单、视图定义，全部只读。
+                // 只取与目标表相关的对象，避免在大库上做全量拉取。
+                let request = args.first().cloned().unwrap_or_else(|| json!({}));
+                let table = request.get("table").and_then(Value::as_str).unwrap_or("").trim();
+                let column = request.get("column").and_then(Value::as_str).unwrap_or("").trim();
+                if table.is_empty() || column.is_empty() {
+                    return Err(DriverError::invalid("缺少表名或列名"));
+                }
+                let schema = request.get("schema").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
+                if let Some(name) = schema {
+                    n::database_name(name)?;
+                }
+                let scope_arg = schema.map(|value| json!(value)).unwrap_or(Value::Null);
+                let text_at = |row: &Row, index: usize| -> Option<String> {
+                    let raw = row.as_ref(index)?;
+                    let column = &row.columns_ref()[index];
+                    match cell(raw, column, false).ok()? {
+                        Value::String(text) => Some(text),
+                        Value::Null => None,
+                        other => other
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| other.get("value").map(|value| value.to_string())),
+                    }
+                };
+
+                // 1) 外键：先找当前列作为子列的出边，再找作为父列的入边。
+                let mut foreign_keys: Vec<Value> = Vec::new();
+                let outgoing = self.query(
+                    "SELECT TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_SCHEMA,\
+                            REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+                     WHERE REFERENCED_TABLE_NAME IS NOT NULL \
+                       AND (? IS NULL OR TABLE_SCHEMA = ?) AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    &[scope_arg.clone(), scope_arg.clone(), json!(table), json!(column)],
+                )?;
+                for row in &outgoing {
+                    foreign_keys.push(json!({
+                        "direction": "outgoing",
+                        "schema": text_at(row, 0).unwrap_or_default(),
+                        "table": text_at(row, 1).unwrap_or_default(),
+                        "name": text_at(row, 2).unwrap_or_default(),
+                        "column": text_at(row, 3).unwrap_or_default(),
+                        "refSchema": text_at(row, 4).unwrap_or_default(),
+                        "refTable": text_at(row, 5).unwrap_or_default(),
+                        "refColumn": text_at(row, 6).unwrap_or_default(),
+                    }));
+                }
+                let incoming = self.query(
+                    "SELECT TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_SCHEMA,\
+                            REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+                     WHERE REFERENCED_TABLE_NAME IS NOT NULL \
+                       AND (? IS NULL OR REFERENCED_TABLE_SCHEMA = ?) AND REFERENCED_TABLE_NAME = ? AND REFERENCED_COLUMN_NAME = ?",
+                    &[scope_arg.clone(), scope_arg.clone(), json!(table), json!(column)],
+                )?;
+                for row in &incoming {
+                    foreign_keys.push(json!({
+                        "direction": "incoming",
+                        "schema": text_at(row, 0).unwrap_or_default(),
+                        "table": text_at(row, 1).unwrap_or_default(),
+                        "name": text_at(row, 2).unwrap_or_default(),
+                        "column": text_at(row, 3).unwrap_or_default(),
+                        "refSchema": text_at(row, 4).unwrap_or_default(),
+                        "refTable": text_at(row, 5).unwrap_or_default(),
+                        "refColumn": text_at(row, 6).unwrap_or_default(),
+                    }));
+                }
+
+                // 2) 全部表的列清单：只取列名，用于同名推测与视图范围判断。
+                let columns = self.query(
+                    "SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS \
+                     WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys') \
+                       AND (? IS NULL OR TABLE_SCHEMA = ?) \
+                     ORDER BY TABLE_SCHEMA,TABLE_NAME,ORDINAL_POSITION LIMIT 5000",
+                    &[scope_arg.clone(), scope_arg.clone()],
+                )?;
+                let mut tables: Vec<Value> = Vec::new();
+                let mut current: Option<(String, String, Vec<String>)> = None;
+                for row in &columns {
+                    let schema_name = text_at(row, 0).unwrap_or_default();
+                    let table_name = text_at(row, 1).unwrap_or_default();
+                    let column_name = text_at(row, 2).unwrap_or_default();
+                    match current.take() {
+                        Some((open_schema, open_table, mut list))
+                            if open_schema == schema_name && open_table == table_name =>
+                        {
+                            list.push(column_name);
+                            current = Some((open_schema, open_table, list));
+                        }
+                        Some((open_schema, open_table, list)) => {
+                            tables.push(json!({"schema": open_schema, "name": open_table, "columns": list}));
+                            current = Some((schema_name, table_name, vec![column_name]));
+                        }
+                        None => current = Some((schema_name, table_name, vec![column_name])),
+                    }
+                }
+                if let Some((open_schema, open_table, list)) = current {
+                    tables.push(json!({"schema": open_schema, "name": open_table, "columns": list}));
+                }
+                // 把外键挂回各自的表。
+                for table_item in tables.iter_mut() {
+                    let schema_name = table_item["schema"].as_str().unwrap_or_default().to_owned();
+                    let table_name = table_item["name"].as_str().unwrap_or_default().to_owned();
+                    let keys: Vec<Value> = foreign_keys
+                        .iter()
+                        .filter(|key| key["schema"] == json!(schema_name) && key["table"] == json!(table_name))
+                        .cloned()
+                        .collect();
+                    if !keys.is_empty() {
+                        table_item["foreignKeys"] = json!(keys);
+                    }
+                }
+
+                // 3) 视图定义：只取当前库或指定库的视图。
+                let view_rows = self.query(
+                    "SELECT TABLE_SCHEMA,TABLE_NAME,VIEW_DEFINITION FROM information_schema.VIEWS \
+                     WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys') \
+                       AND (? IS NULL OR TABLE_SCHEMA = ?) \
+                     ORDER BY TABLE_SCHEMA,TABLE_NAME LIMIT 1000",
+                    &[scope_arg.clone(), scope_arg.clone()],
+                )?;
+                let views: Vec<Value> = view_rows
+                    .iter()
+                    .map(|row| {
+                        json!({
+                            "schema": text_at(row, 0).unwrap_or_default(),
+                            "name": text_at(row, 1).unwrap_or_default(),
+                            "ddl": text_at(row, 2).unwrap_or_default(),
+                        })
+                    })
+                    .filter(|view| !view["ddl"].as_str().unwrap_or_default().is_empty())
+                    .collect();
+
+                Ok(json!({
+                    "target": {"schema": schema, "table": table, "column": column},
+                    "tables": tables,
+                    "views": views,
+                    "foreignKeys": foreign_keys,
+                }))
+            },
+            "searchObjects"=>{
+                // 信息架构的文本列可能以 Bytes 返回，统一走 cell() 取文本。
+                let text_at = |row: &Row, index: usize| -> Option<String> {
+                    let raw = row.as_ref(index)?;
+                    let column = &row.columns_ref()[index];
+                    // 源码与定义类字段必须取全量，否则超长文本会被截断。
+                    match cell(raw, column, true).ok()? {
+                        Value::String(text) => Some(text),
+                        Value::Null => None,
+                        other => other
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| other.get("value").map(|value| value.to_string())),
+                    }
+                };
+                // 模式搜索：每条查询都带 LIMIT，避免在信息架构上做无界扫描；
+                // 关键字与库名一律走绑定参数，不拼进 SQL 文本。
+                let request = args.first().cloned().unwrap_or_else(|| json!({}));
+                let keyword = request.get("keyword").and_then(Value::as_str).unwrap_or("").trim();
+                if keyword.is_empty() {
+                    return Err(DriverError::invalid("请输入搜索关键字"));
+                }
+                if keyword.len() > 128 {
+                    return Err(DriverError::invalid("搜索关键字过长"));
+                }
+                let limit = request.get("limit").and_then(Value::as_u64).unwrap_or(200).clamp(1, 500);
+                let requested: Vec<String> = request
+                    .get("kinds")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_ascii_lowercase).collect())
+                    .unwrap_or_else(|| vec!["table".to_owned(), "view".to_owned(), "column".to_owned(), "routine".to_owned(), "trigger".to_owned()]);
+                for kind in &requested {
+                    if !matches!(kind.as_str(), "table" | "view" | "column" | "routine" | "trigger") {
+                        return Err(DriverError::invalid("不支持的搜索对象类型"));
+                    }
+                }
+                let wants = |kind: &str| requested.iter().any(|item| item == kind);
+                let schema = request.get("schema").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
+                if let Some(name) = schema {
+                    n::database_name(name)?;
+                }
+                // LIKE 通配符转义：用户输入的 % 与 _ 按字面量搜索。
+                let escaped = keyword.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let pattern = format!("%{escaped}%");
+                let scope_arg = schema.map(|value| json!(value)).unwrap_or(Value::Null);
+                let mut items: Vec<Value> = Vec::new();
+                // 任一类查询拿满 limit 就说明可能还有更多结果。
+                let mut counts_hit_limit = false;
+
+                if wants("table") || wants("view") {
+                    let rows = self.query(
+                        "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_TYPE FROM information_schema.TABLES \
+                         WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys') \
+                           AND (? IS NULL OR TABLE_SCHEMA = ?) AND TABLE_NAME LIKE ? \
+                         ORDER BY TABLE_SCHEMA,TABLE_NAME LIMIT ?",
+                        &[scope_arg.clone(), scope_arg.clone(), json!(pattern), json!(limit)],
+                    )?;
+                    if rows.len() >= limit as usize { counts_hit_limit = true; }
+                    for row in &rows {
+                        let schema_name = text_at(row, 0).unwrap_or_default();
+                        let name = text_at(row, 1).unwrap_or_default();
+                        let is_view = text_at(row, 2).unwrap_or_default().to_ascii_uppercase().contains("VIEW");
+                        if is_view != wants("view") && !is_view {
+                            if !wants("table") { continue; }
+                        }
+                        if is_view && !wants("view") { continue; }
+                        let kind = if is_view { "view" } else { "table" };
+                        items.push(json!({
+                            "kind": kind,
+                            "schema": schema_name,
+                            "name": name,
+                            "nodeId": format!("{kind}:{}.{}", n::escape_id(&schema_name), n::escape_id(&name)),
+                        }));
+                    }
+                }
+
+                if wants("column") {
+                    let rows = self.query(
+                        "SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,COLUMN_TYPE FROM information_schema.COLUMNS \
+                         WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys') \
+                           AND (? IS NULL OR TABLE_SCHEMA = ?) AND COLUMN_NAME LIKE ? \
+                         ORDER BY TABLE_SCHEMA,TABLE_NAME,ORDINAL_POSITION LIMIT ?",
+                        &[scope_arg.clone(), scope_arg.clone(), json!(pattern), json!(limit)],
+                    )?;
+                    if rows.len() >= limit as usize { counts_hit_limit = true; }
+                    // 列所属对象可能是视图，不能一律标成 table。
+                    let view_keys: Vec<(String, String)> = self
+                        .query(
+                            "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_TYPE = 'VIEW' AND (? IS NULL OR TABLE_SCHEMA = ?) LIMIT 5000",
+                            &[scope_arg.clone(), scope_arg.clone()],
+                        )
+                        .map(|rows| {
+                            rows.iter()
+                                .map(|row| (text_at(row, 0).unwrap_or_default(), text_at(row, 1).unwrap_or_default()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for row in &rows {
+                        let schema_name = text_at(row, 0).unwrap_or_default();
+                        let table = text_at(row, 1).unwrap_or_default();
+                        let owner_kind = if view_keys.iter().any(|(s, t)| s == &schema_name && t == &table) { "view" } else { "table" };
+                        items.push(json!({
+                            "kind": "column",
+                            "schema": schema_name,
+                            "table": table,
+                            "name": text_at(row, 2).unwrap_or_default(),
+                            "columnType": text_at(row, 3).unwrap_or_default(),
+                            "nodeId": format!("{owner_kind}:{}.{}", n::escape_id(&schema_name), n::escape_id(&table)),
+                        }));
+                    }
+                }
+
+                if wants("routine") {
+                    let rows = self.query(
+                        "SELECT ROUTINE_SCHEMA,ROUTINE_NAME,ROUTINE_TYPE FROM information_schema.ROUTINES \
+                         WHERE (? IS NULL OR ROUTINE_SCHEMA = ?) AND ROUTINE_NAME LIKE ? \
+                         ORDER BY ROUTINE_SCHEMA,ROUTINE_NAME LIMIT ?",
+                        &[scope_arg.clone(), scope_arg.clone(), json!(pattern), json!(limit)],
+                    )?;
+                    if rows.len() >= limit as usize { counts_hit_limit = true; }
+                    for row in &rows {
+                        let schema_name = text_at(row, 0).unwrap_or_default();
+                        let name = text_at(row, 1).unwrap_or_default();
+                        let routine_type = text_at(row, 2).unwrap_or_else(|| "PROCEDURE".to_owned());
+                        items.push(json!({
+                            "kind": "routine",
+                            "schema": schema_name,
+                            "name": name,
+                            "routineType": routine_type.clone(),
+                            "nodeId": format!("routine:{}.{}.{}", n::escape_id(&schema_name), routine_type, n::escape_id(&name)),
+                        }));
+                    }
+                }
+
+                if wants("trigger") {
+                    let rows = self.query(
+                        "SELECT TRIGGER_SCHEMA,TRIGGER_NAME,EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS \
+                         WHERE (? IS NULL OR TRIGGER_SCHEMA = ?) AND TRIGGER_NAME LIKE ? \
+                         ORDER BY TRIGGER_SCHEMA,TRIGGER_NAME LIMIT ?",
+                        &[scope_arg.clone(), scope_arg.clone(), json!(pattern), json!(limit)],
+                    )?;
+                    if rows.len() >= limit as usize { counts_hit_limit = true; }
+                    for row in &rows {
+                        let schema_name = text_at(row, 0).unwrap_or_default();
+                        let name = text_at(row, 1).unwrap_or_default();
+                        items.push(json!({
+                            "kind": "trigger",
+                            "schema": schema_name,
+                            "name": name,
+                            "table": text_at(row, 2).unwrap_or_default(),
+                            "nodeId": format!("trigger:{}.{}", n::escape_id(&schema_name), n::escape_id(&name)),
+                        }));
+                    }
+                }
+
+                let truncated = items.len() > limit as usize || counts_hit_limit;
+                items.truncate(limit as usize);
+                Ok(json!({"keyword": keyword, "items": items, "truncated": truncated}))
+            },
+            "objectSource"=>{
+                // 信息架构的文本列可能以 Bytes 返回，直接转字符串会 panic；
+                // 所以先经驱动的 cell() 转成 JSON再取文本。
+                let text_at=|row:&Row,index:usize|->Option<String>{let raw=row.as_ref(index)?;let column=&row.columns_ref()[index];match cell(raw,column,true).ok()?{Value::String(text)=>Some(text),Value::Null=>None,other=>other.get("text").and_then(Value::as_str).map(str::to_owned).or_else(||other.get("value").map(|v|v.to_string()))}};
+                // 对象源码只读：视图、例程、触发器各自读对应的 information_schema 列。
+                let node=string_argument(&args,0,"nodeId")?;
+                let(kind,rest)=node.split_once(':').ok_or_else(||DriverError::invalid("对象ID无效"))?;
+                let parts=n::unescape_parts(rest)?;
+                match kind{
+                    "view"=>{
+                        if parts.len()!=2{return Err(DriverError::invalid("视图ID无效"));}
+                        let rows=self.query("SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?",&[json!(parts[0]),json!(parts[1])])?;
+                        let sql:Option<String>=rows.first().and_then(|row|text_at(row,0));
+                        let sql=sql.ok_or_else(||DriverError::new("not-found","视图不存在或无权限读取定义"))?;
+                        Ok(json!({"kind":"view","schema":parts[0],"name":parts[1],"sql":format!("CREATE VIEW {}.{} AS {}",n::quote(&parts[0],true),n::quote(&parts[1],true),sql)}))
+                    }
+                    "routine"=>{
+                        if parts.len()!=3{return Err(DriverError::invalid("例程ID无效"));}
+                        let rows=self.query("SELECT ROUTINE_TYPE,ROUTINE_DEFINITION,IS_DETERMINISTIC,SQL_DATA_ACCESS,SECURITY_TYPE,DEFINER FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=? AND ROUTINE_NAME=? AND ROUTINE_TYPE=?",&[json!(parts[0]),json!(parts[2]),json!(parts[1].to_ascii_uppercase())])?;
+                        let row=rows.first().ok_or_else(||DriverError::new("not-found","例程不存在"))?;
+                        let definition:Option<String>=text_at(row,1);
+                        let definition=definition.ok_or_else(||DriverError::new("not-found","无权限读取例程源码"))?;
+                        Ok(json!({"kind":"routine","schema":parts[0],"routineType":text_at(row,0),"name":parts[2],"deterministic":text_at(row,2),"dataAccess":text_at(row,3),"security":text_at(row,4),"definer":text_at(row,5),"definition":definition}))
+                    }
+                    "trigger"=>{
+                        if parts.len()!=2{return Err(DriverError::invalid("触发器ID无效"));}
+                        let rows=self.query("SELECT ACTION_TIMING,EVENT_MANIPULATION,ACTION_ORDER,ACTION_STATEMENT,EVENT_OBJECT_TABLE,DEFINER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND TRIGGER_NAME=?",&[json!(parts[0]),json!(parts[1])])?;
+                        let row=rows.first().ok_or_else(||DriverError::new("not-found","触发器不存在"))?;
+                        Ok(json!({"kind":"trigger","schema":parts[0],"name":parts[1],"timing":text_at(row,0),"event":text_at(row,1),"order":text_at(row,2),"statement":text_at(row,3),"table":text_at(row,4),"definer":row.get::<Option<String>,_>(5).flatten()}))
+                    }
+                    _=>Err(DriverError::unsupported("不支持读取该对象类型的源码")),
+                }
+            },
+            "listSessions"=>{
+                // 会话管理是只读操作：只返回 PROCESSLIST 内容，不披露其他库的敏感信息。
+                let rows=self.query("SELECT ID,USER,HOST,DB,COMMAND,TIME,STATE,INFO FROM information_schema.PROCESSLIST ORDER BY ID",&[])?;
+                let current:u64=u64::from(self.conn.connection_id());
+                // 信息架构的文本列可能以 Bytes 返回，直接转 String 会 panic；走 cell() 取文本。
+                let text_at=|row:&Row,index:usize|->Option<String>{let raw=row.as_ref(index)?;let column=&row.columns_ref()[index];match cell(raw,column,true).ok()?{Value::String(text)=>Some(text),Value::Null=>None,other=>other.get("text").and_then(Value::as_str).map(str::to_owned).or_else(||other.get("value").map(|value|value.to_string()))}};
+                Ok(json!(rows.iter().map(|row|{
+                    let id:u64=row.get(0).unwrap_or(0);
+                    json!({"id":id,"user":text_at(row,1).unwrap_or_default(),"host":text_at(row,2).unwrap_or_default(),"database":text_at(row,3),"command":text_at(row,4).unwrap_or_default(),"seconds":row.get::<Option<u64>,_>(5).flatten().unwrap_or(0),"state":text_at(row,6),"info":text_at(row,7),"current":id==current})
+                }).collect::<Vec<_>>()))
+            },
+            "killSession"=>{
+                let target=args.first().and_then(Value::as_u64).ok_or_else(||DriverError::invalid("会话 ID 无效"))?;
+                // 不允许终止当前连接：那会让调用方把自己掉下去，而是真正想停的查询可能在另一个连接上。
+                let current=u64::from(self.conn.connection_id());
+                if target==current{return Err(DriverError::invalid("不能终止当前会话"));}
+                self.execute(&format!("KILL {}",target),&[])?;
+                Ok(json!({"killed":target}))
+            },
+            "listEvents"=>{
+                // EVENT 是 MySQL 的调度对象：DBeaver 有对应节点，这里只读元数据，不执行写。
+                let schema=args.first().and_then(|v|v.get("schema")).and_then(Value::as_str);
+                let rows=self.query("SELECT EVENT_SCHEMA,EVENT_NAME,STATUS,EVENT_TYPE,INTERVAL_VALUE,INTERVAL_FIELD,LAST_EXECUTED,STARTS,ENDS,EVENT_DEFINITION FROM information_schema.EVENTS WHERE (? IS NULL OR EVENT_SCHEMA=?) ORDER BY EVENT_SCHEMA,EVENT_NAME",&[schema.map(|s|json!(s)).unwrap_or(Value::Null),schema.map(|s|json!(s)).unwrap_or(Value::Null)])?;
+                // INTERVAL_VALUE 在真实库里是数值类型，直接按字符串取会崩溃。
+                // 所以先取原值再统一转成字符串，对外保持字符串形态不变。
+                let as_text=|value:Option<Value>|value.map(|v|match v{Value::String(s)=>s,Value::Null=>String::new(),other=>other.to_string()}).filter(|s|!s.is_empty());
+                // information_schema.EVENTS 的部分列（例如 INTERVAL_FIELD）会以
+                // Bytes 类型返回，直接转 Option<Value> 会 panic。所以走驱动
+                // 已有的 cell() 转换，再从 JSON 里取文本。
+                let text_of=|row:&Row,index:usize|->Option<String>{
+                    let raw=row.as_ref(index)?;
+                    let column=&row.columns_ref()[index];
+                    match cell(raw,column,true).ok()?{
+                        Value::String(text)=>Some(text),
+                        Value::Null=>None,
+                        other=>{let text=other.get("text").and_then(Value::as_str).map(str::to_owned).or_else(||other.get("value").map(|v|v.to_string()));text}
+                    }
+                };
+                let scheduler:Option<String>=self.query("SELECT @@global.event_scheduler",&[]).ok().and_then(|rows|rows.first().and_then(|row|row.get::<Option<String>,_>(0).flatten()));
+                Ok(json!({"scheduler":scheduler,"items":rows.iter().map(|row|json!({
+                    "schema":text_of(row,0).unwrap_or_default(),
+                    "name":text_of(row,1).unwrap_or_default(),
+                    "status":text_of(row,2),
+                    "eventType":text_of(row,3),
+                    "intervalValue":text_of(row,4),
+                    "intervalField":text_of(row,5),
+                    "lastExecuted":text_of(row,6),
+                    "starts":text_of(row,7),
+                    "ends":text_of(row,8),
+                    "definition":text_of(row,9),
+                })).collect::<Vec<_>>()}))
+            },
+            "listUsers"=>{
+                // 用户列表不返回口令或密码哈希，只给账号与权限摘要。
+                let users=self.query("SELECT User,Host,account_locked,plugin,password_expired FROM mysql.user ORDER BY User,Host",&[])?;
+                let privileges=self.query("SELECT GRANTEE,PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.USER_PRIVILEGES ORDER BY GRANTEE,PRIVILEGE_TYPE",&[])?;
+                // 用户与权限表的文本列同样可能以 Bytes 返回，统一走 cell()。
+                let text_at=|row:&Row,index:usize|->Option<String>{let raw=row.as_ref(index)?;let column=&row.columns_ref()[index];match cell(raw,column,true).ok()?{Value::String(text)=>Some(text),Value::Null=>None,other=>other.get("text").and_then(Value::as_str).map(str::to_owned).or_else(||other.get("value").map(|value|value.to_string()))}};
+                Ok(json!({
+                    "users":users.iter().map(|row|json!({
+                        "user":text_at(row,0).unwrap_or_default(),
+                        "host":text_at(row,1).unwrap_or_default(),
+                        "locked":text_at(row,2).as_deref()==Some("Y"),
+                        "plugin":text_at(row,3),
+                        "passwordExpired":text_at(row,4).as_deref()==Some("Y"),
+                    })).collect::<Vec<_>>(),
+                    "privileges":privileges.iter().map(|row|json!({
+                        "grantee":text_at(row,0).unwrap_or_default(),
+                        "privilege":text_at(row,1).unwrap_or_default(),
+                        "grantable":text_at(row,2).as_deref()==Some("YES"),
+                    })).collect::<Vec<_>>(),
+                }))
             },
             "cancelQuery"=>Ok(json!((self.cancel)()?)),
             _=>Err(DriverError::unsupported("MySQL方法尚未迁移到Rust"))

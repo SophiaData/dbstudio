@@ -76,6 +76,20 @@ export const BACKEND_METHOD_MANIFEST = [
   entry('createView', IPC.createView),
   entry('dropView', IPC.dropView),
   entry('renameTable', IPC.renameTable),
+  entry('partitionTable', IPC.partitionTable),
+  entry('indexTable', IPC.indexTable),
+  entry('listSessions', IPC.listSessions),
+  entry('killSession', IPC.killSession),
+  entry('listEvents', IPC.listEvents),
+  entry('listUsers', IPC.listUsers),
+  entry('createDatabase', IPC.createDatabase),
+  entry('objectSource', IPC.objectSource),
+  entry('searchObjects', IPC.searchObjects),
+  entry('lineageEvidence', IPC.lineageEvidence),
+  entry('createUser', IPC.createUser),
+  entry('dropUser', IPC.dropUser),
+  entry('grantPrivilege', IPC.grantPrivilege),
+  entry('revokePrivilege', IPC.revokePrivilege),
   entry('cancelQuery', IPC.cancelQuery),
   entry('updateConnection', IPC.updateConnection),
   entry('listSqlLibrary', IPC.listSqlLibrary),
@@ -92,7 +106,8 @@ export const BACKEND_METHOD_MANIFEST = [
   entry('getImportProgress', IPC.getImportProgress),
   entry('cancelImport', IPC.cancelImport),
   entry('waitImport', IPC.waitImport),
-  entry('chooseImportFile', IPC.chooseImportFile)
+  entry('chooseImportFile', IPC.chooseImportFile),
+  entry('chooseSqlFile', IPC.chooseSqlFile)
 ] as const
 
 /**

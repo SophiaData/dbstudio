@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { TreeNode, Workbench } from '../workbench'
+import type { ObjectRef } from '../../../../src/core/model'
 import {
   CONNECTION_COLORS, TREE_PREFERENCES_KEY, TREE_ROW_HEIGHT,
   canPruneConnectionPreferences, connectionIdentity, flattenTree, loadConnectionPreferences, preferenceFor,
@@ -9,6 +10,9 @@ import {
 } from '../tree-model'
 
 const props = withDefaults(defineProps<{ workbench: Workbench; nodes?: TreeNode[]; search?: string; height?: number }>(), { search: '', height: 0 })
+/** 打开 MySQL 管理面板；由 App 承载对话框。 */
+const emit = defineEmits<{ admin: [connectionId: string, node?: ObjectRef] }>()
+
 const roots = computed(() => props.nodes ?? props.workbench.roots.value)
 const viewport = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
@@ -103,6 +107,16 @@ async function refresh(node: TreeNode) {
     await props.workbench.toggleNode(target)
   })
 }
+function openAdmin(node: TreeNode) {
+  menu.value = null
+  // 任意层级节点的 id 都是 connection:<id>[|...]，从前段取连接 id。
+  const scoped = node.ref.id
+  if (!scoped.startsWith('connection:')) return
+  const id = scoped.slice('connection:'.length).split('|')[0]
+  if (!id) return
+  emit('admin', id, node.ref)
+}
+
 async function copy(text: string) {
   menu.value = null
   await props.workbench.attempt(async () => {
@@ -199,6 +213,7 @@ defineExpose({ rows, select, activate, preferences, collapsedGroups, activeKey, 
         <label>分组<input v-model="groupDraft" maxlength="80" placeholder="未分组" /></label>
         <button type="submit">保存展示偏好</button>
       </form>
+      <button type="button" data-testid="open-mysql-admin" @click="openAdmin(menu.node)">MySQL 管理…</button>
       <button type="button" @click="menu = null">关闭</button>
     </div>
   </div>

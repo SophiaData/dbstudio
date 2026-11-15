@@ -31,7 +31,162 @@ export type NodeKind =
   | 'column'
   | 'index'
   | 'trigger'
+  | 'partition'
 
+/** MySQL 分区变更规格。 */
+export type PartitionChangeSpec =
+  | { readonly action: 'add'; readonly name: string; readonly lessThan: string }
+  | { readonly action: 'drop'; readonly name: string }
+  | {
+      readonly action: 'reorganize'
+      readonly name: string
+      readonly into: readonly { readonly name: string; readonly lessThan: string }[]
+    }
+
+/** MySQL 索引变更规格。 */
+/** MySQL 对象源码：视图给 CREATE VIEW 语句，例程给定义正文，触发器给语句与时机。 */
+/** 模式搜索结果：对象类型 + 可跳转的 nodeId。 */
+export interface SearchObjectItem {
+  readonly kind: 'table' | 'view' | 'column' | 'routine' | 'trigger'
+  readonly schema: string
+  readonly name: string
+  readonly nodeId: string
+  readonly table?: string
+  readonly columnType?: string
+  readonly routineType?: string
+}
+
+export interface SearchObjectsResult {
+  readonly keyword: string
+  readonly items: readonly SearchObjectItem[]
+  readonly truncated: boolean
+}
+
+/** 血缘证据：驱动从真实库读到的外键、列清单与视图定义。 */
+export interface LineageForeignKey {
+  readonly direction: 'incoming' | 'outgoing'
+  readonly schema: string
+  readonly table: string
+  readonly name: string
+  readonly column: string
+  readonly refSchema: string
+  readonly refTable: string
+  readonly refColumn: string
+}
+
+export interface LineageEvidence {
+  readonly target: { readonly schema?: string; readonly table: string; readonly column: string }
+  readonly tables: readonly {
+    readonly schema: string
+    readonly name: string
+    readonly columns: readonly string[]
+    readonly foreignKeys?: readonly {
+      readonly name: string
+      readonly column: string
+      readonly refTable: string
+      readonly refColumn: string
+    }[]
+  }[]
+  readonly views: readonly { readonly schema: string; readonly name: string; readonly ddl: string }[]
+  readonly foreignKeys: readonly LineageForeignKey[]
+}
+
+export interface ObjectSource {
+  readonly kind: 'view' | 'routine' | 'trigger'
+  readonly schema: string
+  readonly name: string
+  readonly sql?: string
+  readonly routineType?: string | null
+  readonly definition?: string
+  readonly timing?: string | null
+  readonly event?: string | null
+  readonly statement?: string | null
+  readonly table?: string | null
+  readonly definer?: string | null
+}
+export type IndexChangeSpec =
+  | { readonly action: 'add'; readonly name: string; readonly columns: readonly string[]; readonly unique?: boolean }
+  | { readonly action: 'drop'; readonly name: string }
+  | {
+      readonly action: 'replace'
+      readonly name: string
+      readonly newName?: string
+      readonly columns: readonly string[]
+      readonly unique?: boolean
+    }
+/** MySQL 会话列表中的一行。 */
+export interface SessionRow {
+  readonly id: number
+  readonly user: string
+  readonly host: string
+  readonly database: string | null
+  readonly command: string
+  readonly seconds: number
+  readonly state: string | null
+  readonly info: string | null
+  readonly current: boolean
+}
+
+/** MySQL 会话列表：当前会话只有一条被标记为 current。 */
+export type SessionListing = readonly SessionRow[]
+
+/** MySQL 分区描述附加在 TableDescription 上；非分区表不带该字段。 */
+export interface PartitionDescription {
+  readonly name: string
+  readonly method: string | null
+  readonly expression: string | null
+  readonly description: string | null
+  readonly subpartitionMethod: string | null
+  readonly subpartitionExpression: string | null
+  readonly rows: number | null
+}
+
+export interface PartitionListing {
+  readonly method: string | null
+  readonly expression: string | null
+  readonly subpartitionMethod: string | null
+  readonly subpartitionExpression: string | null
+  readonly items: readonly PartitionDescription[]
+}
+
+/** MySQL 事件与调度器状态。 */
+export interface EventRow {
+  readonly schema: string
+  readonly name: string
+  readonly status: string | null
+  readonly eventType: string | null
+  readonly intervalValue: string | null
+  readonly intervalField: string | null
+  readonly lastExecuted: string | null
+  readonly starts: string | null
+  readonly ends: string | null
+  readonly definition: string | null
+}
+
+export interface EventListing {
+  readonly scheduler: string | null
+  readonly items: readonly EventRow[]
+}
+
+/** MySQL 用户与全局权限；不含口令或密码材料。 */
+export interface UserRow {
+  readonly user: string
+  readonly host: string
+  readonly locked: boolean
+  readonly plugin: string | null
+  readonly passwordExpired: boolean
+}
+
+export interface PrivilegeRow {
+  readonly grantee: string
+  readonly privilege: string
+  readonly grantable: boolean
+}
+
+export interface UserListing {
+  readonly users: readonly UserRow[]
+  readonly privileges: readonly PrivilegeRow[]
+}
 /** 逻辑分组文件夹的固定标识，方言可以把对象挂到这些分组下。 */
 export type FolderId = 'tables' | 'views' | 'indexes' | 'triggers' | 'columns'
 

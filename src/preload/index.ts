@@ -130,7 +130,10 @@ import {
 import type { DataCompareRequest, DataCompareResult, SchemaSnapshot } from '../core/compare'
 import type { ConnectionConfig } from '../core/dialect'
 import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
-import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
+import type {
+  EventListing, IndexChangeSpec, ObjectRef, ObjectSource, PartitionChangeSpec, SessionListing,
+  TableCreateSpec, TableDescription, UserListing
+} from '../core/model'
 import type { ConnectionSummary } from '../core/api'
 import type { CellValue, ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type {
@@ -308,6 +311,59 @@ const api: DbStudioApi = {
   renameTable: (nodeId: string, newName: string) =>
     invokeBackend(IPC.renameTable, nodeId, newName) as Promise<void>,
 
+  partitionTable: (nodeId: string, spec: PartitionChangeSpec) =>
+    invokeBackend(IPC.partitionTable, nodeId, spec) as Promise<void>,
+
+  indexTable: (nodeId: string, spec: IndexChangeSpec) =>
+    invokeBackend(IPC.indexTable, nodeId, spec) as Promise<void>,
+
+  listSessions: (connectionId: string) =>
+    invokeBackend(IPC.listSessions, connectionId) as Promise<SessionListing>,
+
+  killSession: (connectionId: string, sessionId: number) =>
+    invokeBackend(IPC.killSession, connectionId, sessionId) as Promise<void>,
+
+  listEvents: (connectionId: string, filter?: { schema?: string }) =>
+    invokeBackend(IPC.listEvents, connectionId, filter) as Promise<EventListing>,
+
+  listUsers: (connectionId: string) =>
+    invokeBackend(IPC.listUsers, connectionId) as Promise<UserListing>,
+
+  createDatabase: (connectionId: string, database: string, ifNotExists?: boolean) =>
+    invokeBackend(IPC.createDatabase, connectionId, database, ifNotExists) as Promise<void>,
+
+  objectSource: (nodeId: string) =>
+    invokeBackend(IPC.objectSource, nodeId) as Promise<ObjectSource>,
+
+  searchObjects: (connectionId: string, request: Parameters<DbStudioApi['searchObjects']>[1]) =>
+    invokeBackend(IPC.searchObjects, connectionId, request) as ReturnType<DbStudioApi['searchObjects']>,
+
+  lineageEvidence: (connectionId: string, request: Parameters<DbStudioApi['lineageEvidence']>[1]) =>
+    invokeBackend(IPC.lineageEvidence, connectionId, request) as ReturnType<DbStudioApi['lineageEvidence']>,
+
+  createUser: (connectionId: string, user: string, host: string, password: string) =>
+    invokeBackend(IPC.createUser, connectionId, user, host, password) as Promise<void>,
+
+  dropUser: (connectionId: string, user: string, host: string) =>
+    invokeBackend(IPC.dropUser, connectionId, user, host) as Promise<void>,
+
+  grantPrivilege: (
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>,
+    withGrantOption?: boolean
+  ) => invokeBackend(IPC.grantPrivilege, connectionId, user, host, privileges, scope, withGrantOption) as Promise<void>,
+
+  revokePrivilege: (
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>
+  ) => invokeBackend(IPC.revokePrivilege, connectionId, user, host, privileges, scope) as Promise<void>,
+
   /**
    * 取消某个节点所属连接上正在执行的查询。
    *
@@ -401,7 +457,10 @@ const api: DbStudioApi = {
    * 也没有"任意路径"参数——要选文件就得让用户自己在系统框里选。
    */
   chooseImportFile: () =>
-    invokeBackend(IPC.chooseImportFile) as Promise<string | null>
+    invokeBackend(IPC.chooseImportFile) as Promise<string | null>,
+
+  chooseSqlFile: () =>
+    invokeBackend(IPC.chooseSqlFile) as Promise<{ path: string; content: string } | null>
 }
 
 const remoteConfig = readRendererRemoteBackendConfig(process.env)

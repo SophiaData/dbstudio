@@ -5,7 +5,7 @@ import type { ConnectionSummary } from '../../../src/core/api'
 import SqlEditor from './components/SqlEditor.vue'
 import { parseParameterValue, type ScopedSqlParameter, type StatementParameterSlot } from './sql-editor-model'
 import type { ObjectRef } from '../../../src/core/model'
-import { confirmExit, errorText } from './backend'
+import { backend, confirmExit, errorText } from './backend'
 import { decision } from './dialogs'
 import { connectionOf, useWorkbench } from './workbench'
 import ConnectionDialog from './components/ConnectionDialog.vue'
@@ -19,6 +19,7 @@ import type { ResultTab } from './workbench'
 import SqlLibraryPanel from './components/SqlLibraryPanel.vue'
 import ExplainPanel from './components/ExplainPanel.vue'
 import DdlDialog from './components/DdlDialog.vue'
+import MysqlAdminDialog from './components/MysqlAdminDialog.vue'
 import { splitStatements, SQLITE_SCRIPT_RULES } from '../../../src/core/sql-script'
 
 const wb = useWorkbench()
@@ -48,6 +49,8 @@ const gridController = ref<InstanceType<typeof ResultGrid> | null>(null)
 const libraryController = ref<InstanceType<typeof SqlLibraryPanel> | null>(null)
 const explainController = ref<InstanceType<typeof ExplainPanel> | null>(null)
 const ddlController = ref<InstanceType<typeof DdlDialog> | null>(null)
+/** MySQL 管理面板的打开状态：节点来自目录树右键菜单。 */
+const mysqlAdmin = ref<{ connectionId: string; node?: ObjectRef } | null>(null)
 let unlisten: UnlistenFn | undefined
 const selectedConnection = computed(() => {
   const id = wb.selected.value ? connectionOf(wb.selected.value.id) : wb.currentConnectionId.value
@@ -86,6 +89,23 @@ function requestExplain(script = sqlController.value?.currentStatement() ?? wb.s
     explainRequest.value = { connectionId: wb.currentConnectionId.value, sql: statements[0]!.sql }; toolPanel.value = 'explain'
   } catch (cause) { wb.setStatus(errorText(cause), true) }
 }
+/**
+ * 打开一个 .sql 文件并送入既有的脚本执行链路。
+ *
+ * 只做"读文件 + 填入编辑器"：拆分、参数绑定、逐条执行、错误处理全部复用 executeScript，
+ * 因此文件执行与手输脚本的行为完全一致。
+ */
+async function openSqlFile() {
+  try {
+    const picked = await backend.chooseSqlFile()
+    if (!picked) return
+    wb.sql.value = picked.content
+    wb.setStatus(`已打开 ${picked.path}（${picked.content.split(/\r?\n/).length} 行）`)
+  } catch (cause) {
+    wb.setStatus(errorText(cause), true)
+  }
+}
+
 function requestExecute(script = wb.sql.value) {
   toolPanel.value = null
   pendingSql.value = script
@@ -165,7 +185,7 @@ onBeforeUnmount(() => unlisten?.())
     <header class="app-toolbar"><strong>dbstudio</strong><span class="muted">数据库工作台</span><span class="spacer" /><button :disabled="operationLocked" @click="toolPanel = 'library'">历史 / 收藏</button><button :disabled="operationLocked || !wb.connections.value.some((c) => c.connected)" @click="toolPanel = 'compare'">比较…</button><button :disabled="operationLocked || !selectedConnection?.connected" @click="openEr">ER 图</button><button id="btn-new-connection" :disabled="wb.booting.value || operationLocked" @click="connectionEditor = null">＋ 新建连接</button></header>
     <div v-if="wb.migrationWarning.value" class="warning" role="status">{{ wb.migrationWarning.value }}</div>
     <main class="workspace" :inert="exitBusy || undefined">
-      <aside class="tree-pane"><div class="pane-toolbar"><span>数据库导航</span><span class="spacer" /><button id="btn-refresh" :disabled="operationLocked" @click="wb.attempt(wb.refreshConnections)">刷新</button></div><input v-model="treeSearch" class="tree-search" aria-label="筛选已加载对象" placeholder="筛选已加载对象…" /><div id="tree-rows" class="tree-content metadata-tree-host"><MetadataTree ref="metadataController" :workbench="wb" :search="treeSearch" /></div>
+      <aside class="tree-pane"><div class="pane-toolbar"><span>数据库导航</span><span class="spacer" /><button id="btn-refresh" :disabled="operationLocked" @click="wb.attempt(wb.refreshConnections)">刷新</button><button id="btn-open-sql" :disabled="operationLocked" @click="openSqlFile">打开 SQL 文件</button></div><input v-model="treeSearch" class="tree-search" aria-label="筛选已加载对象" placeholder="筛选已加载对象…" /><div id="tree-rows" class="tree-content metadata-tree-host"><MetadataTree ref="metadataController" :workbench="wb" :search="treeSearch" @admin="(connectionId, node) => (mysqlAdmin = { connectionId, node })" /></div>
         <div v-if="selectedConnection" class="connection-summary"><strong>{{ selectedConnection.name }}</strong><span class="muted">{{ selectedConnection.dialectId }} · {{ selectedConnection.connected ? '已连接' : '未连接' }}</span><p v-if="selectedConnection.secretStored === false" class="warning">密码未保存，请编辑连接重新录入。</p><div class="connection-actions"><button :disabled="operationLocked" @click="connectionEditor = selectedConnection">编辑</button><button v-if="selectedConnection.connected" :disabled="operationLocked" @click="wb.attempt(() => wb.disconnect(selectedConnection!.id))">断开</button><button v-else :disabled="operationLocked" @click="wb.attempt(() => wb.connect(selectedConnection!.id))">连接</button><button :disabled="operationLocked" @click="wb.attempt(() => wb.remove(selectedConnection!.id))">删除</button></div></div>
       </aside>
       <section class="editor-pane">
@@ -186,6 +206,7 @@ onBeforeUnmount(() => unlisten?.())
     <footer id="status-bar" class="status-bar" :class="{ 'is-error': wb.statusError.value }" role="status">{{ wb.status.value }}<span class="spacer" /><span class="muted">Tauri · Vue · Rust</span></footer>
     <ConnectionDialog ref="connectionController" v-if="connectionEditor !== undefined" :workbench="wb" :connection="connectionEditor" @close="connectionEditor = undefined" />
     <TransferDialog ref="transferController" v-if="transfer" :workbench="wb" :tab="transfer.tab" :mode="transfer.mode" @close="transfer = null" />
+    <MysqlAdminDialog v-if="mysqlAdmin" :workbench="wb" :connection-id="mysqlAdmin.connectionId" :node="mysqlAdmin.node" @close="mysqlAdmin = null" />
     <DdlDialog v-if="ddl" ref="ddlController" :workbench="wb" :mode="ddl.mode" :connection-id="ddl.connectionId" :node="ddl.node" @close="ddl = null; toolPanel = null" />
     <div v-if="parameterOpen" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="SQL 参数"><h2>绑定 SQL 参数</h2><p class="muted">参数按语句独立绑定；同名占位符出现在不同语句时也需要分别填写。</p><form @submit.prevent="executeParameters"><label v-for="slot in parameterSlots" :key="slot.key" class="parameter-field"><span>第 {{ slot.statementIndex + 1 }} 条语句（第 {{ slot.startLine }} 行）· {{ slot.name }}</span><select v-model="parameterKinds[slot.key]" :aria-label="`第 ${slot.statementIndex + 1} 条语句 ${slot.name} 类型`"><option value="text">文本</option><option value="number">数字</option><option value="boolean">布尔</option><option value="binary">二进制 Hex</option><option value="null">NULL</option></select><input v-model="parameterValues[slot.key]" :disabled="parameterKinds[slot.key] === 'null'" :aria-label="`第 ${slot.statementIndex + 1} 条语句参数 ${slot.name}`" /></label><p v-if="parameterError" class="is-error">{{ parameterError }}</p><div class="modal-actions"><button type="button" @click="parameterOpen = false">取消</button><button type="submit" class="primary">执行</button></div></form></section></div>
     <div v-if="decision" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title"><h2 id="decision-title">{{ decision.title }}</h2><p>{{ decision.message }}</p><div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div></section></div>

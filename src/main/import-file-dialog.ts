@@ -99,6 +99,54 @@ export const IMPORT_FILE_DIALOG_OPTIONS: ImportFileDialogOptions = {
  *
  * 对话框异常会原样向调用方传播，方便 UI 显示错误而不是把异常伪装成取消。
  */
+/** SQL 脚本文件的系统对话框参数：只列 .sql，避免变成任意读文件入口。 */
+export const SQL_FILE_DIALOG_OPTIONS: ImportFileDialogOptions = {
+  title: '选择 SQL 文件',
+  buttonLabel: '打开',
+  properties: ['openFile'],
+  filters: [{ name: 'SQL 文件', extensions: ['sql'] }]
+}
+
+/**
+ * 校验路径是 .sql 文件后读取其文本内容。
+ *
+ * 这是渲染进程唯一能读任意路径的入口，所以只接受 `.sql` 后缀，
+ * 并且调用方必须先用系统对话框让用户亲手选过文件；不做通用读文件。
+ */
+export async function readSqlFile(
+  filePath: string,
+  readText: (path: string) => Promise<string>
+): Promise<string> {
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw new Error('SQL 文件路径为空')
+  }
+  if (!/\.sql$/i.test(filePath)) throw new Error('只支持 .sql 文件')
+  const content = await readText(filePath)
+  if (content.length > 16 * 1024 * 1024) throw new Error('SQL 文件过大（上限 16 MiB）')
+  return content
+}
+
+/**
+ * 弹出系统文件选择框，返回用户选中的 SQL 文件路径。
+ *
+ * 与 chooseImportFile 分开是为了不复用 CSV 的过滤器：导入只吃 CSV，
+ * 脚本只吃 .sql，两条路各自封闭，改动一方不会影响另一方。
+ */
+export async function chooseSqlFile<W extends DialogWindowLike>(
+  deps: ChooseImportFileDeps<W>
+): Promise<string | null> {
+  const [candidate] = deps.resolveWindows()
+  const parentWindow = candidate && !candidate.isDestroyed() ? candidate : null
+  if (!parentWindow) return null
+  const result = await deps.showOpenDialog(parentWindow, SQL_FILE_DIALOG_OPTIONS)
+  if (!result || result.canceled) return null
+  const paths = result.filePaths
+  if (!Array.isArray(paths) || paths.length === 0) return null
+  const picked = paths[0]
+  if (typeof picked !== 'string' || picked.trim() === '') return null
+  return picked
+}
+
 export async function chooseImportFile<W extends DialogWindowLike>(
   deps: ChooseImportFileDeps<W>
 ): Promise<string | null> {

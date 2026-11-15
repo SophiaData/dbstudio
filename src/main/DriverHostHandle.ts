@@ -39,7 +39,9 @@ import type {
   SecretInput,
   TestConnectionResult
 } from '../core/driver'
-import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
+import type {
+  DriverCapabilities, EventListing, IndexChangeSpec, LineageEvidence, ObjectRef, ObjectSource, PartitionChangeSpec, SearchObjectsResult, SessionListing, TableCreateSpec, TableDescription, UserListing
+} from '../core/model'
 import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from '../core/resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from '../core/resultset'
 import type { CellValue } from '../core/resultset'
@@ -658,6 +660,73 @@ export class DriverHostHandle {
     return this.request<ObjectRef[]>('listChildren', { parentId })
   }
 
+  /** MySQL 分区变更：DDL 会隐式提交，所以不在事务内调用。 */
+  partitionTable(tableId: string, spec: PartitionChangeSpec): Promise<void> {
+    return this.request<void>('partitionTable', { tableId, spec })
+  }
+
+  /** MySQL 索引变更：修改走单条 DROP+ADD，中途不出现空窗。 */
+  indexTable(tableId: string, spec: IndexChangeSpec): Promise<void> {
+    return this.request<void>('indexTable', { tableId, spec })
+  }
+
+  /** MySQL 会话列表（只读）。 */
+  listSessions(): Promise<SessionListing> {
+    return this.request<SessionListing>('listSessions', {})
+  }
+
+  /** 终止指定 MySQL 会话。 */
+  killSession(sessionId: number): Promise<void> {
+    return this.request<void>('killSession', { sessionId })
+  }
+
+  /** MySQL 事件与调度器状态（只读）。 */
+  listEvents(filter: { schema?: string }): Promise<EventListing> {
+    return this.request<EventListing>('listEvents', filter)
+  }
+
+  /** MySQL 用户与全局权限（只读）。 */
+  createDatabase(database: string, ifNotExists: boolean): Promise<void> {
+    return this.request<void>('createDatabase', { database, ifNotExists })
+  }
+
+  searchObjects(request: { keyword: string; kinds?: readonly string[]; schema?: string; limit?: number }): Promise<SearchObjectsResult> {
+    return this.request<SearchObjectsResult>('searchObjects', request)
+  }
+
+  lineageEvidence(request: { table: string; column: string; schema?: string }): Promise<LineageEvidence> {
+    return this.request<LineageEvidence>('lineageEvidence', request)
+  }
+
+  createUser(user: string, host: string, password: string): Promise<void> {
+    return this.request<void>('createUser', { user, host, password })
+  }
+
+  dropUser(user: string, host: string): Promise<void> {
+    return this.request<void>('dropUser', { user, host })
+  }
+
+  grantPrivilege(
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>,
+    withGrantOption: boolean
+  ): Promise<void> {
+    return this.request<void>('grantPrivilege', { user, host, privileges, scope, withGrantOption })
+  }
+
+  revokePrivilege(user: string, host: string, privileges: readonly string[], scope: Record<string, string>): Promise<void> {
+    return this.request<void>('revokePrivilege', { user, host, privileges, scope })
+  }
+
+  objectSource(nodeId: string): Promise<ObjectSource> {
+    return this.request<ObjectSource>('objectSource', { nodeId })
+  }
+
+  listUsers(): Promise<UserListing> {
+    return this.request<UserListing>('listUsers', {})
+  }
   describeTable(id: string): Promise<TableDescription> {
     return this.request<TableDescription>('describeTable', { id })
   }

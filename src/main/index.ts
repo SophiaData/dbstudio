@@ -19,7 +19,8 @@ import { join } from 'node:path'
 import { BUILTIN_DIALECT_METADATA } from '../drivers/dialect-metadata'
 import { ConnectionManager } from './ConnectionManager'
 import { ConnectionStore, type SecretCipher } from './ConnectionStore'
-import { chooseImportFile } from './import-file-dialog'
+import { readFile } from 'node:fs/promises'
+import { chooseImportFile, chooseSqlFile, readSqlFile } from './import-file-dialog'
 import { SqlLibraryStore } from './SqlLibraryStore'
 import { registerElectronIpc } from './transport/electron-ipc-adapter'
 import {
@@ -429,6 +430,28 @@ function probeSafeStorage(): {
  *
  * 没有发起窗口时返回 null，绝不回退到主窗口或某个默认路径。
  */
+/**
+ * 选择 .sql 文件并读回内容。
+ *
+ * 与导入选择器同样的安全边界：只有用户亲手在系统对话框里选中的文件才会被读，
+ * 且扩展名必须是 .sql；读回内容上限由 readSqlFile 把关。
+ */
+async function chooseSqlFileForSender(
+  sender?: WebContents
+): Promise<{ path: string; content: string } | null> {
+  const filePath = await chooseImportFile<BrowserWindow>({
+    showOpenDialog: async (window, options) => {
+      if (!window) throw new Error('SQL 文件对话框缺少发起窗口')
+      const result = await dialog.showOpenDialog(window, options)
+      return { canceled: result.canceled, filePaths: result.filePaths }
+    },
+    resolveWindows: () => [sender ? BrowserWindow.fromWebContents(sender) : null]
+  })
+  if (filePath === null) return null
+  const content = await readSqlFile(filePath, (target) => readFile(target, 'utf8'))
+  return { path: filePath, content }
+}
+
 function chooseImportFileForSender(sender?: WebContents): Promise<string | null> {
   return chooseImportFile<BrowserWindow>({
     showOpenDialog: async (window, options) => {
@@ -452,7 +475,8 @@ app.whenReady().then(async () => {
   registerElectronIpc({
     getManager,
     getSqlLibrary,
-    chooseImportFile: chooseImportFileForSender
+    chooseImportFile: chooseImportFileForSender,
+    chooseSqlFile: chooseSqlFileForSender
   })
   await startConfiguredHttpServer()
   createWindow()

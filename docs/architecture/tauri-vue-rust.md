@@ -53,6 +53,36 @@ Rust业务调用在worker线程执行，避免阻塞WebView。一个活动会话
 - Tauri原生文件对话框是桌面能力；生产命令不能接受任意shell或任意测试控制。
 - 测试hook必须编译feature和运行环境双重启用，仅访问新建临时目录；production不注册测试能力。
 
+## 方法白名单
+
+桌面端唯一的调用入口是 `backend_call(method, args)`，方法必须同时出现在三处，缺一处界面就调不到：
+
+1. `src-tauri/src/lib.rs` 的 `CORE_METHODS`（原生边界，fail-closed）
+2. `crates/dbstudio-core/src/lib.rs` 的 `Application::call` 分派
+3. `src/core/api.ts` 的 `DbStudioApi` 契约与 `IPC` 通道常量
+
+Vue 侧还要求 `src/backend/contract/method-manifest.ts` 有对应 `entry`，`src/preload/index.ts` 有暴露。这套约束由类型系统强制：协议方法漏配会让编译失败，而不是等到用户点按钮才炸。
+
+## MySQL 管理类方法
+
+以下方法由原生 MySQL 驱动实现，全部只接受连接级或对象级节点 id：
+
+| 方法 | 类别 | 关键约束 |
+|---|---|---|
+| `partitionTable` | DDL 写 | 事务态拒绝；按分区名聚合子分区 |
+| `indexTable` | DDL 写 | 修改走单条 `DROP+ADD`，没有索引空窗 |
+| `createDatabase` | DDL 写 | 库名白名单 |
+| `createUser` / `dropUser` / `grantPrivilege` / `revokePrivilege` | DDL 写 | 账号、主机、权限、授权范围四层白名单；口令按字符串字面量转义 |
+| `listSessions` / `killSession` | 读 / 会话控制 | 拒绝终止自身会话 |
+| `listEvents` / `listUsers` | 只读 | 不返回口令或密码材料 |
+| `objectSource` | 只读 | 源码与定义走全量读取，不截断 |
+| `searchObjects` | 只读 | 每条查询带 `LIMIT`；`%`/`_` 按字面量转义 |
+| `lineageEvidence` | 只读 | 排除系统库；分析侧按 certain/likely/possible 分档 |
+
+信息架构的文本列可能以 `Bytes` 类型返回，直接转字符串会 panic。这类读取统一经驱动内部 `cell()` 转换，不直接按目标类型取值。
+
+`CREATE EVENT`、`CREATE TRIGGER`、`CREATE PROCEDURE` 不支持 MySQL 预处理语句协议（错误 1295），走文本协议执行。
+
 ## 迁移与兼容
 
 旧Electron源码和测试保留为行为参照，当前未提交staging草稿不纳入迁移。原用户文件不参与测试或自动覆盖。

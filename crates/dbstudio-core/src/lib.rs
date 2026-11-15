@@ -202,6 +202,54 @@ impl Application {
                 if method == "describeTable" { result["id"] = json!(node) }
                 Ok(result)
             },
+            // MySQL 管理类方法：分区 DDL 需要表节点，其余三个是连接级读取。
+            "partitionTable" | "indexTable" => {
+                let node = str_arg(&args, 0)?;
+                let (_, raw) = parse_node(node)?;
+                let raw = raw.ok_or_else(|| AppError::invalid("请选择具体数据库对象"))?;
+                let mut forwarded = vec![json!(raw)]; forwarded.extend_from_slice(&args[1..]);
+                self.driver_call(node, method, forwarded)
+            },
+            "searchObjects" | "lineageEvidence" => {
+                let node = str_arg(&args, 0)?;
+                let (connection, raw) = parse_node_or_connection(node)?;
+                if raw.is_some() { return Err(AppError::invalid("请选择连接节点")) }
+                // 驱动的 searchObjects / lineageEvidence 都只读 args.first()，
+                // 所以这里只转发请求体，不能前置空对象。
+                self.driver_call(&format!("connection:{connection}"), method, args[1..].to_vec())
+            },
+            "createUser" | "dropUser" | "grantPrivilege" | "revokePrivilege" => {
+                let node = str_arg(&args, 0)?;
+                let (connection, raw) = parse_node_or_connection(node)?;
+                if raw.is_some() { return Err(AppError::invalid("请选择连接节点")) }
+                self.driver_call(&format!("connection:{connection}"), method, args[1..].to_vec())
+            },
+            "objectSource" => {
+                let node = str_arg(&args, 0)?;
+                let (_, raw) = parse_node(node)?;
+                let raw = raw.ok_or_else(|| AppError::invalid("请选择具体对象"))?;
+                self.driver_call(node, method, vec![json!(raw)])
+            },
+            "createDatabase" => {
+                let node = str_arg(&args, 0)?;
+                let (connection, raw) = parse_node_or_connection(node)?;
+                if raw.is_some() { return Err(AppError::invalid("请选择连接节点")) }
+                self.driver_call(&format!("connection:{connection}"), method, args[1..].to_vec())
+            },
+            "listSessions" | "listEvents" | "listUsers" => {
+                let node = str_arg(&args, 0)?;
+                // 这三个是连接级读取：只接受连接节点，不接受带对象的子节点。
+                let (connection, raw) = parse_node_or_connection(node)?;
+                if raw.is_some() { return Err(AppError::invalid("请选择连接节点")) }
+                self.driver_call(&format!("connection:{connection}"), method, args[1..].to_vec())
+            },
+            "killSession" => {
+                let node = str_arg(&args, 0)?;
+                let (connection, raw) = parse_node_or_connection(node)?;
+                if raw.is_some() { return Err(AppError::invalid("请选择连接节点")) }
+                let target = args.get(1).cloned().ok_or_else(|| AppError::invalid("缺少会话 ID"))?;
+                self.driver_call(&format!("connection:{connection}"), method, vec![target])
+            },
             _ => Err(AppError::unsupported("此接口尚未迁移到原生核心")),
         }
     }

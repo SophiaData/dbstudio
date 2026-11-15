@@ -15,6 +15,14 @@ fn mysql_mode_environment_present() -> bool {
     MYSQL_ACCEPTANCE_ENV.iter().any(|name| std::env::var_os(name).is_some())
 }
 
+/// Test-hook builds run on isolated fixtures only: a missing smoke root is a startup
+/// failure, never a fallback to the production app-data directory or the OS vault.
+/// Parameterised for tests; the environment read stays in the startup gate.
+#[cfg_attr(not(all(feature = "test-hooks", not(feature = "mysql-acceptance"))), allow(dead_code))]
+fn native_smoke_root_allowed(root: Option<&std::ffi::OsStr>) -> bool {
+    root.is_some()
+}
+
 use dbstudio_core::{AppError, Application, SecretStore};
 use serde_json::Value;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
@@ -44,6 +52,10 @@ const CORE_METHODS: &[&str] = &[
     "updateConnection", "listSqlLibrary", "recordSqlHistory", "saveSql", "removeSavedSql",
     "clearSqlHistory", "migrationStatus", "startTransfer", "getTransferProgress", "cancelTransfer", "waitTransfer",
     "previewImport", "startImport", "getImportProgress", "cancelImport", "waitImport",
+    // MySQL 分区管理与会话/事件/用户读取。
+    // 这份名单是桌面的显式边界：不在这里的方法界面调不到。
+    "partitionTable", "listSessions", "killSession", "listEvents", "listUsers", "indexTable", "createDatabase", "objectSource", "searchObjects", "lineageEvidence",
+    "createUser", "dropUser", "grantPrivilege", "revokePrivilege",
 ];
 
 fn internal_error() -> AppError {
@@ -331,6 +343,13 @@ pub fn run() {
         eprintln!("Native smoke environment requires a test artifact");
         std::process::exit(2);
     }
+    // Test-hook builds without the MySQL acceptance host own no isolated storage.
+    // Missing root fails closed before Tauri reads app data or creates any window.
+    #[cfg(all(feature = "test-hooks", not(feature = "mysql-acceptance")))]
+    if !native_smoke_root_allowed(std::env::var_os("DBSTUDIO_NATIVE_SMOKE_ROOT").as_deref()) {
+        eprintln!("Native test-hook builds require DBSTUDIO_NATIVE_SMOKE_ROOT");
+        std::process::exit(2);
+    }
     let context = tauri::generate_context!();
     #[cfg(feature = "mysql-acceptance")]
     let mysql = {
@@ -360,7 +379,7 @@ pub fn run() {
             #[cfg(all(feature = "test-hooks", not(feature = "mysql-acceptance")))]
             let (base_dir, secrets): (_, Arc<dyn SecretStore>) = match &smoke {
                 Some(fixture) => (fixture.root.join("data"), Arc::new(smoke::FixtureSecrets::default())),
-                None => (app.path().app_data_dir()?, Arc::new(secrets::OsSecretStore)),
+                None => return Err("Native test-hook builds require DBSTUDIO_NATIVE_SMOKE_ROOT".into()),
             };
             #[cfg(not(feature = "test-hooks"))]
             let (base_dir, secrets): (_, Arc<dyn SecretStore>) =
@@ -503,6 +522,12 @@ mod tests {
         }
         application.close().unwrap();
         // Retain fixture evidence; never delete temporary files.
+    }
+
+    #[test]
+    fn native_smoke_root_policy_rejects_missing_root_and_allows_present_root() {
+        assert!(!native_smoke_root_allowed(None));
+        assert!(native_smoke_root_allowed(Some(std::ffi::OsStr::new("fixture-root"))));
     }
 
     #[test]

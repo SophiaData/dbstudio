@@ -2,7 +2,9 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { ConnectionSummary } from '../../../src/core/api'
 import type { ConnectionConfig } from '../../../src/core/dialect'
 import type { DialectInfo, SecretMap } from '../../../src/core/driver'
-import type { ObjectRef, TableDescription } from '../../../src/core/model'
+import type {
+  IndexChangeSpec, ObjectRef, PartitionChangeSpec, TableDescription
+} from '../../../src/core/model'
 import type { CellValue, QueryResult, ResultPage, ResultRow, RowUpdate, SqlParameter, TransactionState } from '../../../src/core/resultset'
 import type { RecordSqlHistoryInput } from '../../../src/core/sql-library'
 import { splitStatements, SQLITE_SCRIPT_RULES } from '../../../src/core/sql-script'
@@ -315,14 +317,15 @@ export function useWorkbench() {
     if (Object.keys(changes).length) tab.dirty.set(row.index, { keyValues, changes })
     else tab.dirty.delete(row.index)
   }
-  async function reloadTab(tab: ResultTab, guard = true, offset = 0) {
+  async function reloadTab(tab: ResultTab, guard = true, offset = 0, transform?: Pick<ResultTab, 'querySql' | 'order'>) {
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
     if (guard && !(await guardLocal(tab, '刷新结果'))) return
     tab.busy = true
     const generation = ++tab.generation
     try {
-      const result = await backend.runQuery(connectionNode(tab.connectionId), tab.querySql, { limit: PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
+      const result = await backend.runQuery(connectionNode(tab.connectionId), transform?.querySql ?? tab.querySql, { limit: PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
       if (generation !== tab.generation) { if (result.cursorId) await backend.closeCursor(result.cursorId); return }
+      if (transform) { tab.querySql = transform.querySql; tab.order = transform.order }
       await setResult(tab, result)
     } finally { tab.busy = false }
   }
@@ -335,15 +338,15 @@ export function useWorkbench() {
     try { tab.page = await backend.fetchResultPage(tab.result.cursorId, targetOffset, PAGE_SIZE); tab.selectedRows.clear() }
     finally { tab.busy = false }
   }
-  async function transformTab(tab: ResultTab) {
+  async function transformTab(tab: ResultTab, order = tab.order) {
     if (!(await guardLocal(tab, '排序或筛选'))) return
     const quoteColumn = (name: string) => quote(name, tab.connectionId)
     const filter = parseFilter(tab.filter, quoteColumn)
     if (!filter.ok) throw new Error(filter.error)
     const base = tab.sql.trim().replace(/;\s*$/, '')
-    tab.querySql = buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
-    if (tab.order) tab.querySql += ` ORDER BY ${quoteColumn(tab.order.column)} ${tab.order.direction}`
-    await reloadTab(tab, false)
+    let querySql = buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
+    if (order) querySql += ` ORDER BY ${quoteColumn(order.column)} ${order.direction}`
+    await reloadTab(tab, false, 0, { querySql, order })
   }
   async function applyTab(tab: ResultTab) {
     if (!tab.table || !tab.dirty.size) return
@@ -475,7 +478,12 @@ export function useWorkbench() {
     if (!editableSource(tab) || tab.busy || !tab.table) throw new Error('当前表不可新增行')
     if (!(await guardLocal(tab, '插入行'))) return false
     const result = await backend.insertRow(tab.table.id, values)
-    await readTransaction(tab.connectionId); await reloadTab(tab, false)
+    try {
+      await readTransaction(tab.connectionId); await reloadTab(tab, false)
+    } catch (cause) {
+      setStatus(`已插入 ${result.affected} 行，尚未提交；刷新失败：${errorText(cause)}`, true)
+      return true
+    }
     setStatus(`已插入 ${result.affected} 行，尚未提交`)
     return true
   }
@@ -510,6 +518,93 @@ export function useWorkbench() {
       return true
     })
   }
+  /**
+   * 分区、索引、会话等 MySQL 管理操作。
+   * 写操作走 changeSchema：它已经负责事务守卫、
+   * 旧游标失效与元数据刷新，这里不重复实现一套。
+   */
+  async function partitionTable(connectionId: string, nodeId: string, spec: PartitionChangeSpec) {
+    return changeSchema(connectionId, '分区变更', async () => {
+      await backend.partitionTable(nodeId, spec)
+    }, true)
+  }
+
+  async function indexTable(connectionId: string, nodeId: string, spec: IndexChangeSpec) {
+    return changeSchema(connectionId, '索引变更', async () => {
+      await backend.indexTable(nodeId, spec)
+    }, true)
+  }
+
+  /** 读取 MySQL 会话列表（只读）。 */
+  async function listSessions(connectionId: string) {
+    return backend.listSessions(`connection:${connectionId}`)
+  }
+
+  /** 终止指定 MySQL 会话。 */
+  async function killSession(connectionId: string, sessionId: number) {
+    return changeSchema(connectionId, `终止会话 ${sessionId}`, async () => {
+      await backend.killSession(`connection:${connectionId}`, sessionId)
+    })
+  }
+
+  /** 新建数据库。 */
+  async function createDatabase(connectionId: string, database: string) {
+    return changeSchema(connectionId, `新建库 ${database}`, async () => {
+      await backend.createDatabase(connectionId, database, true)
+    }, true)
+  }
+
+  /** 读取对象源码（视图 / 例程 / 触发器）。 */
+  async function objectSource(nodeId: string) {
+    return backend.objectSource(nodeId)
+  }
+
+  /** 跨库搜索对象。 */
+  async function searchObjects(connectionId: string, keyword: string) {
+    return backend.searchObjects(connectionId, { keyword })
+  }
+
+  /** 读取字段血缘证据，并在渲染进程做分档分析。 */
+  async function fieldLineage(connectionId: string, table: string, column: string, schema?: string) {
+    return backend.lineageEvidence(connectionId, { table, column, ...(schema ? { schema } : {}) })
+  }
+
+  /** 新建账号。 */
+  async function createUser(connectionId: string, user: string, host: string, password: string) {
+    return changeSchema(connectionId, `新建账号 ${user}@${host}`, async () => {
+      await backend.createUser(connectionId, user, host, password)
+    })
+  }
+
+  /** 删除账号。 */
+  async function dropUser(connectionId: string, user: string, host: string) {
+    return changeSchema(connectionId, `删除账号 ${user}@${host}`, async () => {
+      await backend.dropUser(connectionId, user, host)
+    })
+  }
+
+  /** 授予权限。 */
+  async function grantPrivilege(connectionId: string, user: string, host: string, privileges: string[], scope: Record<string, string>) {
+    return changeSchema(connectionId, `授予权限 ${user}@${host}`, async () => {
+      await backend.grantPrivilege(connectionId, user, host, privileges, scope, false)
+    })
+  }
+
+  /** 回收权限。 */
+  async function revokePrivilege(connectionId: string, user: string, host: string, privileges: string[], scope: Record<string, string>) {
+    return changeSchema(connectionId, `回收权限 ${user}@${host}`, async () => {
+      await backend.revokePrivilege(connectionId, user, host, privileges, scope)
+    })
+  }
+
+  /** 读取 MySQL 事件与用户权限（只读）。 */
+  async function listEvents(connectionId: string) {
+    return backend.listEvents(`connection:${connectionId}`)
+  }
+
+  async function listUsers(connectionId: string) {
+    return backend.listUsers(`connection:${connectionId}`)
+  }
   async function guardAllConnections(action: string) {
     if (pendingEditors.size) { setStatus('请先保存或取消正在编辑的单元格/新增行，再退出工作台', true); return false }
     if (backgroundTasks.size) { setStatus('导入导出任务正在运行，请等待完成或先取消任务后退出', true); return false }
@@ -527,13 +622,22 @@ export function useWorkbench() {
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),
     reloadTab: (tab: ResultTab, guard = true) => withConnectionOperation(tab.connectionId, () => reloadTab(tab, guard)),
-    transformTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => transformTab(tab)),
+    transformTab: (tab: ResultTab, order = tab.order) => withConnectionOperation(tab.connectionId, () => transformTab(tab, order)),
     settleTransaction: (id: string, commit: boolean) => withConnectionOperation(id, () => settleTransaction(id, commit)),
     saveConnection, connect, disconnect, remove,
     closeTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => closeTab(tab)),
     insertRow: (tab: ResultTab, values: Record<string, CellValue>) => withConnectionOperation(tab.connectionId, () => insertRow(tab, values)),
     deleteSelected: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => deleteSelected(tab)),
-    guardConnection, guardAllConnections, readTransaction, changeSchema
+    guardConnection, guardAllConnections, readTransaction, changeSchema,
+    partitionTable, indexTable, listSessions, killSession, listEvents, listUsers,
+    searchObjects: (connectionId: string, keyword: string) => withConnectionOperation(connectionId, () => searchObjects(connectionId, keyword)),
+    createDatabase: (connectionId: string, database: string) => createDatabase(connectionId, database),
+    objectSource: (nodeId: string) => withConnectionOperation(connectionOf(nodeId), () => objectSource(nodeId)),
+    fieldLineage: (connectionId: string, table: string, column: string, schema?: string) => withConnectionOperation(connectionId, () => fieldLineage(connectionId, table, column, schema)),
+    createUser: (connectionId: string, user: string, host: string, password: string) => createUser(connectionId, user, host, password),
+    dropUser: (connectionId: string, user: string, host: string) => dropUser(connectionId, user, host),
+    grantPrivilege: (connectionId: string, user: string, host: string, privileges: string[], scope: Record<string, string>) => grantPrivilege(connectionId, user, host, privileges, scope),
+    revokePrivilege: (connectionId: string, user: string, host: string, privileges: string[], scope: Record<string, string>) => revokePrivilege(connectionId, user, host, privileges, scope)
   }
 }
 export type Workbench = ReturnType<typeof useWorkbench>

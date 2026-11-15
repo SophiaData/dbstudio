@@ -44,7 +44,7 @@
  *    不新增行为。
  */
 
-import type { TableCreateSpec } from '../../core/model'
+import type { IndexChangeSpec, PartitionChangeSpec, TableCreateSpec } from '../../core/model'
 import type {
   CellValue,
   EditApplyResult,
@@ -191,6 +191,72 @@ export class MutationApplicationService {
    * `resolveConnectionLike` 归一：有前缀就解析，没有就当作裸 id。这样 UI 传
    * 节点 id 或连接 id 都能工作，减少一类「参数形态不对」的隐 bug。
    */
+  /**
+   * MySQL 分区变更。DDL 会隐式提交，所以走写通道并由
+   * 驱动在事务中拒绝。参数原样转 host，主进程不瞄控表名。
+   */
+  async partitionTable(tableNodeId: string, spec: PartitionChangeSpec): Promise<void> {
+    const { conn, adapterId } = this.#ctx.resolver.resolveConnection(tableNodeId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '分区变更')
+    if (adapterId === null) throw new Error('连接节点不能做分区变更，请选择具体的表')
+    return this.#write(conn.id, () => conn.host.partitionTable(adapterId, spec))
+  }
+
+  /** MySQL 索引变更；修改走单条 DROP+ADD。 */
+  /** 新建账号。 */
+  async createUser(connectionId: string, user: string, host: string, password: string): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '新建账号')
+    return this.#write(conn.id, () => conn.host.createUser(user, host, password))
+  }
+
+  /** 删除账号。 */
+  async dropUser(connectionId: string, user: string, host: string): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '删除账号')
+    return this.#write(conn.id, () => conn.host.dropUser(user, host))
+  }
+
+  /** 授予权限。 */
+  async grantPrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>,
+    withGrantOption = false
+  ): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '授予权限')
+    return this.#write(conn.id, () => conn.host.grantPrivilege(user, host, privileges, scope, withGrantOption))
+  }
+
+  /** 回收权限。 */
+  async revokePrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>
+  ): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '回收权限')
+    return this.#write(conn.id, () => conn.host.revokePrivilege(user, host, privileges, scope))
+  }
+
+  /** 新建数据库：DDL 隐式提交，因此与其它 DDL 一样走写通道。 */
+  async createDatabase(connectionId: string, database: string, ifNotExists = false): Promise<void> {
+    const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '新建数据库')
+    return this.#write(conn.id, () => conn.host.createDatabase(database, ifNotExists))
+  }
+
+  async indexTable(tableNodeId: string, spec: IndexChangeSpec): Promise<void> {
+    const { conn, adapterId } = this.#ctx.resolver.resolveConnection(tableNodeId)
+    this.#ctx.activity.assertNoActiveImport(conn.id, '索引变更')
+    if (adapterId === null) throw new Error('连接节点不能做索引变更，请选择具体的表')
+    return this.#write(conn.id, () => conn.host.indexTable(adapterId, spec))
+  }
   async createTable(connectionId: string, spec: TableCreateSpec): Promise<void> {
     const { conn } = this.#ctx.resolver.resolveConnectionLike(connectionId)
     this.#ctx.activity.assertNoActiveImport(conn.id, '建表')

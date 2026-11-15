@@ -673,7 +673,21 @@ export const RPC_METHODS = [
   'resolveTransferSource',
   'viewDefinition',
   'listRoutines',
-  'tableSelectSql'
+  'tableSelectSql',
+  'partitionTable',
+  'indexTable',
+  'listSessions',
+  'killSession',
+  'listEvents',
+  'listUsers',
+  'createDatabase',
+  'objectSource',
+  'searchObjects',
+  'lineageEvidence',
+  'createUser',
+  'dropUser',
+  'grantPrivilege',
+  'revokePrivilege'
 ] as const
 
 export type RpcMethod = (typeof RPC_METHODS)[number]

@@ -10,7 +10,7 @@ import type { DbStudioApi } from '../../core/api'
 import type { ConnectionManager } from '../ConnectionManager'
 import type { SqlLibraryStore } from '../SqlLibraryStore'
 
-export type ApplicationApi = Omit<DbStudioApi, 'chooseImportFile'>
+export type ApplicationApi = Omit<DbStudioApi, 'chooseImportFile' | 'chooseSqlFile'>
 
 export interface ApplicationApiDependencies {
   readonly getManager: () => ConnectionManager
@@ -32,7 +32,25 @@ export function createApplicationApi(
     removeConnection: async (connectionId) => getManager().remove(connectionId),
     testConnection: async (config, secret) => getManager().testConnection(config, secret),
     listChildren: async (nodeId) => getManager().listChildren(nodeId),
-    describeTable: async (tableNodeId) => getManager().describeTable(tableNodeId),
+    partitionTable: async (nodeId, spec) => getManager().partitionTable(nodeId, spec),
+  indexTable: async (nodeId, spec) => getManager().indexTable(nodeId, spec),
+  listSessions: async (connectionId) => getManager().listSessions(connectionId),
+  killSession: async (connectionId, sessionId) => getManager().killSession(connectionId, sessionId),
+  listEvents: async (connectionId, filter) => getManager().listEvents(connectionId, filter),
+  listUsers: async (connectionId) => getManager().listUsers(connectionId),
+  createDatabase: async (connectionId, database, ifNotExists) =>
+    getManager().createDatabase(connectionId, database, ifNotExists),
+  objectSource: async (nodeId) => getManager().objectSource(nodeId),
+  searchObjects: async (connectionId, request) => getManager().searchObjects(connectionId, request),
+  lineageEvidence: async (connectionId, request) => getManager().lineageEvidence(connectionId, request),
+  createUser: async (connectionId, user, host, password) =>
+    getManager().createUser(connectionId, user, host, password),
+  dropUser: async (connectionId, user, host) => getManager().dropUser(connectionId, user, host),
+  grantPrivilege: async (connectionId, user, host, privileges, scope, withGrantOption) =>
+    getManager().grantPrivilege(connectionId, user, host, privileges, scope, withGrantOption),
+  revokePrivilege: async (connectionId, user, host, privileges, scope) =>
+    getManager().revokePrivilege(connectionId, user, host, privileges, scope),
+  describeTable: async (tableNodeId) => getManager().describeTable(tableNodeId),
     captureSchemaSnapshot: async (connectionId, schema) =>
       getManager().captureSchemaSnapshot(connectionId, schema),
     compareTableData: async (request) => getManager().compareTableData(request),

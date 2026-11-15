@@ -1,20 +1,24 @@
 # dbstudio
 
-**默认桌面入口已迁移为 Tauri 2 + Vue 3 + Rust（0.8.0）。** 本地桌面通过 typed invoke 调用宿主无关的 Rust 业务核心及原生数据库驱动，参考 dbx 的共享核心与独立宿主边界。详见[目标架构](docs/architecture/tauri-vue-rust.md)、[验收台账](docs/support/native-migration-matrix.md)与[迁移计划](docs/superpowers/plans/2026-11-06-tauri-vue-rust-migration.md)。
+**默认桌面入口为 Tauri 2 + Vue 3 + Rust（0.8.1）。** 本地桌面通过 typed invoke 调用宿主无关的 Rust 业务核心及原生数据库驱动，参考 dbx 的共享核心与独立宿主边界。详见[目标架构](docs/architecture/tauri-vue-rust.md)、[验收台账](docs/support/native-migration-matrix.md)与[迁移计划](docs/superpowers/plans/2026-11-06-tauri-vue-rust-migration.md)。
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm dev                # Tauri + Vue 开发桌面
-pnpm verify             # 原生依赖边界、Vue 类型检查、Rust 回归
+pnpm verify             # 原生依赖边界、Vue 类型检查与回归、Rust 回归、候选包完整性门禁
 pnpm build --no-bundle   # 全新无测试 hook 的前端目录 + Rust release 可执行文件
 pnpm build:app          # 当前平台 Tauri 安装包/应用包
 ```
 
 当前发布目标为 **macOS arm64 DMG** 和 **Windows x64 EXE**，分别使用 `pnpm build:app:mac`、`pnpm build:app:win` 在对应平台构建。需要 Rust stable、Node.js 与 pnpm；macOS 还需 Xcode Command Line Tools，详见[原生构建与 CI 说明](docs/architecture/native-ci.md)。Ubuntu 仅用于专用数据库测试，不生成 Linux 安装包。真实桌面测试通过显式 test-hooks 构建访问独立临时 SQLite，已有 64 项真实 Tauri WebView 检查通过；安装、签名与公证仍按实际结果另行验收。
 
+默认 `pnpm verify` 的步骤由 `package.json` 定义；原生 CI 见 `.github/workflows/native-verify.yml`。发布工作流 `.github/workflows/release.yml` 调用原生 CI，构建 macOS arm64 与 Windows x64 候选包，核对来源、版本、workflow attempt 与摘要后上传候选产物，**不自动公开发布**。安装器执行、签名与公证需要平台验收，详见[原生发布说明](docs/architecture/native-release.md)。
+
 旧配置、历史与收藏只读导入独立 v2 文件；旧 Electron safeStorage 密文保持原样，密码需要重新录入。新凭据使用 OS keyring，无明文回退。旧实现的构建与测试通过 `legacy:dev`、`legacy:build`、`legacy:test`、`legacy:verify` 保留为参照；以下历史说明中的旧进程模型不适用于当前 Rust 运行时。
 
 ## 0.7.0 参照实现与历史说明
+
+以下各节描述 legacy Electron 参照实现；安装包表、验证计数、发布流程及验收状态属于历史记录。当前默认命令与原生候选发布边界以上文为准。历史区的开发、打包、完整验证使用 `legacy:*` 入口；`verify:node`、`verify:gui`、`verify:external`、`verify:ci`、`verify:headless` 及下列 Electron 定向测试均属于 legacy 路径。
 
 旧版本数据库客户端的地基：**元数据/方言抽象 + 连接管理**，用 Node/TypeScript + Electron 实现。
 
@@ -153,7 +157,9 @@ tests/
 | [SQL 工作台](docs/user-guide/sql-workbench.md) | 多语句、参数绑定、执行计划、取消、结果形态、草稿 |
 | [导入与导出](docs/user-guide/import-export.md) | 四种导出格式、CSV 导入、失败回滚、非快照语义 |
 | [元数据、ER 图与结构比较](docs/user-guide/metadata-and-er.md) | 表结构、ER 关系、结构/数据比较 |
+| [MySQL 管理与诊断](docs/user-guide/mysql-management.md) | 分区、索引、会话、事件、用户权限、对象搜索、字段血缘、对象源码、新建库 |
 | [数据库支持矩阵](docs/support/database-matrix.md) | 每个数据库支持什么、不支持什么，及对应验证条目 |
+| [MySQL 能力矩阵](docs/support/mysql-capability-matrix.md) | 对照 dbx 与 DBeaver 的 MySQL 能力覆盖与界面验证记录 |
 | [Backend contract 与 transport 边界](docs/architecture/backend-contract.md) | application services、Electron/HTTP capability、wire 与 driver-host handshake |
 
 ---
@@ -179,14 +185,14 @@ tests/
 
 ```bash
 pnpm install
-pnpm dev            # 开发模式
+pnpm legacy:dev     # legacy Electron 开发模式
 ```
 
 ### 自己打包安装包
 
 ```bash
-pnpm build:app        # 打当前平台
-pnpm build:app:mac    # 或 :linux / :win
+pnpm legacy:build:app        # legacy Electron 当前平台
+pnpm legacy:build:app:mac    # 或 legacy:build:app:linux / legacy:build:app:win
 ```
 
 产物在 `release/`。
@@ -210,12 +216,10 @@ Node 的模块查找不会跨回 `app.asar` 去加载 `pg` / `ssh2`。
 
 ```bash
 pnpm install
-pnpm verify        # 全链验证（清单见 scripts/verify-manifest.mjs）
+pnpm legacy:verify # legacy 全链验证（清单见 scripts/verify-manifest.mjs）
 ```
 
-验证步骤的**唯一真相**是 `scripts/verify-manifest.mjs`。`pnpm verify`、CI 与
-本文档都从同一份清单派生——早先它们是三份手抄的清单，加一个测试只改一边就会
-**静默漏跑**，而且不报错，只是悄悄少验证了一件事。
+legacy 验证步骤的**唯一真相**是 `scripts/verify-manifest.mjs`。`pnpm legacy:verify` 与各 `verify:*` 分组使用这份清单；默认 `pnpm verify` 的原生步骤见本文开头。
 
 按分组跑：
 
@@ -275,6 +279,8 @@ PostgreSQL 断言；只看 node 步骤为绿色不足以证明 PG 分支已运�
 CI 的外部步骤通过 `--require-external` 严格执行，缺环境或子测试报告 `SKIP`
 均会失败。汇总分别列出选中、实际执行、通过、跳过和失败的步骤数。
 
+`test:postgresql-metadata` 会在真实 PG 上创建随机 run 后缀 schema、表、索引与触发器，结束后保留不删除，必须指向一次性专用实例：除 `DBSTUDIO_PG_URL` 外还需设置 `DBSTUDIO_PG_DEDICATED=1`。已设置 URL 但缺该变量时测试以退出码 1 拒绝运行且不建立任何连接；未设置 URL 时明确跳过。`verify:external` / `verify:ci` 的外部服务就绪判定包含这两个变量。
+
 ```bash
 node scripts/verify.mjs --only test:verify-manifest
 node scripts/verify.mjs external --only test:postgres --require-external
@@ -291,27 +297,29 @@ node scripts/verify.mjs external --only test:postgres --require-external
 取消或事务处理失败会保留连接；等待确认不会因超时而自动放行。连接成功关闭或更新后，
 旧结果标签会失效，须重新打开，防止旧主键和旧查询被用于替换后的数据库。
 
-发布工作流按 `verify → 原生构建和打包应用冒烟 → 汇总门禁 → 单个发布任务` 执行。
+历史 Electron 发布流程按 `verify → 构建和打包应用冒烟 → 汇总门禁 → 单个发布任务` 执行。
 手动分支构建只生成验证产物；tag 必须匹配版本。发布前核对同一 workflow attempt、
 commit、version 的 macOS arm64/x64、Windows x64 和 Linux x64 产物，先上传 draft，
 核对全部附件大小及摘要后才公开。打包可执行文件冒烟不等于安装器安装成功，
 也不代表签名或公证已验证。当前验收证据见
 [M0 验收报告](docs/superpowers/plans/2026-10-24-m0-acceptance-report.md)。
 
-**当前发布状态：**门禁代码与 25 条负例已通过，本机 mac/arm64 的打包产物冒烟已通过；
+**历史 Electron 验收状态：**门禁代码与 25 条负例已通过，本机 mac/arm64 的打包产物冒烟已通过；
 **远端三平台构建、安装器安装与签名/公证尚未验证**，因此尚未宣布 Beta 发布就绪。
 
 单独跑：
 
 ```bash
-pnpm dev                # 开发模式（会先构建驱动宿主）
-pnpm test               # 元数据 e2e
+pnpm legacy:dev         # legacy 开发模式（会先构建驱动宿主）
+pnpm legacy:test        # legacy 元数据 e2e
 pnpm test:resultset     # 结果集 e2e
 pnpm test:electron      # Electron 内置 Node 验收
 pnpm test:gui           # GUI 冒烟
 pnpm test:gui:headless  # GUI 冒烟（隐藏窗口与 Dock）
 pnpm verify:headless    # 完整验证；GUI 段全程隐藏窗口
 ```
+
+定向回归脚本：`pnpm test:mysql-column-metadata-contract`、`pnpm test:mysql-legacy-repair`、`pnpm test:artifact-stream-errors`、`pnpm test:artifact-write-atomicity`、`pnpm test:store-write-atomicity`、`pnpm test:audit-legacy-regressions`、`pnpm test:audit-sdk-regressions`、`pnpm test:audit-sql-format`。MySQL 两条使用内存 fake 连接，不连真实 MySQL；artifact 与 store 原子写脚本在 Windows 上包含真实持柄 rename 用例。
 
 `DBSTUDIO_TEST_HIDDEN=1` 在 macOS 上会让测试用 Electron 窗口 `show: false`，
 同时切成 accessory 激活策略并隐藏 Dock。Playwright 仍操作真实 DOM、preload、

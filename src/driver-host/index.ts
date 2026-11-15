@@ -1029,6 +1029,26 @@ class DriverHost {
         }
       }
 
+      // MySQL management methods come from the native Rust driver. They are
+      // rejected explicitly here so a caller never mistakes silence for success.
+      case 'partitionTable':
+      case 'indexTable':
+      case 'listSessions':
+      case 'killSession':
+      case 'listEvents':
+      case 'listUsers':
+      case 'createDatabase':
+      case 'objectSource':
+      case 'searchObjects':
+      case 'lineageEvidence':
+      case 'createUser':
+      case 'dropUser':
+      case 'grantPrivilege':
+      case 'revokePrivilege':
+        throw new RpcFailure(
+          'unsupported_method',
+          `RPC method ${req.method} is provided by the native driver only`
+        )
       default: {
         // 未知方法返回错误帧而不是静默丢弃：静默丢弃等于让调用方等到超时。
         // 用 never 断言是因为协议方法清单可能被主进程侧扩过，而宿主没跟上。

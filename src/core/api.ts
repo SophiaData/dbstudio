@@ -18,7 +18,10 @@
 import type { DataCompareRequest, DataCompareResult, SchemaSnapshot } from './compare'
 import type { ConnectionConfig } from './dialect'
 import type { TestConnectionResult, DialectInfo, SecretInput } from './driver'
-import type { DriverCapabilities, ObjectRef, TableCreateSpec, TableDescription } from './model'
+import type {
+  DriverCapabilities, EventListing, IndexChangeSpec, LineageEvidence, ObjectRef, ObjectSource,
+  PartitionChangeSpec, SearchObjectsResult, SessionListing, TableCreateSpec, TableDescription, UserListing
+} from './model'
 import type { ExplainResult, QueryOptions, QueryResult, ResultPage, StatementResult } from './resultset'
 import type { EditApplyResult, RowUpdate, TransactionState } from './resultset'
 import type { CellValue } from './resultset'
@@ -262,6 +265,66 @@ export interface DbStudioApi {
   /** 删视图。`nodeId` 是节点 id（`connection:c1|view:v`）。 */
   dropView(nodeId: string): Promise<void>
 
+  /**
+   * MySQL 分区变更：新增、删除或 REORGANIZE 拆分分区。
+   * `nodeId` 是表节点；DDL 会隐式提交，所以在事务中被拒绝。
+   */
+  partitionTable(nodeId: string, spec: PartitionChangeSpec): Promise<void>
+
+  /**
+   * MySQL 索引变更：新增、删除或修改既有索引。
+   * 修改走单条 DROP+ADD，中途不会出现索引空窗。
+   */
+  indexTable(nodeId: string, spec: IndexChangeSpec): Promise<void>
+
+  /** MySQL 会话列表（只读）。`connectionId` 是连接节点或连接 id。 */
+  listSessions(connectionId: string): Promise<SessionListing>
+
+  /** 终止指定 MySQL 会话；当前会话不可终止。 */
+  killSession(connectionId: string, sessionId: number): Promise<void>
+
+  /** MySQL 事件调度与调度器状态（只读）。 */
+  listEvents(connectionId: string, filter?: { schema?: string }): Promise<EventListing>
+
+  /** MySQL 用户与全局权限（只读，不含口令或密码材料）。 */
+  listUsers(connectionId: string): Promise<UserListing>
+
+  /** 新建数据库。`connectionId` 接受连接节点或裸 id；库名有白名单校验。 */
+  createDatabase(connectionId: string, database: string, ifNotExists?: boolean): Promise<void>
+
+  /** 跨库按名称搜索表、视图、列、例程与触发器。 */
+  searchObjects(connectionId: string, request: { keyword: string; kinds?: readonly string[]; schema?: string; limit?: number }): Promise<SearchObjectsResult>
+
+  /** 读取字段血缘证据：外键、列清单与视图定义。 */
+  lineageEvidence(connectionId: string, request: { table: string; column: string; schema?: string }): Promise<LineageEvidence>
+
+  /** 新建账号。 */
+  createUser(connectionId: string, user: string, host: string, password: string): Promise<void>
+
+  /** 删除账号。 */
+  dropUser(connectionId: string, user: string, host: string): Promise<void>
+
+  /** 授予权限；scope 形如 {kind:'global'} / {kind:'database',database} / {kind:'table',database,table}。 */
+  grantPrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>,
+    withGrantOption?: boolean
+  ): Promise<void>
+
+  /** 回收权限。 */
+  revokePrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>
+  ): Promise<void>
+
+  /** 读取真实对象源码。`nodeId` 形如 `connection:c1|view:db.v`。 */
+  objectSource(nodeId: string): Promise<ObjectSource>
   /** 重命名表。`nodeId` 是节点 id（`connection:c1|table:users`）。 */
   renameTable(nodeId: string, newName: string): Promise<void>
 
@@ -362,6 +425,9 @@ export interface DbStudioApi {
    * 对话框异常会向调用方传播，UI 应显示错误；只有取消、空结果或没有发起窗口才返回 `null`。
    */
   chooseImportFile(): Promise<string | null>
+
+  /** 选择 .sql 文件并读回内容；只接受 .sql 后缀。 */
+  chooseSqlFile(): Promise<{ path: string; content: string } | null>
 }
 
 /** preload 注入到 window 上的全局名。 */
@@ -400,6 +466,20 @@ export const IPC = {
   createView: 'dbstudio:createView',
   dropView: 'dbstudio:dropView',
   renameTable: 'dbstudio:renameTable',
+  partitionTable: 'dbstudio:partitionTable',
+  indexTable: 'dbstudio:indexTable',
+  listSessions: 'dbstudio:listSessions',
+  killSession: 'dbstudio:killSession',
+  listEvents: 'dbstudio:listEvents',
+  listUsers: 'dbstudio:listUsers',
+  createDatabase: 'dbstudio:createDatabase',
+  searchObjects: 'dbstudio:searchObjects',
+  lineageEvidence: 'dbstudio:lineageEvidence',
+  createUser: 'dbstudio:createUser',
+  dropUser: 'dbstudio:dropUser',
+  grantPrivilege: 'dbstudio:grantPrivilege',
+  revokePrivilege: 'dbstudio:revokePrivilege',
+  objectSource: 'dbstudio:objectSource',
   cancelQuery: 'dbstudio:cancelQuery',
   updateConnection: 'dbstudio:updateConnection',
   listSqlLibrary: 'dbstudio:listSqlLibrary',
@@ -416,7 +496,8 @@ export const IPC = {
   getImportProgress: 'dbstudio:getImportProgress',
   cancelImport: 'dbstudio:cancelImport',
   waitImport: 'dbstudio:waitImport',
-  chooseImportFile: 'dbstudio:chooseImportFile'
+  chooseImportFile: 'dbstudio:chooseImportFile',
+  chooseSqlFile: 'dbstudio:chooseSqlFile'
 } as const
 
 /**

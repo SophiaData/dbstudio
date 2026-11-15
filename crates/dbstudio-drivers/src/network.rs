@@ -35,6 +35,14 @@ pub fn table_id(value: &str) -> DriverResult<(String, String)> {
     if parts.len()!=2 { return Err(DriverError::invalid("对象ID无效")); }
     Ok((parts[0].clone(), parts[1].clone()))
 }
+/// 生成 MySQL 字符串字面量：单引号包裹，并转义反斜杠与单引号。
+///
+/// 反斜杠必须先转义：MySQL 默认 sql_mode 下它是转义符，
+/// 否则 `a\b` 会被解释成退格，尾部反斜杠还会吞掉闭引号。
+pub fn string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
 pub fn quote(value: &str, mysql: bool) -> String {
     let q = if mysql { '`' } else { '"' };
     format!("{q}{}{q}", value.replace(q, &format!("{q}{q}")))
@@ -47,7 +55,14 @@ pub fn node(id: String, kind: &str, name: &str, parent: Option<&str>, children: 
 }
 pub fn text_cell(text: &str, full: bool) -> Value {
     let length=text.encode_utf16().count();
-    if !full && length>1000 { json!({"kind":"text","text":text.chars().take(1000).collect::<String>(),"truncated":true,"fullLength":length}) }
+    if !full && length>1000 {
+        let mut units = 0;
+        let preview: String = text.chars().take_while(|character| {
+            units += character.len_utf16();
+            units <= 1000
+        }).collect();
+        json!({"kind":"text","text":preview,"truncated":true,"fullLength":length})
+    }
     else { json!({"kind":"text","text":text}) }
 }
 pub fn blob_cell(bytes: &[u8], full: bool) -> Value {
@@ -174,10 +189,196 @@ pub fn transfer_source(id:&str,mysql:bool)->DriverResult<Value>{
     Ok(json!({"sql":format!("SELECT * FROM {}",qualified(id,mysql)?),"target":{"schema":schema,"name":name,"table":name,"kind":if id.starts_with("view:"){"view"}else{"table"}}}))
 }
 
+/// ç´¢å¼åç½ååæ ¡éªï¼ç´¢å¼åä¼åæ ·è¿å¥ DDL è¯­å¥ææ¬ã
+fn index_name(raw: &str) -> DriverResult<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.len() > 64 { return Err(DriverError::invalid("ç´¢å¼åæ æ")); }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return Err(DriverError::invalid("ç´¢å¼ååªæ¥åå­æ¯ãæ°å­ãä¸åçº¿ä¸ $ "));
+    }
+    Ok(name.to_owned())
+}
+
+/// ç±åååè¡¨çæ (col1, col2) å½¢å¼çç´¢å¼åæ®µï¼ååèµ°ç½ååæ ¡éªã
+fn index_columns(spec: &Value) -> DriverResult<String> {
+    let items = spec.get("columns").and_then(Value::as_array).ok_or_else(|| DriverError::invalid("ç¼ºå°ç´¢å¼å"))?;
+    if items.is_empty() || items.len() > 16 { return Err(DriverError::invalid("ç´¢å¼åæ°éè¶é")); }
+    let mut rendered = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item.as_str().ok_or_else(|| DriverError::invalid("ç´¢å¼ååå¿é¡»æ¯å­ç¬¦ä¸²"))?;
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 || name.contains('`') || name.contains('\0') {
+            return Err(DriverError::invalid("ç´¢å¼ååæ æ"));
+        }
+        rendered.push(format!("`{name}`"));
+    }
+    Ok(rendered.join(", "))
+}
+
+/// MySQL ç´¢å¼ç®¡çï¼æ°å¢ãå é¤ä¸ä¿®æ¹æ¢æç´¢å¼ã
+///
+/// ä¿®æ¹èµ°åæ¡ ALTER TABLEä¸ç DROP+ADDï¼ä¸­éä¸ä¼åºç°âæ§ç´¢å¼å·²å ãæ°ç´¢å¼æ²¡å»ºâççªå£ã
+pub fn index_ddl(id: &str, spec: &Value) -> DriverResult<String> {
+    let table = qualified(id, true)?;
+    match spec.get("action").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("ç¼ºå°ç´¢å¼æä½"))? {
+        "add" => {
+            let name = index_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("ç¼ºå°ç´¢å¼å"))?)?;
+            let columns = index_columns(spec)?;
+            let unique = if spec.get("unique").and_then(Value::as_bool).unwrap_or(false) { "UNIQUE " } else { "" };
+            Ok(format!("ALTER TABLE {table} ADD {unique}INDEX `{name}` ({columns})"))
+        }
+        "drop" => {
+            let name = index_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("ç¼ºå°ç´¢å¼å"))?)?;
+            Ok(format!("ALTER TABLE {table} DROP INDEX `{name}`"))
+        }
+        "replace" => {
+            let old_name = index_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("ç¼ºå°åç´¢å¼å"))?)?;
+            let new_name = index_name(spec.get("newName").and_then(Value::as_str).unwrap_or(&old_name))?;
+            let columns = index_columns(spec)?;
+            let unique = if spec.get("unique").and_then(Value::as_bool).unwrap_or(false) { "UNIQUE " } else { "" };
+            Ok(format!("ALTER TABLE {table} DROP INDEX `{old_name}`, ADD {unique}INDEX `{new_name}` ({columns})"))
+        }
+        _ => Err(DriverError::unsupported("ä¸æ¯æçç´¢å¼æä½")),
+    }
+}
+/// åºåç½ååæ ¡éªï¼åºåä¼åæ ·è¿å¥ CREATE DATABASE è¯­å¥ã
+/// MySQL åºååè®¸ `$` ä¸ä¸åçº¿ï¼ä¸åè®¸åå¼å·ãåéç¬¦ä¸ç©ºå­ã
+/// 账号名白名单：会原样进入 CREATE USER / GRANT 语句。
+pub fn account_name(raw: &str) -> DriverResult<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.len() > 32 { return Err(DriverError::invalid("账号名无效")); }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return Err(DriverError::invalid("账号名只接受字母、数字、下划线、短横线与点"));
+    }
+    Ok(name.to_owned())
+}
+
+/// 主机白名单：支持 % 通配符与常见主机字符，拒绝引号与空格。
+pub fn account_host(raw: &str) -> DriverResult<String> {
+    let host = raw.trim();
+    if host.is_empty() || host.len() > 255 { return Err(DriverError::invalid("主机无效")); }
+    if !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '%' || c == ':') {
+        return Err(DriverError::invalid("主机只接受字母、数字、点、下划线、短横线、冒号与 % "));
+    }
+    Ok(host.to_owned())
+}
+
+/// 权限清单白名单：只接受固定枚举，避免权限位成为注入入口。
+pub fn privilege_list(spec: &Value) -> DriverResult<String> {
+    const ALLOWED: &[&str] = &[
+        "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX",
+        "REFERENCES", "CREATE VIEW", "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE",
+        "EXECUTE", "EVENT", "TRIGGER", "CREATE TEMPORARY TABLES", "LOCK TABLES",
+        "CREATE USER", "PROCESS", "RELOAD", "REPLICATION CLIENT", "REPLICATION SLAVE",
+        "SHOW DATABASES", "ALL PRIVILEGES",
+    ];
+    let items = spec.as_array().ok_or_else(|| DriverError::invalid("权限必须是数组"))?;
+    if items.is_empty() { return Err(DriverError::invalid("权限不能为空")); }
+    let mut rendered = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item.as_str().ok_or_else(|| DriverError::invalid("权限名必须是字符串"))?;
+        let upper = name.trim().to_ascii_uppercase();
+        if !ALLOWED.contains(&upper.as_str()) {
+            return Err(DriverError::invalid(format!("不支持的权限：{name}")));
+        }
+        rendered.push(upper);
+    }
+    Ok(rendered.join(", "))
+}
+
+/// 授权范围：*.* / db.* / db.table 三种形态，逐段白名单校验。
+pub fn privilege_target(spec: &Value) -> DriverResult<String> {
+    let kind = spec.get("kind").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少授权范围"))?;
+    match kind {
+        "global" => Ok("*.*".to_owned()),
+        "database" => {
+            let db = spec.get("database").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少库名"))?;
+            Ok(format!("{}.*", quote(&database_name(db)?, true)))
+        }
+        "table" => {
+            let db = spec.get("database").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少库名"))?;
+            let table = spec.get("table").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少表名"))?;
+            if table.is_empty() || table.len() > 64 || table.contains('`') { return Err(DriverError::invalid("表名无效")); }
+            Ok(format!("{}.{}", quote(&database_name(db)?, true), quote(table, true)))
+        }
+        _ => Err(DriverError::invalid("不支持的授权范围")),
+    }
+}
+pub fn database_name(raw: &str) -> DriverResult<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.len() > 64 { return Err(DriverError::invalid("åºåæ æ")); }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return Err(DriverError::invalid("åºååªæ¥åå­æ¯ãæ°å­ãä¸åçº¿ä¸ $ "));
+    }
+    Ok(name.to_owned())
+}
 pub fn qualified_name(name:&str,mysql:bool)->DriverResult<String>{
     let parts=unescape_parts(name)?;
     if parts.len()>2||parts.iter().any(|p|p.contains('\0')){return Err(DriverError::invalid("对象名称无效"));}
     Ok(parts.iter().map(|p|quote(p,mysql)).collect::<Vec<_>>().join("."))
+}
+/// 分区 DDL 的名称与边界校验。
+///
+/// 分区名会原样进入 ALTER TABLE 的语句文本，边界值允许 MAXVALUE 与整数/引号字面量，
+/// 因此这里对两者都做白名单校验，绝不让调用方拼接任意 SQL 片段。
+fn partition_name(raw: &str) -> DriverResult<String> {
+    let name = raw.trim();
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        && !name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true);
+    if !valid { return Err(DriverError::invalid("分区名无效")); }
+    Ok(name.to_owned())
+}
+
+fn partition_bound(raw: &str) -> DriverResult<String> {
+    let bound = raw.trim();
+    let upper = bound.to_ascii_uppercase();
+    if upper == "MAXVALUE" { return Ok(upper); }
+    let numeric = !bound.is_empty()
+        && bound.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+        && bound.chars().filter(|c| *c == '.').count() <= 1
+        && bound.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false);
+    if numeric { return Ok(bound.to_owned()); }
+    let quoted = bound.len() >= 2
+        && bound.starts_with('\'')
+        && bound.ends_with('\'')
+        && !bound[1..bound.len() - 1].contains('\'');
+    if quoted { return Ok(bound.to_owned()); }
+    Err(DriverError::invalid("分区边界只接受 MAXVALUE、数字或单引号字符串"))
+}
+
+/// 由表 ID 与规格生成一条 ALTER TABLE 分区语句。
+///
+/// 支持 add（RANGE 追加分区）、drop（删除分区）与 reorganize（把一个分区按新的边界拆开）；
+/// 其它请求一律拒绝，不做猜测性翻译。
+pub fn partition_ddl(id: &str, spec: &Value) -> DriverResult<String> {
+    let table = qualified(id, true)?;
+    let action = spec.get("action").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区操作"))?;
+    match action {
+        "add" => {
+            let name = partition_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区名"))?)?;
+            let bound = partition_bound(spec.get("lessThan").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区边界"))?)?;
+            Ok(format!("ALTER TABLE {table} ADD PARTITION (PARTITION {} VALUES LESS THAN ({}))", quote(&name, true), bound))
+        }
+        "drop" => {
+            let name = partition_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区名"))?)?;
+            Ok(format!("ALTER TABLE {table} DROP PARTITION {}", quote(&name, true)))
+        }
+        "reorganize" => {
+            let source = partition_name(spec.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少原分区名"))?)?;
+            let items = spec.get("into").and_then(Value::as_array).ok_or_else(|| DriverError::invalid("缺少拆分后的分区列表"))?;
+            if items.len() < 2 { return Err(DriverError::invalid("拆分至少需要两个分区")); }
+            let mut rendered = Vec::with_capacity(items.len());
+            for item in items {
+                let name = partition_name(item.get("name").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区名"))?)?;
+                let bound = partition_bound(item.get("lessThan").and_then(Value::as_str).ok_or_else(|| DriverError::invalid("缺少分区边界"))?)?;
+                rendered.push(format!("PARTITION {} VALUES LESS THAN ({})", quote(&name, true), bound));
+            }
+            Ok(format!("ALTER TABLE {table} REORGANIZE PARTITION {} INTO ({})", quote(&source, true), rendered.join(", ")))
+        }
+        _ => Err(DriverError::unsupported("不支持的分区操作")),
+    }
 }
 fn ddl_type(raw:&str,mysql:bool)->DriverResult<String>{
     let name=raw.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();

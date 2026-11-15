@@ -54,8 +54,9 @@ import { createApplicationApi } from '../application/create-application-api'
  * sender 缺失时返回 `null`，不会回退到主窗口；这只用于内部测试与类型适配，
  * 实际 IPC handler 始终传入 `event.sender`。
  */
-export type MainApi = Omit<DbStudioApi, 'chooseImportFile'> & {
+export type MainApi = Omit<DbStudioApi, 'chooseImportFile' | 'chooseSqlFile'> & {
   chooseImportFile(sender?: WebContents): Promise<string | null>
+  chooseSqlFile(sender?: WebContents): Promise<{ path: string; content: string } | null>
 }
 
 /**
@@ -75,6 +76,7 @@ export interface ElectronIpcAdapterOptions {
    * 绝不能回退到"随便一个窗口"或"某个默认路径"。
    */
   readonly chooseImportFile: (sender?: WebContents) => Promise<string | null>
+  readonly chooseSqlFile: (sender?: WebContents) => Promise<{ path: string; content: string } | null>
 }
 
 /**
@@ -111,12 +113,13 @@ async function invokeAndEncode(
  * `ConnectionManager` 里。
  */
 export function registerElectronIpc(options: ElectronIpcAdapterOptions): void {
-  const { getManager, getSqlLibrary, chooseImportFile: chooseImportFileShell } = options
+  const { getManager, getSqlLibrary, chooseImportFile: chooseImportFileShell, chooseSqlFile: chooseSqlFileShell } = options
 
   const api: MainApi = {
     ...createApplicationApi({ getManager, getSqlLibrary }),
     // 对外契约仍然是零参；sender 只用于绑定对话框父窗口。
-    chooseImportFile: async (sender) => chooseImportFileShell(sender)
+    chooseImportFile: async (sender) => chooseImportFileShell(sender),
+    chooseSqlFile: async (sender) => chooseSqlFileShell(sender)
   }
 
   // 编译期证据：含内部可选参数的实现仍然满足对外契约 DbStudioApi。
@@ -133,6 +136,9 @@ export function registerElectronIpc(options: ElectronIpcAdapterOptions): void {
         // 唯一需要 sender 的方法：把发起窗口交给 shell port。
         if (method === 'chooseImportFile') {
           return api.chooseImportFile(event.sender)
+        }
+        if (method === 'chooseSqlFile') {
+          return api.chooseSqlFile(event.sender)
         }
         // 每个方法的参数形状仍由 `MainApi` 约束；这里只是把
         // Electron 的可变参数元组转发给对应方法。

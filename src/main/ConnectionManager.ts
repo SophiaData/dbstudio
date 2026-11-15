@@ -26,7 +26,9 @@ import type { ConnectionConfig } from '../core/dialect'
 import type { RemoteOutboundPolicy } from '../backend/contract/remote'
 import type { DialectInfo, SecretInput, TestConnectionResult } from '../core/driver'
 import type { ConnectionSummary } from '../core/api'
-import type { ObjectRef, TableCreateSpec, TableDescription } from '../core/model'
+import type {
+  EventListing, IndexChangeSpec, LineageEvidence, ObjectRef, ObjectSource, PartitionChangeSpec, SearchObjectsResult, SessionListing, TableCreateSpec, TableDescription, UserListing
+} from '../core/model'
 import type {
   CellValue,
   EditApplyResult,
@@ -181,6 +183,74 @@ export class ConnectionManager {
     return this.#services.metadata.listChildren(nodeId)
   }
 
+  partitionTable(nodeId: string, spec: PartitionChangeSpec): Promise<void> {
+    return this.#services.mutations.partitionTable(nodeId, spec)
+  }
+
+  indexTable(nodeId: string, spec: IndexChangeSpec): Promise<void> {
+    return this.#services.mutations.indexTable(nodeId, spec)
+  }
+
+  listSessions(connectionId: string): Promise<SessionListing> {
+    return this.#services.metadata.listSessions(connectionId)
+  }
+
+  killSession(connectionId: string, sessionId: number): Promise<void> {
+    return this.#services.metadata.killSession(connectionId, sessionId)
+  }
+
+  listEvents(connectionId: string, filter?: { schema?: string }): Promise<EventListing> {
+    return this.#services.metadata.listEvents(connectionId, filter)
+  }
+
+  createDatabase(connectionId: string, database: string, ifNotExists = false): Promise<void> {
+    return this.#services.mutations.createDatabase(connectionId, database, ifNotExists)
+  }
+
+  searchObjects(connectionId: string, request: { keyword: string; kinds?: readonly string[]; schema?: string; limit?: number }): Promise<SearchObjectsResult> {
+    return this.#services.metadata.searchObjects(connectionId, request)
+  }
+
+  lineageEvidence(connectionId: string, request: { table: string; column: string; schema?: string }): Promise<LineageEvidence> {
+    return this.#services.metadata.lineageEvidence(connectionId, request)
+  }
+
+  createUser(connectionId: string, user: string, host: string, password: string): Promise<void> {
+    return this.#services.mutations.createUser(connectionId, user, host, password)
+  }
+
+  dropUser(connectionId: string, user: string, host: string): Promise<void> {
+    return this.#services.mutations.dropUser(connectionId, user, host)
+  }
+
+  grantPrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>,
+    withGrantOption = false
+  ): Promise<void> {
+    return this.#services.mutations.grantPrivilege(connectionId, user, host, privileges, scope, withGrantOption)
+  }
+
+  revokePrivilege(
+    connectionId: string,
+    user: string,
+    host: string,
+    privileges: readonly string[],
+    scope: Record<string, string>
+  ): Promise<void> {
+    return this.#services.mutations.revokePrivilege(connectionId, user, host, privileges, scope)
+  }
+
+  objectSource(nodeId: string): Promise<ObjectSource> {
+    return this.#services.metadata.objectSource(nodeId)
+  }
+
+  listUsers(connectionId: string): Promise<UserListing> {
+    return this.#services.metadata.listUsers(connectionId)
+  }
   describeTable(nodeId: string): Promise<TableDescription> {
     return this.#services.metadata.describeTable(nodeId)
   }
