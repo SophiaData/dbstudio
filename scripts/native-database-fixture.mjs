@@ -16,7 +16,7 @@ const fixtures = [
   { kind: 'pg', name: `dbstudio-native-pg-${runId}`, image: 'postgres:17', port: 5432,
     password: dbPassword(), user: 'fixture', database: 'fixture', created: false, attempted: false },
   { kind: 'mysql', name: `dbstudio-native-mysql-${runId}`, image: 'mysql:8.0', port: 3306,
-    password: dbPassword(), user: 'fixture', database: 'fixture', created: false, attempted: false },
+    password: dbPassword(), rootPassword: dbPassword(), user: 'fixture', database: 'fixture', created: false, attempted: false },
 ]
 function docker(args, timeout = 30000) {
   try { return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim() }
@@ -40,7 +40,7 @@ try {
     const envPath = join(evidence, `${fixture.kind}.env`)
     const values = fixture.kind === 'pg'
       ? { POSTGRES_USER: fixture.user, POSTGRES_DB: fixture.database, POSTGRES_PASSWORD: fixture.password }
-      : { MYSQL_USER: fixture.user, MYSQL_DATABASE: fixture.database, MYSQL_PASSWORD: fixture.password, MYSQL_ROOT_PASSWORD: dbPassword() }
+      : { MYSQL_USER: fixture.user, MYSQL_DATABASE: fixture.database, MYSQL_PASSWORD: fixture.password, MYSQL_ROOT_PASSWORD: fixture.rootPassword }
     writeFileSync(envPath, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''), { mode: 0o600, flag: 'wx' })
     // Init-only Unix sockets can answer ping before the published TCP service is ready.
     // Authenticate over TCP and run SQL; credentials stay in container environment, never argv.
@@ -90,6 +90,13 @@ try {
     PARTITION_TEST_USER: mysqlFixture.user,
     PARTITION_TEST_PASSWORD: mysqlFixture.password
   }
+  // 用户管理类测试要读 mysql.user 与 USER_PRIVILEGES，还要能建号授权；
+  // 夹具默认只给库级权限，这里显式补上所需的全局权限。
+  docker(['exec', mysqlFixture.name, 'mysql', '--user=root', '--protocol=TCP', '--host=127.0.0.1',
+    `--password=${mysqlFixture.rootPassword}`, '--execute',
+    `GRANT SELECT ON mysql.* TO '${mysqlFixture.user}'@'%';
+     GRANT CREATE USER, GRANT OPTION, RELOAD, PROCESS ON *.* TO '${mysqlFixture.user}'@'%';
+     FLUSH PRIVILEGES;`], 60000)
   const managementTests = [
     'events_users_live', 'index_admin_live', 'lineage_evidence_live', 'object_source_live',
     'partition_admin_live', 'partition_metadata_live', 'partition_tree_live',
