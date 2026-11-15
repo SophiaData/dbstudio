@@ -96,7 +96,9 @@ try {
   docker(['exec', '--env', `MYSQL_PWD=${mysqlFixture.rootPassword}`, mysqlFixture.name,
     'mysql', '--user=root', '--protocol=TCP', '--host=127.0.0.1', '--execute',
     `GRANT SELECT ON mysql.* TO '${mysqlFixture.user}'@'%';
-     GRANT CREATE USER, GRANT OPTION, RELOAD, PROCESS ON *.* TO '${mysqlFixture.user}'@'%';
+     GRANT CREATE USER, GRANT OPTION, RELOAD, PROCESS, SUPER, CREATE, DROP ON *.* TO '${mysqlFixture.user}'@'%';
+     -- 创建事件与触发器需要 SUPER（测试库由 log_bin 控制），
+     -- 新建库需要全局 CREATE。
      FLUSH PRIVILEGES;`], 60000)
   const managementTests = [
     'events_users_live', 'index_admin_live', 'lineage_evidence_live', 'object_source_live',
