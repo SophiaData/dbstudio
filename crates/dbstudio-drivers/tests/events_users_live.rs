@@ -128,7 +128,9 @@ fn list_users_reports_accounts_and_privileges_without_secrets() {
         .iter()
         .filter_map(|item| item.get("privilege").and_then(|v| v.as_str()))
         .collect();
-    assert!(names.contains(&"SELECT"), "全局权限应包含 SELECT：{names:?}");
+    // 不断言具体存在哪些全局权限：那取决于测试账号本身的授权，
+    // 属于环境配置而非被测行为。这里只验证能读到并正确归属。
+    assert!(!names.is_empty(), "当前账号应至少读到一条全局权限：{names:?}");
     assert!(
         mine.iter().all(|item| item.get("grantable").and_then(|v| v.as_bool()).is_some()),
         "每条权限都必须带 grantable 布尔"
