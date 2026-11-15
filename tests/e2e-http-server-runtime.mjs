@@ -74,6 +74,13 @@ async function launch(env) {
 async function stop(run) {
   run.child.kill('SIGTERM')
   const result = await boundedExit(run)
+  // Windows 没有 POSIX 信号：kill('SIGTERM') 实际调 TerminateProcess，
+  // 进程被直接终止，不存在"优雅退出 + 退出码 0"语义。
+  // 这里只断言进程确实已终止，不放宽 Linux 上的优雅退出断言。
+  if (process.platform === 'win32') {
+    assert.ok(result.code !== null || result.signal !== null, 'SIGTERM 后进程必须终止')
+    return
+  }
   assert.equal(result.code, 0, 'SIGTERM应优雅退出')
   assert.equal(result.signal, null)
 }
