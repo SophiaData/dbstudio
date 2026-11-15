@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { createInterface } from 'node:readline'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'vite'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -115,6 +115,19 @@ class HostProcess {
   kill() {
     if (!this.#exitInfo) this.#child.kill('SIGKILL')
   }
+
+  /**
+   * 等子进程真正退出后才返回。
+   *
+   * Windows 上 kill() 只是发信号，进程退出前文件句柄仍被占用，
+   * 紧接着删目录会 EPERM。
+   */
+  async killAndWait(timeoutMs = 5000) {
+    if (this.#exitInfo) return
+    const exited = new Promise((resolve) => this.#child.once('exit', resolve))
+    this.#child.kill('SIGKILL')
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, timeoutMs))])
+  }
 }
 
 let passed = 0
@@ -197,7 +210,8 @@ try {
 
   console.log(`\n全部 ${passed} 项断言通过！`)
 } finally {
-  host.kill()
+  await host.killAndWait()
+  // 进程已退出后句柄才会释放；force 不能解决占用。
   rmSync(work, { recursive: true, force: true })
 }
 
@@ -228,7 +242,7 @@ try {
       lib: { entry: resolve(root, 'tests/probe-entry.ts'), formats: ['cjs'] }
     }
   })
-  const { createManagerWithBuiltinDialects } = await import(`file://${join(cmProbeDir, 'probe.cjs')}`)
+  const { createManagerWithBuiltinDialects } = await import(pathToFileURL(join(cmProbeDir, 'probe.cjs')).href)
   cmManager = createManagerWithBuiltinDialects()
 
   const connSummary = await cmManager.add({ dialectId: 'sqlite', name: 'cm-stmt', options: { file: cmDbPath } })
