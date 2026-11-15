@@ -38,7 +38,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -126,7 +126,7 @@ async function loadModules() {
   })
   const bundle = resolve(outDir, 'probe.cjs')
   if (!existsSync(bundle)) throw new Error(`vite 未产出 ${bundle}`)
-  return import(`file://${bundle}`)
+  return import(pathToFileURL(bundle).href)
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +760,8 @@ async function main() {
     return rows[0]?.n === 501
   })())
 
+  // 当环境不允许创建符号链接时为 true，后续链接断言会显式跳过。
+  let symlinkUnavailable = false
   // 文件级符号链接：配置用 alias.db（指向 real.db），导出目标是 real.db。
   // 这两者"路径不同、实为同一文件"，只归一化父目录会漏掉。
   const realDbPath = join(workDir, 'real-target.db')
@@ -768,7 +770,19 @@ async function main() {
     const copy = new DatabaseSync(realDbPath)
     copy.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)')
     copy.close()
-    symlinkSync(realDbPath, aliasDbPath)
+    try {
+      symlinkSync(realDbPath, aliasDbPath)
+    } catch (error) {
+      // Windows 默认不允许创建符号链接（需管理员或开发者模式）。
+      // 这时无法构造该场景，显式记录并跳过后续依赖链接的断言，
+      // 不把环境限制伪装成产品通过。
+      if (error && error.code === 'EPERM') {
+        console.log('SKIP 符号链接场景：当前 Windows 环境不允许创建 symlink')
+        symlinkUnavailable = true
+      } else {
+        throw error
+      }
+    }
   }
   const symlinkManager = new ConnectionManager(
     [
@@ -792,7 +806,7 @@ async function main() {
     { dialectId: 'sqlite', name: 'symlink-db', options: { file: aliasDbPath } },
     undefined
   )
-  check('符号链接库连接建立成功', symlinkSummary.connected === true, symlinkSummary)
+  if (!symlinkUnavailable) check('符号链接库连接建立成功', symlinkSummary.connected === true, symlinkSummary)
   let aliasRejected = false
   let aliasMessage = ''
   try {
@@ -805,8 +819,8 @@ async function main() {
     aliasRejected = true
     aliasMessage = err instanceof Error ? err.message : String(err)
   }
-  check('导出目标为源库的符号链接真实路径时被拒绝', aliasRejected, aliasMessage)
-  check('符号链接拒绝原因提到数据库文件', /数据库|SQLite/.test(aliasMessage), aliasMessage)
+  if (!symlinkUnavailable) check('导出目标为源库的符号链接真实路径时被拒绝', aliasRejected, aliasMessage)
+  if (!symlinkUnavailable) check('符号链接拒绝原因提到数据库文件', /数据库|SQLite/.test(aliasMessage), aliasMessage)
   check(
     '符号链接源文件内容未被改动',
     (() => {
