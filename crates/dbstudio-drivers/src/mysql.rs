@@ -600,6 +600,80 @@ mod tests{
         assert_eq!(management_cell(&MValue::Bytes(b"0.1".to_vec()),&column).unwrap(),management_cell(&MValue::Float(0.1_f32),&column).unwrap());
     }
     #[test]
+    fn integer_cells_keep_full_precision_beyond_double_range(){
+        use mysql::consts::ColumnType;
+        // 超过 2^53 的整数转 f64 会失真，必须降级成文本而不是静默改值。
+        let column=mysql::Column::new(ColumnType::MYSQL_TYPE_LONGLONG);
+        for (value,text) in [
+            (MValue::Int(9_007_199_254_740_991),None),
+            (MValue::Int(9_007_199_254_740_992),Some("9007199254740992")),
+            (MValue::Int(-9_007_199_254_740_992),Some("-9007199254740992")),
+            (MValue::UInt(18_446_744_073_709_551_615),Some("18446744073709551615")),
+        ]{
+            let out=cell(&value,&column,true).unwrap();
+            match text{
+                None=>assert_eq!(out,json!({"kind":"number","value":9_007_199_254_740_991_i64}),
+                    "边界内的整数应保持 number 形态"),
+                Some(expected)=>assert_eq!(out,json!({"kind":"text","text":expected}),
+                    "越界整数必须原样保留为文本：{value:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_floats_degrade_to_text_instead_of_invalid_json(){
+        use mysql::consts::ColumnType;
+        // NaN / Infinity 不是合法 JSON 数字，直接序列化会得到 null 或直接报错。
+        let column=mysql::Column::new(ColumnType::MYSQL_TYPE_DOUBLE);
+        for (value,expected) in [
+            (MValue::Double(f64::NAN),"NaN"),
+            (MValue::Double(f64::INFINITY),"inf"),
+            (MValue::Double(f64::NEG_INFINITY),"-inf"),
+        ]{
+            let out=cell(&value,&column,true).unwrap();
+            assert_eq!(out.get("kind").and_then(Value::as_str),Some("text"),"{expected} 应降级为文本");
+            assert_eq!(out.get("text").and_then(Value::as_str),Some(expected));
+        }
+        assert_eq!(cell(&MValue::Double(1.5),&column,true).unwrap(),json!({"kind":"number","value":1.5}));
+    }
+
+    #[test]
+    fn bytes_column_is_binary_only_for_binary_charset_and_non_numeric_types(){
+        use mysql::consts::ColumnType;
+        let bytes=MValue::Bytes(vec![0xff,0x00,0x01]);
+        // 二进制字符集 + 非数值类型 → blob。
+        let blob=mysql::Column::new(ColumnType::MYSQL_TYPE_BLOB).with_character_set(63);
+        assert_eq!(cell(&bytes,&blob,true).unwrap().get("kind").and_then(Value::as_str),Some("blob"));
+        // 二进制字符集但类型是 DECIMAL → 仍是文本，不能被当成二进制。
+        for kind in [ColumnType::MYSQL_TYPE_DECIMAL,ColumnType::MYSQL_TYPE_NEWDECIMAL,ColumnType::MYSQL_TYPE_JSON]{
+            let column=mysql::Column::new(kind).with_character_set(63);
+            assert!(cell(&bytes,&column,true).is_err()||
+                cell(&bytes,&column,true).unwrap().get("kind").and_then(Value::as_str)==Some("text"),
+                "{kind:?} 不应被当作二进制");
+        }
+        // 文本字符集 → 文本；非法 UTF-8 必须报错而不是产生损坏字符串。
+        let text_column=mysql::Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_character_set(45);
+        assert_eq!(cell(&MValue::Bytes(b"ok".to_vec()),&text_column,true).unwrap(),json!({"kind":"text","text":"ok"}));
+        assert!(cell(&bytes,&text_column,true).is_err(),"非法 UTF-8 必须报错");
+    }
+
+    #[test]
+    fn management_cell_parses_com_query_text_into_typed_values(){
+        // COM_QUERY 把数值列返回成 Bytes，管理面必须还原成与预处理路径一致的结果。
+        use mysql::consts::ColumnType::*;
+        for kind in [MYSQL_TYPE_TINY,MYSQL_TYPE_SHORT,MYSQL_TYPE_LONG,MYSQL_TYPE_INT24,MYSQL_TYPE_LONGLONG]{
+            let column=mysql::Column::new(kind);
+            assert_eq!(management_cell(&MValue::Bytes(b"42".to_vec()),&column).unwrap(),
+                json!({"kind":"number","value":42}),"{kind:?} 的文本数值应还原为 number");
+            // 超出 i64 的取值走无符号解析。
+            assert_eq!(management_cell(&MValue::Bytes(b"18446744073709551615".to_vec()),&column).unwrap(),
+                json!({"kind":"text","text":"18446744073709551615"}));
+        }
+        let column=mysql::Column::new(MYSQL_TYPE_LONG);
+        assert!(management_cell(&MValue::Bytes(b"not-a-number".to_vec()),&column).is_err());
+        assert!(management_cell(&MValue::Bytes(vec![0xff]),&column).is_err());
+    }
+    #[test]
     fn management_snapshot_retained_budgets_are_enforced(){
         let mut snapshot=ManagementSnapshot::new(vec![json!({"name":"x","type":"text"})]).unwrap();
         for _ in 0..10_000{snapshot.push(vec![json!({"kind":"null"})]).unwrap();}

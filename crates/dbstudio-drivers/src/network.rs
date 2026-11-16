@@ -426,3 +426,76 @@ pub fn create_table_sql(spec:&Value,mysql:bool)->DriverResult<String>{
     keys.sort_by_key(|k|k.0);if !keys.is_empty(){for(i,(ordinal,_))in keys.iter().enumerate(){if *ordinal!=(i+1)as u64{return Err(DriverError::invalid("主键序号必须连续且不重复"));}}defs.push(format!("PRIMARY KEY ({})",keys.iter().map(|(_,name)|quote(name,mysql)).collect::<Vec<_>>().join(",")));}
     Ok(format!("CREATE TABLE {} ({})",qualified_name(name,mysql)?,defs.join(", ")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn escape_id_escapes_backslash_before_dot() {
+        // 反斜杠必须先转义，否则 a\.b 会被当成已转义的点。
+        assert_eq!(escape_id("a.b"), "a\\.b");
+        assert_eq!(escape_id("a\\b"), "a\\\\b");
+        assert_eq!(escape_id("plain"), "plain");
+    }
+
+    #[test]
+    fn unescape_parts_round_trips_escaped_dots() {
+        assert_eq!(unescape_parts("a\\.b.c").unwrap(), vec!["a.b".to_owned(), "c".to_owned()]);
+        assert_eq!(unescape_parts("t").unwrap(), vec!["t".to_owned()]);
+    }
+
+    #[test]
+    fn unescape_parts_rejects_empty_and_dangling_escape() {
+        // 空片段会让节点 id 指向不存在的对象，必须拒绝而不是静默接受。
+        assert!(unescape_parts("a..b").is_err());
+        assert!(unescape_parts("a.").is_err());
+        assert!(unescape_parts("a\\").is_err());
+        assert!(unescape_parts("").is_err());
+    }
+
+    #[test]
+    fn string_literal_escapes_backslash_then_quote() {
+        // 反斜杠先处理，否则注入的 \' 会被当成转义后的引号，把语句提前闭合。
+        assert_eq!(string_literal("plain"), "'plain'");
+        assert_eq!(string_literal("it's"), "'it\\'s'");
+        assert_eq!(string_literal("a\\'b"), "'a\\\\\\'b'");
+    }
+
+    #[test]
+    fn string_literal_neutralises_quote_injection() {
+        let value = string_literal("x' OR '1'='1");
+        // 每个单引号都必须是转义形态，不能出现两个相邻裸引号。
+        let bare = value[1..value.len() - 1].replace("\\'", "");
+        assert!(!bare.contains('\''), "剩余裸引号: {bare}");
+    }
+
+    #[test]
+    fn account_name_accepts_expected_charset() {
+        assert_eq!(account_name("app_user").unwrap(), "app_user");
+        assert_eq!(account_name("a-b.c_1").unwrap(), "a-b.c_1");
+    }
+
+    #[test]
+    fn account_name_rejects_injection_and_oversize() {
+        assert!(account_name("root'--").is_err());
+        assert!(account_name("a b").is_err());
+        assert!(account_name("").is_err());
+        assert!(account_name(&"x".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn privilege_list_accepts_known_and_normalises_case() {
+        assert_eq!(privilege_list(&json!(["select", "Insert"])).unwrap(), "SELECT, INSERT");
+        assert_eq!(privilege_list(&json!(["all privileges"])).unwrap(), "ALL PRIVILEGES");
+    }
+
+    #[test]
+    fn privilege_list_rejects_unknown_and_empty() {
+        assert!(privilege_list(&json!([])).is_err());
+        assert!(privilege_list(&json!(["SELECT; DROP DATABASE x"])).is_err());
+        assert!(privilege_list(&json!([1])).is_err());
+        assert!(privilege_list(&json!("SELECT")).is_err());
+    }
+}
