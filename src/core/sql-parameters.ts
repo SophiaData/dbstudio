@@ -46,8 +46,15 @@ function scanSql(sql: string, dialect: SqlParameterDialect): ScanResult {
   while (i < sql.length) {
     const ch = sql[i] as string
     if (ch === '-' && sql[i + 1] === '-') {
-      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i += 1
-      continue
+      // MySQL 要求 `--` 后跟至少一个空白或控制字符才是注释；
+      // `1--?` 在 MySQL 里是两个负号加一个参数，当成注释会把占位符非法吞掉。
+      const after = sql[i + 2]
+      const startsComment =
+        dialect === 'mysql' ? after !== undefined && /[\s\u0000-\u001f]/.test(after) : true
+      if (startsComment) {
+        while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i += 1
+        continue
+      }
     }
     // MySQL 独有的 # 行注释。它只在 MySQL 里是注释，其它方言里可能是普通字符。
     if (dialect === 'mysql' && ch === '#') {

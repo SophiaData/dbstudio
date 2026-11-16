@@ -40,6 +40,17 @@ describe('参数占位符识别', () => {
     expect(extractSqlParameters('SELECT 1 # ?\nFROM t', 'mysql')).toEqual([])
   })
 
+  // MySQL 要求 `--` 后跟空白才算注释；`1--?` 里的问号是真实参数。
+  test('MySQL 里 -- 后没有空白时不当作注释', () => {
+    expect(extractSqlParameters('SELECT 1--?', 'mysql')).toHaveLength(1)
+    expect(extractSqlParameters('SELECT 1 -- ?', 'mysql')).toHaveLength(0)
+    expect(extractSqlParameters('SELECT 1-- ?', 'mysql')).toHaveLength(0)
+  })
+
+  test('非 MySQL 方言里 -- 始终是注释', () => {
+    expect(extractSqlParameters('SELECT 1--?', 'sqlite')).toHaveLength(0)
+  })
+
   // 方言不支持的形式必须在扫描阶段指出，而不是生成一条注定失败的语句。
   test('方言不支持的形式被标记为不安全并给出原因', () => {
     const named = inspectSqlParameters('SELECT * FROM t WHERE a = :name', 'mysql')
