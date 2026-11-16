@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex},
     thread,
+    time::Instant,
 };
 use uuid::Uuid;
 
@@ -53,6 +54,7 @@ struct Task {
     cancel: AtomicBool,
     progress: Mutex<Value>,
     done: Condvar,
+    created: Instant,
 }
 impl Task {
     fn check(&self) -> Result<()> {
@@ -89,16 +91,33 @@ impl Task {
     }
 }
 
+/// Drop the oldest finished tasks until there is room for one more. Running,
+/// queued and committing tasks keep their slots, and the newest finished
+/// records stay queryable so a just-finished task is not pulled from under the
+/// caller. Only completed/failed/cancelled tasks are reclaimed.
+fn reclaim_terminal(tasks: &mut HashMap<String, Arc<Task>>) {
+    let mut finished: Vec<(String, Instant)> = tasks.iter().filter_map(|(id, task)| {
+        let progress = task.progress.lock().ok()?;
+        terminal(progress["status"].as_str().unwrap_or("")).then(|| (id.clone(), task.created))
+    }).collect();
+    finished.sort_by_key(|(_, created)| *created);
+    for (id, _) in finished {
+        if tasks.len() < MAX_TASKS { break }
+        tasks.remove(&id);
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TaskRegistry { tasks: Mutex<HashMap<String, Arc<Task>>> }
 impl TaskRegistry {
     fn register(&self, task: Arc<Task>) -> Result<()> {
         let mut tasks = lock(&self.tasks)?;
-        if tasks.len() >= MAX_TASKS { return Err(AppError::new("resource-limit", "任务记录已达上限，请重新打开应用")) }
+        if tasks.len() >= MAX_TASKS { reclaim_terminal(&mut tasks); }
         if tasks.values().any(|other| other.session.generation == task.session.generation &&
             other.progress.lock().map(|p| !terminal(p["status"].as_str().unwrap_or(""))).unwrap_or(true)) {
             return Err(AppError::new("conflict", "该连接已有导入或导出任务"));
         }
+        if tasks.len() >= MAX_TASKS { return Err(AppError::new("resource-limit", "任务记录已达上限且全部为进行中任务，请等待完成后重试")) }
         tasks.insert(task.id.clone(), task);
         Ok(())
     }
@@ -343,7 +362,7 @@ fn spawn_task(app: &Application, kind: Kind, session: Arc<Session>, mut progress
     operation: impl FnOnce(&Task, &mut dyn Driver) -> Result<Value> + Send + 'static) -> Result<Value> {
     let id = Uuid::new_v4().to_string();
     progress["taskId"] = json!(id);
-    let task = Arc::new(Task { id, kind, session, cancel: AtomicBool::new(false), progress: Mutex::new(progress.clone()), done: Condvar::new() });
+    let task = Arc::new(Task { id, kind, session, cancel: AtomicBool::new(false), progress: Mutex::new(progress.clone()), done: Condvar::new(), created: Instant::now() });
     app.with_task_registration(|| app.tasks.register(task.clone()))?;
     let worker = task.clone();
     if thread::Builder::new().name("dbstudio-data-task".into()).spawn(move || {
@@ -597,8 +616,12 @@ fn cell_sql(cell: &Value, dialect: &str) -> Result<String> {
     if let Some(boolean) = value.as_bool() { return Ok(if dialect == "postgresql" { if boolean { "TRUE" } else { "FALSE" } } else if boolean { "1" } else { "0" }.into()) }
     if value.is_number() { return Ok(value.to_string()) }
     let text = value.as_str().unwrap();
+    if dialect == "mysql" {
+        let hex = text.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        return Ok(format!("CONVERT(X'{hex}' USING utf8mb4)"));
+    }
     if text.contains('\0') { return Err(invalid("SQL INSERT 文本含 NUL，无法安全导出")) }
-    let escaped = if dialect == "postgresql" || dialect == "mysql" { text.replace('\\', "\\\\").replace('\'', "''") } else { text.replace('\'', "''") };
+    let escaped = if dialect == "postgresql" { text.replace('\\', "\\\\").replace('\'', "''") } else { text.replace('\'', "''") };
     Ok(format!("{}'{escaped}'", if dialect == "postgresql" { "E" } else { "" }))
 }
 fn csv_field(text: &str, force: bool) -> String {
@@ -744,6 +767,27 @@ fn start_export(app: &Application, request: &Value) -> Result<Value> {
 }
 
 #[cfg(test)]
+mod sql_export_tests {
+    use super::*;
+
+    #[test]
+    fn mysql_text_literals_preserve_bytes_without_sql_mode_escape_rules() {
+        let cases = [
+            ("", "CONVERT(X'' USING utf8mb4)"),
+            ("a\\b", "CONVERT(X'615c62' USING utf8mb4)"),
+            ("O'Brien", "CONVERT(X'4f27427269656e' USING utf8mb4)"),
+            ("中文\n😀", "CONVERT(X'e4b8ade696870af09f9880' USING utf8mb4)"),
+            ("nul\0tail", "CONVERT(X'6e756c007461696c' USING utf8mb4)"),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(cell_sql(&json!({"kind":"text","text":text}), "mysql").unwrap(), expected);
+        }
+        assert_eq!(cell_sql(&json!({"kind":"text","text":"a\\b'c"}), "sqlite").unwrap(), "'a\\b''c'");
+        assert_eq!(cell_sql(&json!({"kind":"text","text":"a\\b'c"}), "postgresql").unwrap(), "E'a\\\\b''c'");
+    }
+}
+
+#[cfg(test)]
 mod cancellation_fixtures {
     use super::*;
     use crate::MemorySecretStore;
@@ -882,5 +926,65 @@ mod cancellation_fixtures {
         assert_eq!(result.unwrap_err().code,"backend-unavailable");
         assert!(!ran.load(Ordering::Acquire));
         assert!(app.tasks.tasks.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod task_registry_tests {
+    use super::*;
+    use dbstudio_protocol::{Driver, DriverError, DriverResult};
+    use std::time::{Duration, Instant};
+
+    struct IdleDriver;
+    impl Driver for IdleDriver {
+        fn dialect_id(&self) -> &str { "sqlite" }
+        fn capabilities(&self) -> Value { json!({}) }
+        fn call(&mut self, _: &str, _: Vec<Value>) -> DriverResult<Value> { Err(DriverError::unsupported("fixture")) }
+    }
+    fn task(id: &str, status: &str, created: Instant) -> Arc<Task> {
+        Arc::new(Task { kind: Kind::Export, id: id.to_owned(), session: Session::new(id.to_owned(), Box::new(IdleDriver)),
+            cancel: AtomicBool::new(false), progress: Mutex::new(json!({"status":status})), done: Condvar::new(), created })
+    }
+    fn status_of(task: &Task) -> String {
+        task.progress.lock().unwrap()["status"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn finished_tasks_are_reclaimed_oldest_first_while_running_work_keeps_its_slot() {
+        let registry = TaskRegistry::default();
+        let base = Instant::now();
+        for index in 0..MAX_TASKS {
+            let status = match index {
+                100 => "running",
+                101 => "committing",
+                _ => ["completed", "failed", "cancelled"][index % 3],
+            };
+            registry.register(task(&format!("old-{index:03}"), status, base + Duration::from_millis(index as u64 + 1))).unwrap();
+        }
+        registry.register(task("live", "queued", base + Duration::from_secs(1))).unwrap();
+        let tasks = lock(&registry.tasks).unwrap();
+        assert_eq!(tasks.len(), MAX_TASKS);
+        assert!(tasks.contains_key("live"));
+        assert!(!tasks.contains_key("old-000"), "the oldest finished task must yield its slot");
+        assert!(tasks.contains_key(&format!("old-{:03}", MAX_TASKS - 1)), "the newest finished history must be retained");
+        assert_eq!(status_of(&tasks["old-100"]), "running");
+        assert_eq!(status_of(&tasks["old-101"]), "committing");
+    }
+
+    #[test]
+    fn only_terminal_tasks_are_reclaimed_so_a_full_active_registry_still_rejects_new_work() {
+        let registry = TaskRegistry::default();
+        let base = Instant::now();
+        for index in 0..MAX_TASKS {
+            let status = ["running", "queued", "committing"][index % 3];
+            registry.register(task(&format!("active-{index:03}"), status, base + Duration::from_millis(index as u64 + 1))).unwrap();
+        }
+        let error = registry.register(task("live", "queued", base + Duration::from_secs(1))).unwrap_err();
+        assert_eq!(error.code, "resource-limit");
+        assert!(!error.message.contains("重新打开应用"));
+        let tasks = lock(&registry.tasks).unwrap();
+        assert_eq!(tasks.len(), MAX_TASKS);
+        assert!(!tasks.contains_key("live"));
+        assert!(tasks.values().all(|task| !terminal(&status_of(task))));
     }
 }

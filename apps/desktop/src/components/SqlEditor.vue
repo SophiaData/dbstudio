@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
-import { SQL_COMPLETION_KEYWORDS } from '../../../../src/renderer/sql-keywords'
+import { SQL_COMPLETION_KEYWORDS } from '../../../../src/core/sql-keywords'
 import { SQLITE_SCRIPT_RULES } from '../../../../src/core/sql-script'
 import { currentSql, formattedSql, highlightTokens } from '../sql-editor-model'
-import type { TreeNode, Workbench } from '../workbench'
+import { connectionOf, type TreeNode, type Workbench } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; disabled?: boolean }>()
 const emit = defineEmits<{ execute: [sql: string]; explain: [sql: string]; library: [] }>()
@@ -20,20 +20,22 @@ const rules = computed(() => props.workbench.dialects.value.find((dialect) => di
 const tokens = computed(() => highlightTokens(props.workbench.sql.value))
 function flattenNodes(nodes: TreeNode[]): TreeNode[] { return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]) }
 function loadedObjects(nodes: TreeNode[]): string[] { return nodes.flatMap((node) => [node.ref.name, ...loadedObjects(node.children)]) }
+const connectionRoots = computed(() => props.workbench.roots.value.filter((node) => connectionOf(node.ref.id) === props.workbench.currentConnectionId.value))
+const connectionTabs = computed(() => props.workbench.tabs.value.filter((tab) => tab.connectionId === props.workbench.currentConnectionId.value))
 function columnsFor(name: string): string[] {
   const normalized = name.toLowerCase()
-  const treeColumns = flattenNodes(props.workbench.roots.value)
+  const treeColumns = flattenNodes(connectionRoots.value)
     .filter((node) => node.ref.kind === 'table' && node.ref.name.toLowerCase() === normalized)
     .flatMap((table) => flattenNodes(table.children).filter((node) => node.ref.kind === 'column').map((node) => node.ref.name))
-  const resultColumns = props.workbench.tabs.value
+  const resultColumns = connectionTabs.value
     .filter((tab) => tab.table?.name.toLowerCase() === normalized && tab.description)
     .flatMap((tab) => tab.description!.columns.map((column) => column.name))
   return [...new Set([...treeColumns, ...resultColumns])]
 }
 const candidates = computed(() => {
   const columns = qualifier.value ? columnsFor(qualifier.value) : []
-  const metadata = loadedObjects(props.workbench.roots.value)
-    .concat(props.workbench.tabs.value.flatMap((tab) => tab.page?.columns.map((column) => column.name) ?? []))
+  const metadata = loadedObjects(connectionRoots.value)
+    .concat(connectionTabs.value.flatMap((tab) => tab.page?.columns.map((column) => column.name) ?? []))
   const values = qualifier.value && columns.length
     ? columns
     : [...new Set([...SQL_COMPLETION_KEYWORDS.map((word) => word.toUpperCase()), ...metadata])]

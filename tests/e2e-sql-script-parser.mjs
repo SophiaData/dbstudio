@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'vite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -30,7 +30,7 @@ const {
   SQLITE_SCRIPT_RULES,
   POSTGRESQL_SCRIPT_RULES,
   splitStatements
-} = await import(`file://${join(outDir, 'probe.cjs')}`)
+} = await import(pathToFileURL(join(outDir, 'probe.cjs')).href)
 
 function statements(sql, rules) {
   return splitStatements(sql, rules).map((statement) => ({

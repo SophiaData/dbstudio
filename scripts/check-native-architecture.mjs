@@ -49,14 +49,30 @@ assert.match(productionBuild, /VITE_MYSQL_PARITY:\s*'0'/, 'production wrapper mu
 for (const marker of ["'mysqlAcceptance'", "'__DBSTUDIO_MYSQL_ACCEPTANCE_'"]) {
   assert.ok(productionBuild.includes(marker), `production wrapper must reject the ${marker} bridge marker`)
 }
-const rustShell = readFileSync(join(root, 'src-tauri/src/lib.rs'), 'utf8')
-const run = rustShell.indexOf('pub fn run()')
-const gate = rustShell.indexOf('#[cfg(not(feature = "mysql-acceptance"))]\n    if mysql_mode_environment_present()', run)
-const context = rustShell.indexOf('let context = tauri::generate_context!();', run)
-const application = rustShell.indexOf('Application::open_with_legacy', run)
-const window = rustShell.indexOf('tauri::WebviewWindowBuilder::new', run)
-assert.ok(run >= 0 && gate > run, 'production Rust must gate MySQL acceptance environment at startup')
-assert.ok(context > gate && application > gate && window > gate, 'production Rust must reject MySQL environment before context, application or window creation')
-assert.match(rustShell.slice(gate, context), /std::process::exit\(2\)/, 'production MySQL environment gate must fail closed')
-assert.ok(rustShell.includes('std::env::var_os(name).is_some()'), 'MySQL environment guard must inspect the operating system environment')
+const rustShell = readFileSync(join(root, 'src-tauri/src/lib.rs'), 'utf8').replaceAll('\r\n', '\n')
+
+function assertRustShellGates(source) {
+  const run = source.indexOf('pub fn run()')
+  const mysqlGate = source.indexOf('#[cfg(not(feature = "mysql-acceptance"))]\n    if mysql_mode_environment_present()', run)
+  const smokeRootGate = source.indexOf('#[cfg(all(feature = "test-hooks", not(feature = "mysql-acceptance")))]\n    if !native_smoke_root_allowed(std::env::var_os("DBSTUDIO_NATIVE_SMOKE_ROOT").as_deref())', run)
+  const context = source.indexOf('let context = tauri::generate_context!();', run)
+  const application = source.indexOf('Application::open_with_legacy', run)
+  const window = source.indexOf('tauri::WebviewWindowBuilder::new', run)
+  assert.ok(run >= 0 && mysqlGate > run, 'production Rust must gate MySQL acceptance environment at startup')
+  assert.ok(smokeRootGate > run, 'test-hook builds must fail closed without an isolated native smoke root')
+  assert.ok(context > mysqlGate && context > smokeRootGate, 'production Rust must reject test environments before context creation')
+  assert.ok(application > mysqlGate && application > smokeRootGate && window > mysqlGate && window > smokeRootGate, 'production Rust must reject test environments before application or window creation')
+  assert.match(source.slice(mysqlGate, context), /std::process::exit\(2\)/, 'production MySQL environment gate must fail closed')
+  assert.match(source.slice(smokeRootGate, context), /std::process::exit\(2\)/, 'test-hook smoke root gate must fail closed')
+  assert.ok(source.includes('std::env::var_os(name).is_some()'), 'MySQL environment guard must inspect the operating system environment')
+  const fixtureBranch = source.indexOf('#[cfg(all(feature = "test-hooks", not(feature = "mysql-acceptance")))]\n            let (base_dir, secrets)', run)
+  assert.ok(fixtureBranch > smokeRootGate, 'test-hook builds must bind isolated state inside the setup closure')
+  assert.match(source.slice(fixtureBranch, fixtureBranch + 800), /None => return Err\(/, 'test-hook builds must not fall back to production app-data or the OS vault')
+}
+assertRustShellGates(rustShell)
+assert.throws(
+  () => assertRustShellGates(rustShell.replace('if !native_smoke_root_allowed(std::env::var_os("DBSTUDIO_NATIVE_SMOKE_ROOT").as_deref())', 'if false')),
+  /test-hook builds must fail closed without an isolated native smoke root/,
+  'negative self-check: a test-hook build without the smoke root gate must not pass'
+)
 console.log('Native architecture: workspace dependency direction, Vue boundary and production shell configuration passed')

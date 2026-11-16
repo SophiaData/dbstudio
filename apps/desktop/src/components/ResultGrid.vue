@@ -82,8 +82,26 @@ async function openCell(row: ResultRow, column: number) {
   if (locked.value) return
   selectCell(row, column)
   const cell = displayed(row, column)
-  if (writable.value && cell.kind !== 'blob') await edit(row, column)
+  if (writable.value && cell.kind !== 'blob' && !binaryColumn(column)) await edit(row, column)
   else await readCell(row, column)
+}
+/** 二进制类型名：SQLite BLOB、PG BYTEA、MySQL BINARY/VARBINARY/BLOB 系列。 */
+const binaryType = /\b(?:blob|bytea|binary|varbinary|longvarbinary|image|tinyblob|mediumblob|longblob)\b/i
+/**
+ * 该结果列是否只能只读查看。
+ *
+ * 结果列的类型由驱动按行值推断，全 NULL 列会得到 `null`，不能只看它：
+ * SQLite 的全 NULL BLOB 列因此曾进入文本编辑。判定优先用驱动给的非 NULL
+ * 值类型（`blob`），其次用目标表列描述的 `typeName`；两者都没有可靠信息时
+ * 按「不可判定」处理，保守地只读查看。
+ */
+function binaryColumn(column: number): boolean {
+  const pageColumn = props.tab.page?.columns[column]
+  if (!pageColumn) return true
+  if (pageColumn.type === 'blob') return true
+  const described = props.tab.description?.columns.find((candidate) => candidate.name === pageColumn.name)
+  if (described) return binaryType.test(described.typeName)
+  return pageColumn.type === 'null'
 }
 async function openLoadedExport() {
   if (!props.tab.page || locked.value || props.tab.invalidated) return
@@ -135,8 +153,8 @@ function saveCell() {
 }
 async function sort(column: string) {
   if (locked.value || props.tab.invalidated) return
-  props.tab.order = { column, direction: props.tab.order?.column === column && props.tab.order.direction === 'ASC' ? 'DESC' : 'ASC' }
-  await props.workbench.attempt(() => props.workbench.transformTab(props.tab))
+  const order: ResultTab['order'] = { column, direction: props.tab.order?.column === column && props.tab.order.direction === 'ASC' ? 'DESC' : 'ASC' }
+  await props.workbench.attempt(() => props.workbench.transformTab(props.tab, order))
 }
 function beginInsert() {
   invalidateCellEdit()
@@ -148,11 +166,12 @@ function beginInsert() {
   error.value = ''; insertOpen.value = true
 }
 async function submitInsert() {
+  if (!insertOpen.value) return
   try {
     const values: Record<string, CellValue> = {}
     for (const column of insertColumns.value) {
       if (!insertInclude.has(column.name)) continue
-      const kind = /int|numeric|decimal|real|float|double/i.test(column.typeName) ? 'number' : /bool/i.test(column.typeName) ? 'boolean' : 'text'
+      const kind = /\b(?:numeric|decimal)\b/i.test(column.typeName) ? 'text' : /int|real|float|double/i.test(column.typeName) ? 'number' : /bool/i.test(column.typeName) ? 'boolean' : 'text'
       values[column.name] = inputCell(insertValues[column.name] ?? '', kind, insertNulls.has(column.name))
     }
     const inserted = await props.workbench.insertRow(props.tab, values)

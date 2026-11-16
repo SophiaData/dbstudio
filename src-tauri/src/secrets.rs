@@ -2,6 +2,8 @@ use dbstudio_core::{AppError, SecretStore};
 use dbstudio_protocol::SecretMap;
 
 /// OS vault only. No plaintext file or application-owned encryption-key fallback.
+/// Test-hook builds bind fixture secrets instead and never construct this store.
+#[cfg_attr(feature = "test-hooks", allow(dead_code))]
 pub struct OsSecretStore;
 
 fn unavailable() -> AppError {

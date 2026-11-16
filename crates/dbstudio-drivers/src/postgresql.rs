@@ -75,10 +75,78 @@ fn decimal(bytes:&[u8])->DriverResult<String>{
     if scale>0{out.push('.');let mut fraction=String::new();for position in 1..=(scale.div_ceil(4)){fraction.push_str(&format!("{:04}",group(-(position as i32))));}out.push_str(&fraction[..scale]);}
     Ok(out)
 }
-struct Cursor {sql:String,values:Vec<Value>,snapshot:Option<(Vec<Value>,Vec<Row>)>}
+const PG_SNAPSHOT_MAX_ROWS:usize=10_000;
+const PG_SNAPSHOT_MAX_BYTES:usize=16*1024*1024;
+const PG_SNAPSHOT_CONNECTION_BYTES:usize=64*1024*1024;
+const PG_SNAPSHOT_MAX_CURSORS:usize=16;
+// A read cursor keeps the raw rows of one execution so paging and full-value reads never re-run the
+// query. These budgets are separate from the RETURNING budgets above; beyond either one the cursor
+// keeps the live re-query path and reports stable=false.
+const PG_READ_SNAPSHOT_MAX_ROWS:usize=5_000;
+const PG_READ_SNAPSHOT_MAX_BYTES:usize=16*1024*1024;
+// Cursor.snapshot is either the RETURNING rows of a write cursor or the bounded read rows of a
+// query cursor; one cursor never carries both, so one field serves both retention paths.
+struct Snapshot{columns:Vec<Value>,rows:Vec<Row>,bytes:usize}
+struct Cursor {sql:String,values:Vec<Value>,snapshot:Option<Snapshot>}
+fn read_snapshot_retains(rows:usize,bytes:usize)->bool{rows<=PG_READ_SNAPSHOT_MAX_ROWS&&bytes<=PG_READ_SNAPSHOT_MAX_BYTES}
+fn snapshot_limit()->DriverError{DriverError::new("resource-limit","PostgreSQL快照保留超过连接预算，请关闭已有游标后重试")}
+fn snapshot_retention(count:usize,retained:usize,additional:usize)->DriverResult<()>{
+    if count>=PG_SNAPSHOT_MAX_CURSORS||retained.saturating_add(additional)>PG_SNAPSHOT_CONNECTION_BYTES{return Err(snapshot_limit());}Ok(())
+}
+fn snapshot_usage(cursors:&HashMap<String,Cursor>)->(usize,usize){
+    cursors.values().fold((0,0),|(count,bytes),cursor|match &cursor.snapshot{Some(snapshot)=>(count+1,bytes.saturating_add(snapshot.bytes)),None=>(count,bytes)})
+}
+fn statement_recovery(error:DriverError)->(bool,DriverError){
+    let recovered=error.code!="connection_failed";let statement_failed=error.code=="driver-error";
+    (recovered,if statement_failed{DriverError::new("statement-failed","语句执行失败，已回滚到语句保存点；事务可继续")}else{error})
+}
+fn snapshot_bounds(total:usize,offset:usize,limit:usize)->(usize,usize,bool){
+    let start=offset.min(total);let end=start.saturating_add(limit).min(total);(start,end,start.saturating_add(limit)<total)
+}
 fn snapshot_page(columns:&[Value],rows:&[Row],offset:usize,limit:usize)->DriverResult<Value>{
-    let page:DriverResult<Vec<_>>=rows.iter().skip(offset).take(limit).enumerate().map(|(i,row)|{let cells:DriverResult<Vec<_>>=(0..row.len()).map(|column|cell(row,column,false)).collect();Ok(json!({"index":offset+i,"cells":cells?}))}).collect();
-    let page=page?;Ok(json!({"columns":columns,"offset":offset,"returned":page.len(),"rows":page,"hasMore":rows.len()>offset.saturating_add(limit)}))
+    let(start,end,has_more)=snapshot_bounds(rows.len(),offset,limit);
+    let page:DriverResult<Vec<_>>=rows.iter().enumerate().skip(start).take(end-start).map(|(i,row)|{let cells:DriverResult<Vec<_>>=(0..row.len()).map(|column|cell(row,column,false)).collect();Ok(json!({"index":i,"cells":cells?}))}).collect();
+    let page=page?;Ok(json!({"columns":columns,"offset":offset,"returned":page.len(),"rows":page,"hasMore":has_more}))
+}
+fn mark_query_page(page:&mut Value,cursor:Value,executed_sql:&str,elapsed_ms:u64,stable:bool){
+    page["cursorId"]=cursor;page["executedSql"]=json!(executed_sql);page["elapsedMs"]=json!(elapsed_ms);page["stable"]=json!(stable);
+}
+fn key_clause(description:&Value,key_values:&Value)->DriverResult<(String,Vec<Value>)>{
+    let keys=description["primaryKey"].as_array().ok_or_else(||DriverError::invalid("表结构缺少主键信息"))?;
+    if keys.is_empty(){return Err(DriverError::unsupported("表缺少主键，禁止按行编辑"));}
+    let supplied=key_values.as_object().ok_or_else(||DriverError::invalid("缺少主键值"))?;
+    if supplied.len()!=keys.len(){return Err(DriverError::invalid("必须提供全部且仅有主键列"));}
+    let mut clauses=vec![];let mut values=vec![];
+    for key in keys{let name=key.as_str().ok_or_else(||DriverError::invalid("主键列无效"))?;let val=n::cell_param(supplied.get(name).ok_or_else(||DriverError::invalid("缺少主键值"))?)?;if val.is_null(){return Err(DriverError::invalid("主键不能为NULL"));}values.push(val);clauses.push(format!("{}=${}",n::quote(name,false),values.len()));}
+    Ok((clauses.join(" AND "),values))
+}
+fn edit_statement(method:&str,target:&str,item:&Value,description:&Value)->DriverResult<(String,Vec<Value>)>{
+    let columns=description["columns"].as_array().ok_or_else(||DriverError::invalid("表结构缺少列信息"))?;
+    if method=="insertRow"{
+        let values=item.as_object().ok_or_else(||DriverError::invalid("插入值无效"))?;let mut cols=vec![];let mut params=vec![];
+        for(name,value)in values{if !columns.iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}cols.push(n::quote(name,false));params.push(n::cell_param(value)?);}
+        return Ok((if cols.is_empty(){format!("INSERT INTO {target} DEFAULT VALUES")}else{format!("INSERT INTO {target} ({}) VALUES ({})",cols.join(","),(1..=params.len()).map(|i|format!("${i}")).collect::<Vec<_>>().join(","))},params));
+    }
+    let key_values=if method=="applyEdits"{&item["keyValues"]}else{item};
+    let(where_sql,mut values)=key_clause(description,key_values)?;
+    if method=="deleteRows"{return Ok((format!("DELETE FROM {target} WHERE {where_sql}"),values));}
+    let changes=item["changes"].as_object().ok_or_else(||DriverError::invalid("缺少修改列"))?;
+    if changes.is_empty(){return Err(DriverError::invalid("修改列不能为空"));}
+    let mut set=vec![];
+    for(name,value)in changes{if !columns.iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}values.push(n::cell_param(value)?);set.push(format!("{}=${}",n::quote(name,false),values.len()));}
+    Ok((format!("UPDATE {target} SET {} WHERE {where_sql}",set.join(",")),values))
+}
+fn edit_statements(method:&str,target:&str,rows:&[Value],description:&Value)->DriverResult<Vec<(String,Vec<Value>)>>{
+    let mut statements=Vec::with_capacity(rows.len());
+    for(index,item)in rows.iter().enumerate(){statements.push(edit_statement(method,target,item,description).map_err(|e|DriverError::new(e.code,format!("第{}行：{}",index+1,e.message)))?);}
+    Ok(statements)
+}
+fn edit_outcome(index:usize,sql:&str,insert:bool,result:DriverResult<u64>)->(u64,Value,bool){
+    match result{
+        Ok(affected)if insert||affected<=1=>(affected,json!({"index":index,"affected":affected,"error":null,"sql":sql}),false),
+        Ok(_)=>(0,json!({"index":index,"affected":0,"error":"主键编辑影响多行，已回滚该行","sql":sql}),true),
+        Err(e)=>(0,json!({"index":index,"affected":0,"error":e.message,"sql":sql}),true)
+    }
 }
 pub struct PostgresDriver {client:Client,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,transaction_failed:bool,statement_recovered:bool,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<SshTunnel>}
 
@@ -103,24 +171,54 @@ impl PostgresDriver {
         let args=params(values);self.running.store(true,Ordering::SeqCst);let result=self.client.query(sql,&refs(&args)).map_err(error);self.running.store(false,Ordering::SeqCst);result
     }
     fn execute(&mut self,sql:&str,values:&[Value])->DriverResult<u64>{let args=params(values);self.running.store(true,Ordering::SeqCst);let result=self.client.execute(sql,&refs(&args)).map_err(error);self.running.store(false,Ordering::SeqCst);result}
-    fn query_snapshot(&mut self,sql:&str,values:&[Value])->DriverResult<Vec<Row>>{
+    fn rollback_statement(&mut self,savepoint:&str,error:DriverError)->DriverError{
+        if let Err(recovery)=self.execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"),&[]){self.transaction_failed=true;return recovery;}
+        if let Err(recovery)=self.execute(&format!("RELEASE SAVEPOINT {savepoint}"),&[]){self.transaction_failed=true;return recovery;}
+        let(recovered,mapped)=statement_recovery(error);self.statement_recovered=recovered;mapped
+    }
+    fn query_snapshot(&mut self,sql:&str,values:&[Value],retention:Option<(usize,usize)>)->DriverResult<(Vec<Row>,usize)>{
         self.execute("SAVEPOINT dbstudio_returning",&[])?;
         let args=params(values);self.running.store(true,Ordering::SeqCst);
-        let result=(||->DriverResult<Vec<Row>>{
+        let result=(||->DriverResult<(Vec<Row>,usize)>{
             let mut stream=self.client.query_raw(sql,refs(&args)).map_err(error)?;let mut rows=vec![];let mut bytes=0usize;
             while let Some(row)=stream.next().map_err(error)?{
                 for index in 0..row.len(){let raw:Option<Raw>=row.try_get(index).map_err(|_|DriverError::unsupported("返回字段无法解码"))?;bytes=bytes.saturating_add(raw.map_or(0,|v|v.0.len()));}
-                if rows.len()>=10_000||bytes>16*1024*1024{return Err(DriverError::unsupported("写语句返回快照超过10000行或16MiB，已回滚本次语句；请缩小RETURNING结果"));}rows.push(row);
+                if rows.len()>=PG_SNAPSHOT_MAX_ROWS||bytes>PG_SNAPSHOT_MAX_BYTES{return Err(DriverError::unsupported("写语句返回快照超过10000行或16MiB，已回滚本次语句；请缩小RETURNING结果"));}rows.push(row);
             }
             for row in &rows{for index in 0..row.len(){cell(row,index,true)?;}}
-            Ok(rows)
+            if let Some((count,retained))=retention{snapshot_retention(count,retained,bytes)?;}
+            Ok((rows,bytes))
         })();self.running.store(false,Ordering::SeqCst);
-        match result{Ok(rows)=>{self.execute("RELEASE SAVEPOINT dbstudio_returning",&[])?;Ok(rows)},Err(e)=>{
-            if let Err(recovery)=self.execute("ROLLBACK TO SAVEPOINT dbstudio_returning",&[]){self.transaction_failed=true;return Err(recovery);}
-            if let Err(recovery)=self.execute("RELEASE SAVEPOINT dbstudio_returning",&[]){self.transaction_failed=true;return Err(recovery);}
-            let recovered=e.code!="connection_failed";let statement_failed=e.code=="driver-error";self.statement_recovered=recovered;
-            Err(if statement_failed{DriverError::new("statement-failed","语句执行失败，已回滚到语句保存点；事务可继续")}else{e})
-        }}
+        match result{Ok((rows,bytes))=>{self.execute("RELEASE SAVEPOINT dbstudio_returning",&[])?;Ok((rows,bytes))},Err(e)=>Err(self.rollback_statement("dbstudio_returning",e))}
+    }
+    /// Runs the query once, renders the requested page from the streamed rows, and retains them as
+    /// a bounded read snapshot. The snapshot is dropped as soon as either read budget is exceeded so
+    /// the cursor falls back to live re-query; the first page still comes from this one execution.
+    fn read_snapshot_page(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<(Value,Option<Snapshot>)>{
+        let stmt=self.client.prepare(sql).map_err(error)?;
+        let columns:Vec<_>=stmt.columns().iter().map(|c|json!({"name":c.name(),"type":match *c.type_(){Type::BOOL=>"boolean",Type::INT2|Type::INT4=>"integer",Type::FLOAT4|Type::FLOAT8=>"real",Type::BYTEA=>"blob",_=>"text"}})).collect();
+        let executed=format!("SELECT * FROM ({sql}) AS dbstudio_page LIMIT {}",PG_READ_SNAPSHOT_MAX_ROWS+1);
+        let args=params(values);self.running.store(true,Ordering::SeqCst);
+        let result=(||->DriverResult<(Value,Option<Snapshot>)>{
+            let mut stream=self.client.query_raw(executed.as_str(),refs(&args)).map_err(error)?;
+            let mut retained:Option<Vec<Row>>=Some(Vec::new());let mut snapshot_bytes=0usize;
+            let mut output=Vec::new();let mut read=0usize;
+            while let Some(row)=stream.next().map_err(error)?{
+                let mut row_bytes=0usize;
+                for index in 0..row.len(){let raw:Option<Raw>=row.try_get(index).map_err(|_|DriverError::unsupported("返回字段无法解码"))?;row_bytes=row_bytes.saturating_add(raw.map_or(0,|value|value.0.len()));}
+                let fits=match &retained{Some(rows)=>read_snapshot_retains(rows.len().saturating_add(1),snapshot_bytes.saturating_add(row_bytes)),None=>false};
+                if read>=offset&&output.len()<limit{
+                    let cells:DriverResult<Vec<_>>=(0..row.len()).map(|column|cell(&row,column,false)).collect();
+                    output.push(json!({"index":read,"cells":cells?}));
+                }
+                if fits{if let Some(rows)=retained.as_mut(){rows.push(row);}snapshot_bytes=snapshot_bytes.saturating_add(row_bytes);}else{retained=None;}
+                read+=1;
+                if retained.is_none()&&read>offset.saturating_add(limit){break;}
+            }
+            let has_more=match &retained{Some(rows)=>offset.saturating_add(limit)<rows.len(),None=>read>offset.saturating_add(limit)};
+            let snapshot=retained.map(|rows|Snapshot{columns:columns.clone(),rows,bytes:snapshot_bytes});
+            Ok((json!({"columns":columns,"offset":offset,"returned":output.len(),"rows":output,"hasMore":has_more}),snapshot))
+        })();self.running.store(false,Ordering::SeqCst);result
     }
     fn begin(&mut self)->DriverResult<()>{if !self.active{self.execute("BEGIN",&[])?;self.active=true;self.pending=0;}Ok(())}
     fn page(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<Value>{
@@ -137,10 +235,19 @@ impl PostgresDriver {
         let started=Instant::now();let(sql,values)=n::bind_named(sql,options,true)?;
         let first=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if !["select","with","values","table"].contains(&first.as_str()){return Err(DriverError::unsupported("分页查询只接受单条查询语句"));}
-        let(offset,limit)=n::page_options(options);let mut page=self.page(&sql,&values,offset,limit)?;
-        let cursor=if options.get("keepCursor").and_then(Value::as_bool)==Some(false){Value::Null}else{
-            self.sequence+=1;let id=format!("pg-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor{sql:sql.clone(),values,snapshot:None});json!(id)};
-        page["cursorId"]=cursor;page["executedSql"]=json!(sql);page["elapsedMs"]=json!(started.elapsed().as_millis() as u64);Ok(page)
+        let(offset,limit)=n::page_options(options);let keep=options.get("keepCursor").and_then(Value::as_bool)!=Some(false);
+        let(count,retained)=snapshot_usage(&self.cursors);
+        // One execution feeds both the first page and the bounded read snapshot. A first page that
+        // cannot fit the snapshot's window keeps the live re-query path.
+        let(mut page,snapshot)=if keep&&offset.saturating_add(limit)<=PG_READ_SNAPSHOT_MAX_ROWS{
+            let(page,snapshot)=self.read_snapshot_page(&sql,&values,offset,limit)?;
+            if let Some(snapshot)=&snapshot{snapshot_retention(count,retained,snapshot.bytes)?;}
+            (page,snapshot)
+        }else{(self.page(&sql,&values,offset,limit)?,None)};
+        let stable=snapshot.is_some();
+        let cursor=if keep{
+            self.sequence+=1;let id=format!("pg-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor{sql:sql.clone(),values,snapshot});json!(id)}else{Value::Null};
+        mark_query_page(&mut page,cursor,&sql,started.elapsed().as_millis() as u64,stable);Ok(page)
     }
     fn describe(&mut self,id:&str)->DriverResult<Value>{
         let(schema,table)=n::table_id(id)?;
@@ -212,45 +319,28 @@ impl PostgresDriver {
         let keys=description["primaryKey"].as_array().unwrap();self.begin()?;
         let mut key_values=serde_json::Map::new();let affected=if keys.is_empty(){self.execute(&sql,&params)?}else{
             sql.push_str(" RETURNING ");sql.push_str(&keys.iter().map(|k|n::quote(k.as_str().unwrap(),false)).collect::<Vec<_>>().join(","));
-            let rows=self.query(&sql,&params)?;if let Some(row)=rows.first(){for(index,key)in keys.iter().enumerate(){key_values.insert(key.as_str().unwrap().into(),cell(row,index,true)?);}}rows.len()as u64
+            self.execute("SAVEPOINT dbstudio_returning",&[])?;
+            let result=(||->DriverResult<u64>{
+                let rows=self.query(&sql,&params)?;if let Some(row)=rows.first(){for(index,key)in keys.iter().enumerate(){key_values.insert(key.as_str().unwrap().into(),cell(row,index,true)?);}}Ok(rows.len()as u64)
+            })();
+            match result{Ok(affected)=>{self.execute("RELEASE SAVEPOINT dbstudio_returning",&[])?;affected},Err(e)=>return Err(self.rollback_statement("dbstudio_returning",e))}
         };
         self.pending+=affected;Ok(json!({"affected":affected,"keyValues":key_values}))
     }
-    fn keys(&mut self,id:&str,key_values:&Value)->DriverResult<(String,Vec<Value>)>{
-        if !id.starts_with("table:"){return Err(DriverError::unsupported("视图不能执行主键编辑"));}
-        let desc=self.describe(id)?;let keys=desc["primaryKey"].as_array().unwrap();if keys.is_empty(){return Err(DriverError::unsupported("表缺少主键，禁止按行编辑"));}
-        let supplied=key_values.as_object().ok_or_else(||DriverError::invalid("缺少主键值"))?;
-        if supplied.len()!=keys.len(){return Err(DriverError::invalid("必须提供全部且仅有主键列"));}
-        let mut clauses=vec![];let mut values=vec![];
-        for key in keys{let name=key.as_str().unwrap();let val=n::cell_param(supplied.get(name).ok_or_else(||DriverError::invalid("缺少主键值"))?)?;if val.is_null(){return Err(DriverError::invalid("主键不能为NULL"));}values.push(val);clauses.push(format!("{}=${}",n::quote(name,false),values.len()));}
-        Ok((clauses.join(" AND "),values))
-    }
     fn edit(&mut self,method:&str,id:&str,input:&Value)->DriverResult<Value>{
-        let target=n::qualified(id,false)?;let mut outcomes=vec![];let mut total=0;
+        if method!="insertRow"&&!id.starts_with("table:"){return Err(DriverError::unsupported("视图不能执行主键编辑"));}
+        let target=n::qualified(id,false)?;
         let rows=if method=="applyEdits"||method=="deleteRows"{input.as_array().ok_or_else(||DriverError::invalid("需要行数组"))?.clone()}else{vec![input.clone()]};
-        self.begin()?;
-        for(index,item)in rows.iter().enumerate(){
-            let (sql,values)=if method=="insertRow"{
-                let values=item.as_object().ok_or_else(||DriverError::invalid("插入值无效"))?;let desc=self.describe(id)?;
-                let mut cols=vec![];let mut params=vec![];
-                for(name,value)in values{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}cols.push(n::quote(name,false));params.push(n::cell_param(value)?);}
-                (if cols.is_empty(){format!("INSERT INTO {target} DEFAULT VALUES")}else{format!("INSERT INTO {target} ({}) VALUES ({})",cols.join(","),(1..=params.len()).map(|i|format!("${i}")).collect::<Vec<_>>().join(","))},params)
-            }else{
-                let keys=if method=="applyEdits"{&item["keyValues"]}else{item};let(where_sql,mut values)=self.keys(id,keys)?;
-                if method=="deleteRows"{(format!("DELETE FROM {target} WHERE {where_sql}"),values)}else{
-                    let changes=item["changes"].as_object().ok_or_else(||DriverError::invalid("缺少修改列"))?;if changes.is_empty(){return Err(DriverError::invalid("修改列不能为空"));}
-                    let desc=self.describe(id)?;let mut set=vec![];
-                    for(name,value)in changes{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}values.push(n::cell_param(value)?);set.push(format!("{}=${}",n::quote(name,false),values.len()));}
-                    (format!("UPDATE {target} SET {} WHERE {where_sql}",set.join(",")),values)
-                }
-            };
+        let description=self.describe(id)?;let statements=edit_statements(method,&target,&rows,&description)?;
+        let mut outcomes=vec![];let mut total=0u64;self.begin()?;
+        for(index,(sql,values))in statements.into_iter().enumerate(){
             self.execute("SAVEPOINT dbstudio_edit",&[])?;
-            match self.execute(&sql,&values){Ok(n)if method=="insertRow"||n<=1=>{self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;total+=n;outcomes.push(json!({"index":index,"affected":n,"error":null,"sql":sql}));},result=>{
-                self.execute("ROLLBACK TO SAVEPOINT dbstudio_edit",&[])?;self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;
-                let message=match result{Err(e)=>e.message,_=>"主键编辑影响多行，已回滚该行".into()};outcomes.push(json!({"index":index,"affected":0,"error":message,"sql":sql}));
-            }}
+            let(affected,outcome,rollback)=edit_outcome(index,&sql,method=="insertRow",self.execute(&sql,&values));
+            if rollback{self.execute("ROLLBACK TO SAVEPOINT dbstudio_edit",&[])?;}
+            self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;
+            total+=affected;self.pending+=affected;outcomes.push(outcome);
         }
-        self.pending+=total;Ok(json!({"affected":total,"ok":outcomes.iter().all(|v|v["error"].is_null()),"outcomes":outcomes,"inTransaction":self.active}))
+        Ok(json!({"affected":total,"ok":outcomes.iter().all(|v|v["error"].is_null()),"outcomes":outcomes,"inTransaction":self.active}))
     }
 }
 impl Driver for PostgresDriver {
@@ -274,12 +364,12 @@ impl PostgresDriver {
             "describeTable"=>self.describe(string_argument(&args,0,"tableId")?),
             "runQuery"|"query"=>self.run_query(string_argument(&args,0,"sql")?,args.get(1).unwrap_or(&Value::Null)),
             "previewTable"=>{let sql=format!("SELECT * FROM {}",n::qualified(string_argument(&args,0,"tableId")?,false)?);self.run_query(&sql,&json!({"limit":args.get(1).and_then(Value::as_u64).unwrap_or(200)}))},
-            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let cursor=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let(sql,values)=(cursor.sql.clone(),cursor.values.clone());let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;if let Some((columns,rows))=&cursor.snapshot{return snapshot_page(columns,rows,offset,limit);}self.page(&sql,&values,offset,limit)},
+            "fetchResultPage"|"fetchPage"=>{let id=string_argument(&args,0,"cursorId")?;let cursor=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let(sql,values)=(cursor.sql.clone(),cursor.values.clone());let offset=args.get(1).and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get(2).and_then(Value::as_u64).unwrap_or(200).clamp(1,1000)as usize;if let Some(snapshot)=&cursor.snapshot{return snapshot_page(&snapshot.columns,&snapshot.rows,offset,limit);}self.page(&sql,&values,offset,limit)},
             "closeCursor"=>{self.cursors.remove(string_argument(&args,0,"cursorId")?);Ok(Value::Null)},
             "fetchCellValue"=>{
                 let id=string_argument(&args,0,"cursorId")?;let c=self.cursors.get(id).ok_or_else(||DriverError::new("not-found","游标不存在"))?;let(sql,values)=(c.sql.clone(),c.values.clone());
                 let row=args.get(1).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("行下标无效"))?;let column=args.get(2).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("列下标无效"))? as usize;
-                if let Some((_,rows))=&c.snapshot{let r=rows.get(row as usize).ok_or_else(||DriverError::new("not-found","行不存在"))?;if column>=r.len(){return Err(DriverError::invalid("列下标越界"));}return cell(r,column,true);}
+                if let Some(snapshot)=&c.snapshot{let r=snapshot.rows.get(row as usize).ok_or_else(||DriverError::new("not-found","行不存在"))?;if column>=r.len(){return Err(DriverError::invalid("列下标越界"));}return cell(r,column,true);}
                 let rows=self.query(&format!("SELECT * FROM ({sql}) AS dbstudio_cell LIMIT 1 OFFSET {row}"),&values)?;let r=rows.first().ok_or_else(||DriverError::new("not-found","行不存在"))?;
                 if column>=r.len(){return Err(DriverError::invalid("列下标越界"));}cell(r,column,true)
             },
@@ -300,18 +390,21 @@ impl PostgresDriver {
                     let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
                     // WITH may contain data-changing CTEs. Execute original SQL once, never through a paging wrapper.
                     if ["insert","update","delete","merge","with"].contains(&keyword.as_str()){
-                        self.begin()?;let rows=self.query_snapshot(&sql,&values)?;
+                        let keep=options.get("keepCursor").and_then(Value::as_bool)!=Some(false);
+                        let(count,retained)=snapshot_usage(&self.cursors);
+                        if keep{snapshot_retention(count,retained,0)?;}
+                        self.begin()?;let(rows,bytes)=self.query_snapshot(&sql,&values,if keep{Some((count,retained))}else{None})?;
                         let columns:Vec<_>=stmt.columns().iter().map(|c|json!({"name":c.name(),"type":match *c.type_(){Type::BOOL=>"boolean",Type::INT2|Type::INT4=>"integer",Type::FLOAT4|Type::FLOAT8=>"real",Type::BYTEA=>"blob",_=>"text"}})).collect();
                         if keyword!="with"{self.pending+=rows.len()as u64;}
                         let(offset,limit)=n::page_options(options);let mut result=snapshot_page(&columns,&rows,offset,limit)?;
-                        result["cursorId"]=if options.get("keepCursor").and_then(Value::as_bool)==Some(false){Value::Null}else{self.sequence+=1;let id=format!("pg-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor{sql:sql.clone(),values,snapshot:Some((columns,rows))});json!(id)};
+                        result["cursorId"]=if !keep{Value::Null}else{self.sequence+=1;let id=format!("pg-cur-{}",self.sequence);self.cursors.insert(id.clone(),Cursor{sql:sql.clone(),values,snapshot:Some(Snapshot{columns,rows,bytes})});json!(id)};
                         result["executedSql"]=json!(sql);result["elapsedMs"]=json!(started.elapsed().as_millis()as u64);
                         return Ok(json!({"kind":"rows","result":result}));
                     }
                     return Ok(json!({"kind":"rows","result":self.run_query(original,options)?}));
                 }
                 let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-                if ["begin","start","commit","rollback","savepoint","release","end"].contains(&keyword.as_str()){return Err(DriverError::unsupported("请使用事务API控制事务"));}
+                if ["begin","start","commit","rollback","abort","savepoint","release","end"].contains(&keyword.as_str()) || (keyword == "prepare" && sql.split_whitespace().nth(1).is_some_and(|word| word.eq_ignore_ascii_case("transaction"))){return Err(DriverError::unsupported("请使用事务API控制事务"));}
                 let ddl=["create","drop","alter","truncate","comment","grant","revoke"].contains(&keyword.as_str());
                 if !ddl{self.begin()?;}let affected=self.execute(&sql,&values)?;if !ddl{self.pending+=affected;}
                 Ok(if ddl{json!({"kind":"ddl","summary":"SQL已执行","affected":affected,"committed":!self.active,"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64})}else{json!({"kind":"affected","affected":affected,"inTransaction":self.active,"transactionState":n::transaction_state(self.active,self.pending),"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64})})
@@ -340,5 +433,132 @@ impl PostgresDriver {
             "cancelQuery"=>Ok(json!((self.cancel)()?)),
             _=>Err(DriverError::unsupported("PostgreSQL方法尚未迁移到Rust"))
         }
+    }
+}
+#[cfg(test)]
+mod tests{
+    use super::*;
+    fn description(primary_key:Value)->Value{json!({"columns":[{"name":"id"},{"name":"name"},{"name":"amount"}],"primaryKey":primary_key})}
+    fn number(value:i64)->Value{json!({"kind":"number","value":value})}
+    fn text(value:&str)->Value{json!({"kind":"text","text":value})}
+    fn retained(bytes:usize)->Cursor{Cursor{sql:String::new(),values:vec![],snapshot:Some(Snapshot{columns:vec![],rows:Vec::new(),bytes})}}
+    #[test]
+    fn snapshot_retention_enforces_connection_budget_and_release(){
+        let mut cursors=HashMap::new();assert_eq!(snapshot_usage(&cursors),(0,0));
+        assert!(snapshot_retention(0,0,PG_SNAPSHOT_MAX_BYTES).is_ok());
+        assert!(snapshot_retention(PG_SNAPSHOT_MAX_CURSORS-1,PG_SNAPSHOT_CONNECTION_BYTES-1,1).is_ok());
+        assert_eq!(snapshot_retention(PG_SNAPSHOT_MAX_CURSORS,0,0).err().unwrap().code,"resource-limit");
+        assert_eq!(snapshot_retention(0,PG_SNAPSHOT_CONNECTION_BYTES,1).err().unwrap().code,"resource-limit");
+        cursors.insert("retained".into(),retained(1024));
+        cursors.insert("live".into(),Cursor{sql:"SELECT 1".into(),values:vec![],snapshot:None});
+        assert_eq!(snapshot_usage(&cursors),(1,1024));
+        cursors.insert("second".into(),retained(2048));
+        assert_eq!(snapshot_usage(&cursors),(2,3072));
+        cursors.remove("second");
+        assert_eq!(snapshot_usage(&cursors),(1,1024));
+    }
+    #[test]
+    fn statement_recovery_keeps_known_statement_errors_recoverable(){
+        let(recovered,error)=statement_recovery(DriverError::new("driver-error","SQLSTATE 23505"));
+        assert!(recovered);assert_eq!(error.code,"statement-failed");
+        let(recovered,error)=statement_recovery(DriverError::new("connection_failed","连线中断"));
+        assert!(!recovered);assert_eq!(error.code,"connection_failed");
+        let(recovered,error)=statement_recovery(DriverError::unsupported("PostgreSQL字段类型无法解码"));
+        assert!(recovered);assert_eq!(error.code,"unsupported");
+        assert_eq!(error.message,"PostgreSQL字段类型无法解码");
+    }
+    #[test]
+    fn edit_outcome_maps_row_failures_without_swallowing(){
+        let(affected,outcome,rollback)=edit_outcome(2,"UPDATE t SET name=$1 WHERE id=$2",false,Ok(1));
+        assert_eq!((affected,rollback),(1,false));assert_eq!(outcome["index"],2);assert_eq!(outcome["affected"],1);assert!(outcome["error"].is_null());
+        let(affected,outcome,rollback)=edit_outcome(3,"UPDATE t SET name=$1",false,Ok(2));
+        assert_eq!((affected,rollback),(0,true));assert_eq!(outcome["error"],"主键编辑影响多行，已回滚该行");
+        let(affected,outcome,rollback)=edit_outcome(4,"DELETE FROM t",false,Err(DriverError::new("driver-error","SQLSTATE 23503")));
+        assert_eq!((affected,rollback),(0,true));assert_eq!(outcome["affected"],0);assert_eq!(outcome["error"],"SQLSTATE 23503");
+        let(affected,_,rollback)=edit_outcome(5,"INSERT INTO t DEFAULT VALUES",true,Ok(3));
+        assert_eq!((affected,rollback),(3,false));
+    }
+    #[test]
+    fn edit_statements_validate_whole_batch_before_any_write(){
+        let desc=description(json!(["id"]));let target=r#""public"."orders""#;
+        let statements=edit_statements("applyEdits",target,&[json!({"keyValues":{"id":number(7)},"changes":{"name":text("new")}})],&desc).unwrap();
+        assert_eq!(statements[0].0,r#"UPDATE "public"."orders" SET "name"=$2 WHERE "id"=$1"#);
+        assert_eq!(statements[0].1,vec![json!(7),json!("new")]);
+        let rows=vec![json!({"keyValues":{"id":number(1)},"changes":{"name":text("ok")}}),json!({"keyValues":{"id":number(2)},"changes":{"bogus":number(3)}})];
+        let error=edit_statements("applyEdits",target,&rows,&desc).unwrap_err();
+        assert_eq!(error.code,"invalid-argument");assert!(error.message.contains("第2行"),"{}",error.message);assert!(error.message.contains("未知列"),"{}",error.message);
+        let empty_changes=edit_statements("applyEdits",target,&[json!({"keyValues":{"id":number(1)},"changes":{}})],&desc).unwrap_err();
+        assert_eq!(empty_changes.message,"第1行：修改列不能为空");
+        let missing=edit_statements("applyEdits",target,&[json!({"keyValues":{"other":number(1)},"changes":{"name":text("x")}})],&desc).unwrap_err();
+        assert!(missing.message.contains("缺少主键值"),"{}",missing.message);
+    }
+    #[test]
+    fn edit_statements_build_composite_primary_key_clause(){
+        let desc=json!({"columns":[{"name":"a"},{"name":"b"},{"name":"memo"}],"primaryKey":["a","b"]});let target=r#""s"."t""#;
+        let statements=edit_statements("deleteRows",target,&[json!({"a":number(1),"b":text("k")})],&desc).unwrap();
+        assert_eq!(statements[0].0,r#"DELETE FROM "s"."t" WHERE "a"=$1 AND "b"=$2"#);
+        assert_eq!(statements[0].1,vec![json!(1),json!("k")]);
+        let error=edit_statements("deleteRows",target,&[json!({"a":number(1),"b":text("k"),"memo":text("x")})],&desc).unwrap_err();
+        assert_eq!(error.message,"第1行：必须提供全部且仅有主键列");
+        let no_pk=json!({"columns":[{"name":"a"}],"primaryKey":[]});
+        assert_eq!(edit_statements("deleteRows",target,&[json!({"a":number(1)})],&no_pk).unwrap_err().code,"unsupported");
+        let null_key=json!({"columns":[{"name":"a"}],"primaryKey":["a"]});
+        assert_eq!(edit_statements("deleteRows",target,&[json!({"a":{"kind":"null"}})],&null_key).unwrap_err().message,"第1行：主键不能为NULL");
+    }
+    #[test]
+    fn edit_statements_build_insert_statements(){
+        let desc=description(json!(["id"]));let target=r#""public"."orders""#;
+        let statements=edit_statements("insertRow",target,&[json!({"name":text("a")})],&desc).unwrap();
+        assert_eq!(statements[0].0,r#"INSERT INTO "public"."orders" ("name") VALUES ($1)"#);
+        assert_eq!(statements[0].1,vec![json!("a")]);
+        assert_eq!(edit_statements("insertRow",target,&[json!({})],&desc).unwrap()[0].0,r#"INSERT INTO "public"."orders" DEFAULT VALUES"#);
+        assert_eq!(edit_statements("insertRow",target,&[json!({"bogus":number(1)})],&desc).unwrap_err().message,"第1行：未知列");
+    }
+    fn read_snapshot(bytes:usize)->Cursor{Cursor{sql:String::new(),values:vec![],snapshot:Some(Snapshot{columns:vec![],rows:Vec::new(),bytes})}}
+    #[test]
+    fn snapshot_window_covers_middle_last_and_out_of_range_pages(){
+        assert_eq!(snapshot_bounds(1000,0,200),(0,200,true));
+        assert_eq!(snapshot_bounds(1000,800,200),(800,1000,false));
+        assert_eq!(snapshot_bounds(1000,5000,200),(1000,1000,false));
+        assert_eq!(snapshot_bounds(5,2,10),(2,5,false));
+        assert_eq!(snapshot_bounds(0,0,200),(0,0,false));
+    }
+    #[test]
+    fn snapshot_page_past_retained_rows_returns_empty_page(){
+        let page=snapshot_page(&[],&[],3,5).unwrap();
+        assert_eq!(page["rows"],json!([]));assert_eq!(page["returned"],0);assert_eq!(page["hasMore"],false);assert_eq!(page["offset"],3);
+        let page=snapshot_page(&[],&[],0,5).unwrap();
+        assert_eq!(page["returned"],0);assert_eq!(page["hasMore"],false);
+    }
+    #[test]
+    fn stable_flag_separates_snapshot_and_live_query_pages(){
+        let mut stable=json!({"columns":[],"rows":[],"offset":0,"returned":0,"hasMore":false});
+        mark_query_page(&mut stable,json!("pg-cur-1"),"SELECT 1",7,true);
+        assert_eq!(stable["stable"],true);assert_eq!(stable["cursorId"],"pg-cur-1");
+        assert_eq!(stable["executedSql"],"SELECT 1");assert_eq!(stable["elapsedMs"],7);assert_eq!(stable["hasMore"],false);
+        let mut live=json!({"columns":[],"rows":[],"offset":0,"returned":0,"hasMore":true});
+        mark_query_page(&mut live,Value::Null,"SELECT 1",3,false);
+        assert_eq!(live["stable"],false);assert_eq!(live["cursorId"],Value::Null);assert_eq!(live["hasMore"],true);
+    }
+    #[test]
+    fn read_snapshot_budget_rejects_rows_and_bytes_beyond_limits(){
+        assert_eq!((PG_READ_SNAPSHOT_MAX_ROWS,PG_READ_SNAPSHOT_MAX_BYTES),(5000,16*1024*1024));
+        assert!(read_snapshot_retains(PG_READ_SNAPSHOT_MAX_ROWS,PG_READ_SNAPSHOT_MAX_BYTES));
+        assert!(!read_snapshot_retains(PG_READ_SNAPSHOT_MAX_ROWS+1,0));
+        assert!(!read_snapshot_retains(0,PG_READ_SNAPSHOT_MAX_BYTES+1));
+    }
+    #[test]
+    fn read_snapshot_retention_counts_toward_connection_budget(){
+        let mut cursors=HashMap::new();
+        cursors.insert("returning".into(),retained(1024));
+        cursors.insert("read".into(),read_snapshot(PG_READ_SNAPSHOT_MAX_BYTES));
+        assert_eq!(snapshot_usage(&cursors),(2,PG_READ_SNAPSHOT_MAX_BYTES+1024));
+        assert!(snapshot_retention(2,PG_READ_SNAPSHOT_MAX_BYTES+1024,PG_SNAPSHOT_MAX_BYTES).is_ok());
+        assert_eq!(snapshot_retention(2,PG_READ_SNAPSHOT_MAX_BYTES+1024,PG_SNAPSHOT_CONNECTION_BYTES).err().unwrap().code,"resource-limit");
+        for index in 0..(PG_SNAPSHOT_MAX_CURSORS-2){cursors.insert(format!("read{index}"),read_snapshot(1));}
+        assert_eq!(snapshot_usage(&cursors).0,PG_SNAPSHOT_MAX_CURSORS);
+        assert_eq!(snapshot_retention(PG_SNAPSHOT_MAX_CURSORS,0,0).err().unwrap().code,"resource-limit");
+        cursors.remove("read");
+        assert_eq!(snapshot_usage(&cursors),(PG_SNAPSHOT_MAX_CURSORS-1,1024+(PG_SNAPSHOT_MAX_CURSORS-2)));
     }
 }

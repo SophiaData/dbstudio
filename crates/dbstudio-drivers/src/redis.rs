@@ -92,6 +92,33 @@ pub fn parse_keyspace(info: &str) -> Vec<(u32, u64)> {
 
 pub struct RedisDriver { connection: Option<Connection>, pattern: String }
 
+/// Render a Redis key without losing bytes. UTF-8 keys are shown unchanged;
+/// binary keys escape invalid bytes as `\xNN` and double their backslashes so
+/// two byte-different keys never render the same.
+fn display_key(key: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(key) { return text.to_owned() }
+    let mut output = String::with_capacity(key.len());
+    let mut rest = key;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => { append_text(valid, &mut output); break },
+            Err(error) => {
+                let valid_len = error.valid_up_to();
+                if let Ok(valid) = std::str::from_utf8(&rest[..valid_len]) { append_text(valid, &mut output); }
+                let invalid_len = error.error_len().unwrap_or(rest.len() - valid_len);
+                for byte in &rest[valid_len..valid_len + invalid_len] { output.push_str(&format!("\\x{byte:02x}")); }
+                rest = &rest[valid_len + invalid_len..];
+            }
+        }
+    }
+    output
+}
+fn append_text(text: &str, output: &mut String) {
+    for character in text.chars() {
+        if character == '\\' { output.push_str("\\\\") } else { output.push(character) }
+    }
+}
+
 impl RedisDriver {
     fn list_children(&mut self, parent: Option<&str>) -> DriverResult<Value> {
         let connection = self.connection.as_mut().ok_or_else(|| DriverError::new("backend-unavailable", "Redis 已断开"))?;
@@ -110,11 +137,13 @@ impl RedisDriver {
             .ok_or_else(|| DriverError::new("not-found", "Redis 节点不存在"))?;
         let _: () = redis::cmd("SELECT").arg(db).query(connection).map_err(redis_error)?;
         let started = Instant::now();
-        let mut keys = BTreeSet::<String>::new();
+        // SCAN replies are arbitrary bytes: key identity stays raw through
+        // deduplication and TYPE/PTTL, and only the display boundary decodes.
+        let mut keys = BTreeSet::<Vec<u8>>::new();
         let mut cursor = 0u64;
         let mut truncated = false;
         for round in 0..SCAN_ROUNDS {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN").arg(cursor)
+            let (next, batch): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN").arg(cursor)
                 .arg("MATCH").arg(&self.pattern).arg("COUNT").arg(200)
                 .query(connection).map_err(redis_error)?;
             cursor = next;
@@ -133,6 +162,7 @@ impl RedisDriver {
             let ttl: i64 = redis::cmd("PTTL").arg(&key).query(connection).map_err(redis_error)?;
             let ttl = if ttl == -1 { "永久".to_owned() } else if ttl < 0 { "已过期".to_owned() }
                 else { format!("{} 秒", ttl / 1000 + i64::from(ttl % 1000 != 0)) };
+            let key = display_key(&key);
             refs.push(json!({"id":format!("key:{db}:{key}"),"kind":"folder","name":key,
                 "parentId":parent,"hasChildren":false,"meta":{"type":kind,"ttl":ttl}}));
         }
@@ -165,5 +195,23 @@ impl Driver for RedisDriver {
         // Drop closes TCP directly, with no business command or reconnect.
         self.connection.take();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_key;
+
+    #[test]
+    fn key_display_keeps_text_unchanged_and_binary_keys_lossless() {
+        assert_eq!(display_key(b"alpha"), "alpha");
+        assert_eq!(display_key(b""), "");
+        assert_eq!(display_key("键:β".as_bytes()), "键:β");
+        assert_eq!(display_key(b"a\\b"), "a\\b");
+        assert_eq!(display_key(b"\xff"), "\\xff");
+        assert_eq!(display_key(b"a\xffb\xfe"), "a\\xffb\\xfe");
+        assert_ne!(display_key(b"\xffalpha"), display_key(b"\xfealpha"));
+        assert_ne!(display_key(b"\xff"), display_key(b"\xff\x00"));
+        assert_ne!(display_key(b"\\\xff"), display_key(b"\xff"));
     }
 }

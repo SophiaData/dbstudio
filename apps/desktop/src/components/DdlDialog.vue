@@ -39,7 +39,7 @@ async function submit() {
       } else if (props.node?.kind === 'view') await backend.dropView(props.node.id)
       else if (props.node?.kind === 'table') await backend.dropTable(props.node.id)
       else throw new Error('请选择表或视图对象')
-    }, props.mode === 'rename' || props.mode === 'drop')
+    }, true)
     if (saved) emit('close')
   } catch (cause) { error.value = errorText(cause) }
   finally { busy.value = false }

@@ -21,4 +21,4 @@ export {
   computeErRelations,
   inferSchemaFromObjectId,
   type ErTableInput
-} from '../../../src/renderer/er-relations'
+} from '../../../src/core/er-relations'

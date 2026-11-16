@@ -2,12 +2,13 @@
  * SDK 驱动契约矩阵（P6.1 Step 2）。
  *
  * 用 **SDK 自己的 DriverHost**（进程隔离的真实用法，不是内部 manager）对一个
- * SQLite 库跑一遍驱动必须通过的能力集合：
- *   握手 / 连接 / 列目录 / 表描述 / 查询 / 分页 / 完整值 / 事务 / DDL / 元数据 /
- *   导出块 / 错误码。
+ * SQLite 库跑一遍 SDK 公开面必须通过的能力集合：
+ *   握手 / 连接 / 列目录 / 表描述 / 查询 / 分页 / 截断预览 / 事务 / DDL / 错误码。
  *
  * 目的不是替代各驱动的深度 e2e（那样是 test / test:postgres / test:mysql-contract 的活），
- * 而是锁住**SDK 公开契约的形状**——版本常量、能力字段、以及这 12 类能力在 SDK 层确实可达。
+ * 而是锁住**SDK 公开契约的形状**——版本常量、能力字段、以及这 10 类能力在 SDK 层确实可达。
+ * SDK 公开的 `DriverHost` 不暴露 `fetchCellValue`（完整值回查）与 transfer/export
+ * （导出块）：这两类属于主进程 / 驱动宿主的能力，由各自的契约测试覆盖，不在本矩阵声明。
  * 先在 SQLite（无需外部服务）上钉死；PG/MySQL 的深度能力由各自契约测试覆盖。
  *
  * 依赖：先 `pnpm run build:sdk`（本测试 import sdk/dist）。
@@ -117,10 +118,12 @@ try {
   check('第 2 页 index=1', page2.rows.length === 1 && page2.rows[0].index === 1, JSON.stringify(page2.rows.map((r) => r.index)))
   await host.closeCursor(page1.cursorId)
 
-  console.log('\n[6] 完整值（截断契约）')
+  console.log('\n[6] 截断预览契约（完整值回查不在 SDK 公开面内）')
   const big = await host.query('SELECT bio FROM emp WHERE id = 1')
   const cell = big.rows[0].cells[0]
-  check('超长文本被截断并标记', cell.kind === 'text' && cell.truncated === true && cell.text.length <= 1000, JSON.stringify({ len: cell.text?.length, t: cell.truncated }))
+  check('超长文本被截断并标记', cell.kind === 'text' && cell.truncated === true && cell.text.length === 1000, JSON.stringify({ len: cell.text?.length, t: cell.truncated }))
+  check('截断值只保留前 1000 码点', cell.kind === 'text' && cell.text === 'z'.repeat(1000))
+  check('截断值带原始完整长度 fullLength', cell.kind === 'text' && cell.fullLength === 1500, String(cell.fullLength))
   await host.closeCursor(big.cursorId)
 
   console.log('\n[7] 事务 + 编辑')
@@ -141,11 +144,15 @@ try {
   const ddl = await host.executeStatement('CREATE TABLE extra (id INTEGER PRIMARY KEY)')
   check('DDL 执行成功', ddl.kind === 'affected' || ddl.kind === 'ddl', ddl.kind)
 
-  console.log('\n[9] 错误码')
+  console.log('\n[9] 错误对象（精确 error.code）')
   let qErr = null
   try { await host.query('SELECT * FROM no_such_table_xyz') } catch (e) { qErr = e }
   check('查询不存在的表抛错', Boolean(qErr), String(qErr?.message ?? ''))
   check('错误对象带可读信息', Boolean(qErr?.message) && qErr.message.length > 0)
+  check('SQL 错误码精确为 query_failed', qErr?.code === 'query_failed', String(qErr?.code))
+  let cursorErr = null
+  try { await host.fetchResultPage('cursor:does-not-exist', 0, 1) } catch (e) { cursorErr = e }
+  check('游标错误码精确为 object_not_found', cursorErr?.code === 'object_not_found', String(cursorErr?.code))
 } finally {
   await host.close().catch(() => undefined)
   rmSync(work, { recursive: true, force: true })

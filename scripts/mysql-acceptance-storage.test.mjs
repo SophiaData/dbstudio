@@ -4,10 +4,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync,
-  rmSync, statSync, symlinkSync, writeFileSync
+  statSync, symlinkSync, writeFileSync
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as storageModule from './mysql-acceptance-storage.mjs'
 import {
   MAX_CACHE_BYTES, MIN_AVAILABLE_BYTES, acquireBuildStorage,
@@ -17,9 +18,27 @@ import {
 const NODE = process.execPath
 const PYTHON = '/usr/bin/python3'
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const fixtureRoot = join(project, 'backups', `mysql-acceptance-storage-tests-${randomUUID()}`)
+const fixtureRoot = join(tmpdir(), `mysql-acceptance-storage-tests-${randomUUID()}`)
 mkdirSync(fixtureRoot, { recursive: true, mode: 0o700 })
-after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
+// 夹具根位于系统临时目录，不写入仓库；保留供审查，不执行删除。
+after(() => console.log(`[retained] ${fixtureRoot}`))
+
+const onWindows = process.platform === 'win32'
+const onMacOS = process.platform === 'darwin'
+// 回收链路要求 POSIX 目录权限语义（mode 0o700 / 符号链接权限）与 macOS 的 otool、/usr/bin/python3。
+function skipWithoutPosixRecycle(t) {
+  const reason = onWindows
+    ? 'Windows 无 POSIX 目录权限语义：无法构造 mode 0o700 目录与符号链接权限'
+    : !onMacOS ? '非 macOS：缓存回收链路依赖 macOS /usr/bin/otool 与 /usr/bin/python3' : null
+  if (!reason) return false
+  t.skip(reason)
+  return true
+}
+function skipUnlessMac(t, dependency) {
+  if (onMacOS) return false
+  t.skip(`非 macOS：依赖 macOS ${dependency}`)
+  return true
+}
 
 const HEAVY_STAGES = ['host-negative-and-contract-tests', 'sqlite-smoke-cfg-compile-only', 'debug-test-artifact']
 const EXPECTED_TESTS_BLOCK_SHA256 = 'b6b9512cbdc135cc237ccb7f857ebbedf1937670ad47b2e3289a90f172a2b658'
@@ -47,8 +66,9 @@ function cargoLockPaths(root, runId) {
     join(run, 'target', 'debug', '.cargo-artifact-lock')
   ]
 }
-function writeCargoLocks(root, runId) {
+function writeCargoLocks(root, runId, skip = []) {
   for (const path of cargoLockPaths(root, runId)) {
+    if (skip.includes(basename(path))) continue
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     writeFileSync(path, '', { mode: 0o600 })
   }
@@ -80,9 +100,9 @@ function machO(dependencies) {
   header.writeUInt32LE(commands.reduce((total, command) => total + command.length, 0), 20)
   return Buffer.concat([header, ...commands])
 }
-function successfulRun(root, runId, dependencies = ['/usr/lib/libSystem.B.dylib']) {
+function successfulRun(root, runId, dependencies = ['/usr/lib/libSystem.B.dylib'], options = {}) {
   const run = join(root, 'backups', `mysql-acceptance-host-build-${runId}`)
-  for (const cache of ['deps', 'build', 'incremental']) cacheFile(root, runId, cache)
+  for (const cache of options.caches ?? ['deps', 'build', 'incremental']) cacheFile(root, runId, cache)
   const debug = join(run, 'target', 'debug')
   const binary = join(debug, 'dbstudio-desktop')
   writeFileSync(binary, machO(dependencies), { mode: 0o700 })
@@ -91,7 +111,7 @@ function successfulRun(root, runId, dependencies = ['/usr/lib/libSystem.B.dylib'
   mkdirSync(join(debug, '.fingerprint'), { mode: 0o700 })
   writeFileSync(join(debug, '.fingerprint', 'unit.json'), '{"synthetic":true}', { mode: 0o600 })
   writeFileSync(join(run, 'diagnostic-receipt.json'), '{"passed":false}', { mode: 0o600 })
-  writeCargoLocks(root, runId)
+  writeCargoLocks(root, runId, options.skipLocks ?? [])
   return { run, binary }
 }
 function rejection(action, code) {
@@ -239,7 +259,7 @@ function runSyntheticBuilder(root, config = {}) {
   const binary = join(fixtureRoot, 'testmock-dbstudio-desktop')
   writeMockFile(preload, BUILDER_MOCK_PRELOAD)
   writeFileSync(binary, machO(['/usr/lib/libSystem.B.dylib']), { mode: 0o600 })
-  return spawnSync(NODE, ['--import', preload, join(root, 'scripts', 'build-mysql-acceptance.mjs')], {
+  return spawnSync(NODE, ['--import', pathToFileURL(preload).href, join(root, 'scripts', 'build-mysql-acceptance.mjs')], {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, TESTMOCK_CONFIG: JSON.stringify(config), TESTMOCK_BINARY_PATH: binary }
@@ -309,7 +329,8 @@ test('forged lease owner is preserved and never released', () => {
   assert.equal(readFileSync(owner, 'utf8'), '{"schemaVersion":1,"token":"forged"}\n')
 })
 
-test('success removes only this run three caches and returns a sealed proof', () => {
+test('success removes only this run three caches and returns a sealed proof', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('success')
   const runId = 'c'.repeat(32)
   const { run, binary } = successfulRun(root, runId)
@@ -340,14 +361,14 @@ test('failed build retains its diagnostic caches and receipt is not promoted', (
   rejection(() => verifyStorageReceipt({ storagePolicy: storagePolicyBinding(), storageLifecycle: lifecycle }, runId), 'STORAGE_RECYCLE_PROOF_INVALID')
 })
 
-test('symlink and outside-root target reject before unlinking', () => {
+test('symlink and outside-root target reject before unlinking', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('symlink')
   const runId = 'e'.repeat(32)
-  const { run } = successfulRun(root, runId)
+  const { run } = successfulRun(root, runId, undefined, { caches: ['build', 'incremental'] })
   const outside = join(root, 'outside.bin')
   writeFileSync(outside, 'outside-must-survive')
   const cache = join(run, 'target', 'debug', 'deps')
-  rmSync(cache, { recursive: true })
   symlinkSync(root, cache, 'dir')
   const controller = controllerWithHeavyStages(root, runId)
   const lifecycle = controller.close({ runId, passed: true })
@@ -357,7 +378,8 @@ test('symlink and outside-root target reject before unlinking', () => {
   assert.equal(lstatSync(cache).isSymbolicLink(), true)
 })
 
-test('external hardlink rejects and preserves both links', () => {
+test('external hardlink rejects and preserves both links', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('hardlink')
   const runId = 'f'.repeat(32)
   const { run } = successfulRun(root, runId)
@@ -371,7 +393,8 @@ test('external hardlink rejects and preserves both links', () => {
   assert.equal(readFileSync(cache, 'utf8'), readFileSync(outside, 'utf8'))
 })
 
-test('dynamic dependency inside a recyclable cache rejects', () => {
+test('dynamic dependency inside a recyclable cache rejects', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('dynamic-dependency')
   const runId = '1'.repeat(32)
   const dependency = join(root, 'backups', `mysql-acceptance-host-build-${runId}`, 'target', 'debug', 'deps', 'libdynamic.dylib')
@@ -399,7 +422,8 @@ test('helper SHA drift and forged recycle proof are rejected', () => {
 
 // --- A: production Builder seam ---------------------------------------------
 
-test('the builder entry closes the real run with a bare run id and publishes a verifiable receipt', () => {
+test('the builder entry closes the real run with a bare run id and publishes a verifiable receipt', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = syntheticBuilderRepo('builder-entry')
   const expected = builderExpectedTests()
   assert.equal(expected.length, 140)
@@ -435,7 +459,8 @@ test('a prefixed run alias is never accepted as a run id', () => {
 
 // --- B: hardlink closure -----------------------------------------------------
 
-test('an internal hardlink inside one cache is reclaimed and both aliases disappear', () => {
+test('an internal hardlink inside one cache is reclaimed and both aliases disappear', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('hardlink-internal')
   const runId = '8'.repeat(32)
   const { run } = successfulRun(root, runId)
@@ -450,7 +475,8 @@ test('an internal hardlink inside one cache is reclaimed and both aliases disapp
   assert.equal(existsSync(second), false)
 })
 
-test('an internal hardlink across two caches is reclaimed and counted once', () => {
+test('an internal hardlink across two caches is reclaimed and counted once', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('hardlink-cross-cache')
   const runId = '9'.repeat(32)
   const { run } = successfulRun(root, runId)
@@ -468,7 +494,8 @@ test('an internal hardlink across two caches is reclaimed and counted once', () 
   assert.equal(existsSync(second), false)
 })
 
-test('a protected alias rejects the recycle and preserves the protected file', () => {
+test('a protected alias rejects the recycle and preserves the protected file', t => {
+  if (skipWithoutPosixRecycle(t)) return
   const root = caseRoot('hardlink-protected')
   const runId = 'a'.repeat(32)
   const run = join(root, 'backups', `mysql-acceptance-host-build-${runId}`)
@@ -510,7 +537,8 @@ test('the maximum cache bytes are exactly eight gibibytes and the threshold is e
 
 // --- D: dynamic dependency fail closed ---------------------------------------
 
-test('an @rpath dependency is parsed and then rejected', () => {
+test('an @rpath dependency is parsed and then rejected', t => {
+  if (skipUnlessMac(t, '/usr/bin/otool')) return
   const root = caseRoot('dependency-rpath')
   const runId = 'b'.repeat(32)
   const { run, binary } = successfulRun(root, runId, ['@rpath/libmissing.dylib'])
@@ -522,7 +550,8 @@ test('an @rpath dependency is parsed and then rejected', () => {
   assert.equal(existsSync(join(run, 'target', 'debug', 'deps', 'cache.bin')), true)
 })
 
-test('an @loader_path dependency is parsed and then rejected', () => {
+test('an @loader_path dependency is parsed and then rejected', t => {
+  if (skipUnlessMac(t, '/usr/bin/otool')) return
   const root = caseRoot('dependency-loader-path')
   const runId = 'c'.repeat(32)
   const { run, binary } = successfulRun(root, runId, ['@loader_path/libmissing.dylib'])
@@ -534,7 +563,8 @@ test('an @loader_path dependency is parsed and then rejected', () => {
   assert.equal(existsSync(join(run, 'target', 'debug', 'deps', 'cache.bin')), true)
 })
 
-test('a relative install name is parsed and then rejected', () => {
+test('a relative install name is parsed and then rejected', t => {
+  if (skipUnlessMac(t, '/usr/bin/otool')) return
   const root = caseRoot('dependency-relative')
   const runId = 'd'.repeat(32)
   const { run, binary } = successfulRun(root, runId, ['deps/librelative.dylib'])
@@ -546,7 +576,8 @@ test('a relative install name is parsed and then rejected', () => {
   assert.equal(existsSync(join(run, 'target', 'debug', 'deps', 'cache.bin')), true)
 })
 
-test('an absolute dependency outside the caches is accepted', () => {
+test('an absolute dependency outside the caches is accepted', t => {
+  if (skipUnlessMac(t, '/usr/bin/otool')) return
   const root = caseRoot('dependency-absolute-outside')
   const runId = 'e'.repeat(32)
   const library = join(fixtureRoot, 'outside-library.dylib')
@@ -558,7 +589,8 @@ test('an absolute dependency outside the caches is accepted', () => {
   assert.equal(lifecycle.recycle.passed, true)
 })
 
-test('an unknown binary format fails closed', () => {
+test('an unknown binary format fails closed', t => {
+  if (skipUnlessMac(t, '/usr/bin/otool')) return
   const root = caseRoot('dependency-unknown-format')
   const runId = 'f'.repeat(32)
   const { run, binary } = successfulRun(root, runId)
@@ -588,7 +620,8 @@ sys.stdout.flush()
 sys.stdin.read()
 `
 
-test('a real cargo lock held by another process blocks the recycle with zero deletions', async () => {
+test('a real cargo lock held by another process blocks the recycle with zero deletions', async t => {
+  if (skipUnlessMac(t, '/usr/bin/python3（POSIX flock 回收器）')) return
   for (const [index, lockName] of ['.cargo-lock', '.cargo-build-lock', '.cargo-artifact-lock'].entries()) {
     const root = caseRoot(`cargo-lock-busy-${index}`)
     const runId = '5'.repeat(32)
@@ -627,13 +660,13 @@ test('a real cargo lock held by another process blocks the recycle with zero del
   }
 })
 
-test('a missing cargo lock rejects the recycle and is never created', () => {
+test('a missing cargo lock rejects the recycle and is never created', t => {
+  if (skipUnlessMac(t, '/usr/bin/python3（POSIX flock 回收器）')) return
   for (const [index, lockName] of ['.cargo-lock', '.cargo-build-lock', '.cargo-artifact-lock'].entries()) {
     const root = caseRoot(`cargo-lock-missing-${index}`)
     const runId = '6'.repeat(32)
-    const { run } = successfulRun(root, runId)
+    const { run } = successfulRun(root, runId, undefined, { skipLocks: [lockName] })
     const missing = join(run, 'target', 'debug', lockName)
-    rmSync(missing)
     const controller = controllerWithHeavyStages(root, runId)
     const lifecycle = controller.close({ runId, passed: true })
     assert.equal(lifecycle.recycle.passed, false)
@@ -643,13 +676,13 @@ test('a missing cargo lock rejects the recycle and is never created', () => {
   }
 })
 
-test('an unsafe cargo lock rejects the recycle and is never replaced', () => {
+test('an unsafe cargo lock rejects the recycle and is never replaced', t => {
+  if (skipUnlessMac(t, '/usr/bin/python3（POSIX flock 回收器）')) return
   for (const [index, lockName] of ['.cargo-lock', '.cargo-build-lock', '.cargo-artifact-lock'].entries()) {
     const root = caseRoot(`cargo-lock-unsafe-${index}`)
     const runId = '2'.repeat(32)
-    const { run } = successfulRun(root, runId)
+    const { run } = successfulRun(root, runId, undefined, { skipLocks: [lockName] })
     const unsafe = join(run, 'target', 'debug', lockName)
-    rmSync(unsafe)
     mkdirSync(unsafe, { mode: 0o700 })
     const controller = controllerWithHeavyStages(root, runId)
     const lifecycle = controller.close({ runId, passed: true })
@@ -660,7 +693,8 @@ test('an unsafe cargo lock rejects the recycle and is never replaced', () => {
   }
 })
 
-test('real Cargo profile lock layout works without root/deps .cargo-lock', () => {
+test('real Cargo profile lock layout works without root/deps .cargo-lock', t => {
+  if (skipUnlessMac(t, '/usr/bin/python3（POSIX flock 回收器）')) return
   const root = caseRoot('cargo-lock-real-profile-layout')
   const runId = '7'.repeat(32)
   const { run } = successfulRun(root, runId)
@@ -768,7 +802,7 @@ const controller = acquireBuildStorage({ root })
 const closed = controller.close({ runId: null, passed: false })
 process.stdout.write(JSON.stringify({ first, released: closed.leaseReleased, entries: readdirSync(join(root, 'backups')) }) + '\\n')
 `)
-  const result = spawnSync(NODE, ['--import', preload, driver, root], {
+  const result = spawnSync(NODE, ['--import', pathToFileURL(preload).href, driver, root], {
     encoding: 'utf8',
     env: { ...process.env, TESTMOCK_CONFIG: JSON.stringify({ failOpenSuffix: 'owner.json' }) }
   })
@@ -801,7 +835,7 @@ test('the expected test names and build stages stay byte identical', () => {
   const source = builderSourceText()
   const start = source.indexOf('const expectedTests = [')
   const end = source.indexOf('].sort()', start) + '].sort()'.length
-  assert.equal(createHash('sha256').update(source.slice(start, end)).digest('hex'), EXPECTED_TESTS_BLOCK_SHA256)
+  assert.equal(createHash('sha256').update(source.slice(start, end).replaceAll('\r\n', '\n')).digest('hex'), EXPECTED_TESTS_BLOCK_SHA256)
   const stages = [...source.matchAll(/command\('([a-z0-9-]+)'/g)].map(match => match[1])
   assert.equal(createHash('sha256').update(JSON.stringify(stages)).digest('hex'), EXPECTED_STAGE_SEQUENCE_SHA256)
   assert.equal(stages.length, 7)

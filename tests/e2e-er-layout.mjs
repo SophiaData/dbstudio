@@ -37,7 +37,7 @@ await build({
     target: 'node22',
     ssr: true,
     minify: false,
-    lib: { entry: resolve(root, 'src/renderer/er-layout.ts'), formats: ['cjs'] },
+    lib: { entry: resolve(root, 'src/core/er-layout.ts'), formats: ['cjs'] },
     rollupOptions: { output: { entryFileNames: 'er-layout.cjs' } }
   }
 })

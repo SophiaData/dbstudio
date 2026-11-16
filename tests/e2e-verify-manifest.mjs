@@ -58,6 +58,10 @@ const notSteps = new Set([
   'test:native-desktop',
   'test:native-release',
   'test:native-ui-models',
+  // Native desktop checks are registered in native-verify.yml; keep them out of this legacy manifest.
+  'test:native-test-output',
+  'test:native-host',
+  'test:native-host-gate',
   'dev',
   'preview',
   'build',
@@ -127,6 +131,18 @@ check(
   'SDK 也有独立版本号（发布时要分别标注）',
   typeof pkg.version === 'string' && pkg.version.length > 0
 )
+
+
+console.log('\n[7] 外部验证跳过标记')
+const verifySource = readFileSync(resolve(root, 'scripts/verify.mjs'), 'utf8')
+const skipPattern = verifySource.match(/function hasExplicitSkip\(output\) \{\s*return (\/[^\n]+\/[a-z]*)\.test\(output\)\s*\}/)
+check('跳过标记规则可定位', skipPattern !== null)
+if (skipPattern) {
+  const pattern = new RegExp(skipPattern[1].slice(1, skipPattern[1].lastIndexOf('/')), skipPattern[1].slice(skipPattern[1].lastIndexOf('/') + 1))
+  check('识别带图标的 SKIP', pattern.test('  ⏭️  SKIP 缺少外部测试环境'))
+  check('识别常规 SKIP', pattern.test('  SKIP 缺少外部测试环境'))
+  check('普通输出不被识别为跳过', !pattern.test('测试正常通过'))
+}
 
 console.log(`\n===== 验证清单一致性：${pass} 通过 / ${fail} 失败 =====`)
 if (fail > 0) process.exit(1)

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { computeErRelations, relationStatusToken, type ErRelation, type ErTableInput } from '../../../../src/renderer/er-relations'
-import { buildErLayoutKey, loadErLayout, saveErLayout, type ErLayoutPositions } from '../../../../src/renderer/er-layout'
+import { computeErRelations, relationStatusToken, type ErRelation, type ErTableInput } from '../../../../src/core/er-relations'
+import { buildErLayoutKey, loadErLayout, saveErLayout, type ErLayoutPositions } from '../../../../src/core/er-layout'
 import { backend, errorText, saveTextExport } from '../backend'
 import { connectionNode, type Workbench } from '../workbench'
 import type { ObjectRef } from '../../../../src/core/model'

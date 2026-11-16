@@ -9,13 +9,18 @@
  * PG 的结构元数据只能从**真实服务端的 pg_catalog** 读，
  * 没有办法像 SQLite 那样在内存库里造一个等价环境。
  * 所以这个测试：
- *   1. 建一个**临时 schema**（带 pid 后缀），在里面造齐
+ *   1. 建一个**临时 schema**（随机 run 后缀），在里面造齐
  *      复合主键 / 复合外键 / 唯一索引 / 普通索引 / 部分索引 /
  *      表达式索引 / CHECK / 触发器 / 无关系表；
  *   2. 通过**真实 driver-host 进程**（`out/driver-host/index.js --dialect postgresql`）
  *      调 `describeTable`，验证契约字段真的被带回来了；
- *   3. **只清理自己创建的对象**——临时 schema 整个 DROP，
- *      不碰用户的 public schema，不删别人的表。
+ *   3. **不删除任何对象**——临时 schema 随机命名并在结束后保留，
+ *      打印名称供人工清理；不碰用户的 public schema，不删别人的表。
+ *
+ * ===== 必须显式确认目标库是专用测试库 =====
+ *
+ * 本测试会创建 schema、表、索引与触发器。`DBSTUDIO_PG_DEDICATED=1`
+ * 未设置时打印原因并以非零码退出，**不建立任何连接**。
  *
  * ===== 没有 PG 环境时必须跳过，不能硬失败 =====
  *
@@ -24,10 +29,12 @@
  *
  * 运行：
  *   node scripts/build-driver-host.mjs
- *   DBSTUDIO_PG_URL=postgres://user@127.0.0.1:5432/postgres node tests/e2e-postgresql-metadata.mjs
+ *   DBSTUDIO_PG_URL=postgres://user@127.0.0.1:5432/postgres \
+ *     DBSTUDIO_PG_DEDICATED=1 node tests/e2e-postgresql-metadata.mjs
  */
 
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,16 +48,29 @@ if (!PG_URL) {
   console.log('跳过：未配置 PG 连接（环境变量 DBSTUDIO_PG_URL）。')
   console.log('  SQLite 元数据回归仍然有效（node tests/e2e-sqlite-metadata.mjs）。')
   console.log('  要跑 PG 元数据测试：')
-  console.log('    DBSTUDIO_PG_URL=postgres://user@127.0.0.1:5432/postgres node tests/e2e-postgresql-metadata.mjs')
+  console.log('    DBSTUDIO_PG_URL=postgres://user@127.0.0.1:5432/postgres \\')
+  console.log('      DBSTUDIO_PG_DEDICATED=1 node tests/e2e-postgresql-metadata.mjs')
   process.exit(0)
+}
+
+// 专用库闸门：必须在任何连接/DDL 之前通过。只认显式 opt-in，缺省即拒绝。
+if (process.env['DBSTUDIO_PG_DEDICATED'] !== '1') {
+  console.error('拒绝运行：PG 元数据测试会在目标库创建 schema、表、索引与触发器。')
+  console.error('  已设置 DBSTUDIO_PG_URL，但没有显式确认它是专用测试库。')
+  console.error('  只对一次性的专用 PostgreSQL 实例/库执行，并设置 DBSTUDIO_PG_DEDICATED=1。')
+  console.error('  本测试不删除任何对象；结束后保留随机命名的 schema，需人工清理。')
+  process.exit(1)
 }
 
 const RPC_TIMEOUT_MS = 20_000
 const HANDSHAKE_TIMEOUT_MS = 15_000
 const EXIT_TIMEOUT_MS = 10_000
 
-/** 临时 schema 名。带上进程 id，避免与并发运行互相干扰。 */
-const PROBE_SCHEMA = `dbstudio_meta_probe_${process.pid}`
+/** 本 run 的随机标识：并发运行、重跑、PID 复用都不会撞名。 */
+const RUN_ID = `${Date.now()}_${randomBytes(6).toString('hex')}`
+
+/** 临时 schema 名。本测试只创建、不删除，结束后保留并打印。 */
+const PROBE_SCHEMA = `dbstudio_meta_probe_${RUN_ID}`
 
 const results = []
 
@@ -72,6 +92,19 @@ function formatDetail(detail) {
     return JSON.stringify(detail)
   } catch {
     return String(detail)
+  }
+}
+
+/** 统一汇总：成功与异常终止两条路径都要打印结果并决定退出码。 */
+function summarize() {
+  const passed = results.filter((r) => r.passed).length
+  const failed = results.filter((r) => !r.passed).length
+  console.log('─'.repeat(70))
+  console.log(`选中 ${results.length} / 通过 ${passed} / 失败 ${failed}`)
+  if (failed > 0) {
+    console.log('失败项：')
+    for (const item of results.filter((r) => !r.passed)) console.log(`  - ${item.name}`)
+    process.exitCode = 1
   }
 }
 
@@ -222,7 +255,7 @@ function parsePgUrl(url) {
  *   - 无任何关系的表            → 空数组（区别于 undefined）
  */
 async function createFixture(client) {
-  await client.query(`DROP SCHEMA IF EXISTS ${PROBE_SCHEMA} CASCADE`)
+  // 随机名只会是本 run 新建的；不用 IF NOT EXISTS，撞名就明确失败而不是接管已有 schema。
   await client.query(`CREATE SCHEMA ${PROBE_SCHEMA}`)
 
   // 被引用的父表：复合主键 + 复合唯一约束 + CHECK
@@ -312,13 +345,13 @@ async function createFixture(client) {
   await client.query(`CREATE VIEW ${PROBE_SCHEMA}.plain_view AS SELECT id, label FROM ${PROBE_SCHEMA}.plain`)
 }
 
-async function dropFixture(client) {
-  try {
-    await client.query(`DROP SCHEMA IF EXISTS ${PROBE_SCHEMA} CASCADE`)
-  } catch {
-    // 清理失败不应该让测试结论失真——但要让人看得见。
-    console.warn(`  警告：临时 schema ${PROBE_SCHEMA} 清理失败，请手动清理。`)
-  }
+/**
+ * 保留式收尾：不删除本 run 创建的任何对象。
+ *
+ * schema 名带随机 run 后缀，不会与后续运行碰撞；名称打印出来供人工清理。
+ */
+function reportRetainedFixture() {
+  console.log(`保留 schema ${PROBE_SCHEMA}：本测试不执行删除，确认属专用测试库后请人工清理。`)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +363,7 @@ async function main() {
   console.log('P3.2 PostgreSQL 结构元数据：describeTable 契约')
   console.log(`      连接 ${PG_URL.replace(/:[^:@/]*@/, ':****@')}`)
   console.log(`      临时 schema ${PROBE_SCHEMA}`)
+  console.log('      专用库闸门 DBSTUDIO_PG_DEDICATED=1 已确认；本测试不删除任何对象')
   console.log('─'.repeat(70))
 
   const info = parsePgUrl(PG_URL)
@@ -360,7 +394,7 @@ async function main() {
     })
     if (conn.ok !== true) {
       check('2. connect 成功', false, formatDetail(conn.error))
-      return
+      throw new Error('connect 失败，终止后续检查')
     }
     check(
       '2. connect 成功，能力声明含 metadata 五项全为 true',
@@ -376,7 +410,7 @@ async function main() {
     const childDesc = await host.call('describeTable', { id: `table:${PROBE_SCHEMA}.child` })
     if (childDesc.ok !== true) {
       check('3. describeTable 读取子表成功', false, formatDetail(childDesc.error))
-      return
+      throw new Error('describeTable 读取子表失败，终止后续检查')
     }
     const child = childDesc.result
     check('3. describeTable 读取子表成功', true)
@@ -558,7 +592,7 @@ async function main() {
     // ---- 参数化：名字里带引号/分号的 schema 不该造成注入 ----
     // 标识符在 DDL 里无法参数化，只能按 PG 规则加引号（内部 " 翻倍）；
     // 但**读**路径必须走 $1/$2 参数——这里验证的正是读路径。
-    const hostileRaw = `dbstudio_"quoted";drop_${process.pid}`
+    const hostileRaw = `dbstudio_"quoted";drop_${RUN_ID}`
     const hostile = `"${hostileRaw.replace(/"/g, '""')}"`
     await admin.query(`CREATE SCHEMA ${hostile}`)
     await admin.query(`CREATE TABLE ${hostile}.t (id int PRIMARY KEY)`)
@@ -568,25 +602,18 @@ async function main() {
       hostileDesc.ok === true && hostileDesc.result?.columns?.length === 1,
       formatDetail(hostileDesc.error ?? hostileDesc.result?.columns)
     )
-    await admin.query(`DROP SCHEMA ${hostile} CASCADE`)
+    console.log(`      保留注入探测 schema ${hostileRaw}（同样不删除）`)
   } finally {
     if (host !== null) await host.close()
-    await dropFixture(admin)
+    reportRetainedFixture()
     await admin.end()
   }
 
-  const passed = results.filter((r) => r.passed).length
-  const failed = results.filter((r) => !r.passed).length
-  console.log('─'.repeat(70))
-  console.log(`选中 ${results.length} / 通过 ${passed} / 失败 ${failed}`)
-  if (failed > 0) {
-    console.log('失败项：')
-    for (const item of results.filter((r) => !r.passed)) console.log(`  - ${item.name}`)
-    process.exitCode = 1
-  }
+  summarize()
 }
 
 main().catch((error) => {
   console.error('测试异常终止：', error)
+  summarize()
   process.exitCode = 1
 })

@@ -9,7 +9,7 @@ import type { CellValue, QueryResult, ResultPage, ResultRow, RowUpdate, SqlParam
 import type { RecordSqlHistoryInput } from '../../../src/core/sql-library'
 import { splitStatements, SQLITE_SCRIPT_RULES } from '../../../src/core/sql-script'
 import { extractSqlParameters, bindSqlParameters, type SqlParameterDialect } from '../../../src/core/sql-parameters'
-import { parseFilter, buildFilteredSql } from '../../../src/renderer/filter-sql'
+import { parseFilter, buildFilteredSql } from '../../../src/core/filter-sql'
 import { backend, errorText, migrationStatus } from './backend'
 import { askDecision, confirmAction } from './dialogs'
 import {

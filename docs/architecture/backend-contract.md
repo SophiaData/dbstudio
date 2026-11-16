@@ -1,8 +1,10 @@
 # Backend contract 与 transport 边界
 
-## 当前分层
+本文描述 legacy Electron 与独立 Node HTTP backend 的契约和 transport 边界。当前原生桌面使用 Tauri + Vue + Rust，架构见 [原生架构](tauri-vue-rust.md)；本文的 Electron/HTTP 入口不参与原生桌面默认运行。
 
-dbstudio 的业务调用通过 application backend contract 进入主进程服务。Electron 仍然是桌面组合根：
+## Legacy Electron 分层
+
+legacy Electron 的业务调用通过 application backend contract 进入主进程服务，Electron 是该实现的桌面组合根：
 
 ```text
 renderer

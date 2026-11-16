@@ -80,7 +80,7 @@ function parseArgs(args) {
 }
 
 function hasExplicitSkip(output) {
-  return /(?:^|\n)\s*(?:SKIP|跳过|⊘)/m.test(output)
+  return /(?:^|\n)\s*(?:⏭️\s*)?(?:SKIP|跳过|⊘)/m.test(output)
 }
 
 function hasSetupBlock(output) {

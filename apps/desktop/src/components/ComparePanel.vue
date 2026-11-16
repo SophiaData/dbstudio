@@ -20,6 +20,8 @@ const error = ref('')
 const structure = ref<StructureDiff | null>(null)
 const data = ref<DataCompareResult | null>(null)
 const resultTarget = ref('')
+watch(source, () => { sourceTable.value = ''; sourceSchema.value = '' }, { flush: 'sync' })
+watch(target, () => { targetTable.value = ''; targetSchema.value = '' }, { flush: 'sync' })
 watch([mode, source, target, sourceSchema, targetSchema, sourceTable, targetTable, keyColumns, maxRows], () => {
   structure.value = null; data.value = null; resultTarget.value = ''
 }, { flush: 'sync' })
@@ -44,6 +46,7 @@ async function compare() {
       structure.value = diffSchema(left, right, dialect)
     } else {
       if (!sourceTable.value || !targetTable.value) throw new Error('请先展开左侧对象树，再选择需要比较的表')
+      if (connectionOf(sourceTable.value) !== source.value || connectionOf(targetTable.value) !== target.value) throw new Error('所选表与比较连接不一致，请重新选择')
       data.value = await backend.compareTableData({ sourceTableNodeId: sourceTable.value, targetTableNodeId: targetTable.value, keyColumns: keyColumns.value.trim() ? keyColumns.value.split(',').map((name) => name.trim()).filter(Boolean) : undefined, maxRows: maxRows.value })
     }
     resultTarget.value = capturedTarget
@@ -62,6 +65,6 @@ defineExpose({ compare, mode, source, target, sourceTable, targetTable, structur
     </fieldset><p v-if="error" class="inline-error" role="alert">{{ error }}</p><p v-for="(warning, index) in warnings" :key="index" class="warning">{{ warning }}</p>
     <template v-if="structure"><p>{{ structure.changes.length }} 处结构差异{{ structure.destructive ? ' · 含破坏性变更' : '' }}</p><table class="data-table"><thead><tr><th>动作</th><th>对象</th><th>目标</th><th>性质</th></tr></thead><tbody><tr v-for="(change, index) in structure.changes" :key="index"><td>{{ change.kind }}</td><td>{{ change.objectType }}</td><td>{{ change.target }}</td><td>{{ change.destructive ? '需审阅破坏性变更' : '新增/修改' }}</td></tr></tbody></table></template>
     <template v-if="data"><p>新增 {{ data.plan.insertCount }} · 修改 {{ data.plan.updateCount }} · 删除 {{ data.plan.deleteCount }} · 比较键 {{ data.keyColumns.join(', ') }}</p><table class="data-table"><thead><tr><th>状态</th><th>键</th><th>差异列</th></tr></thead><tbody><tr v-for="(row, index) in data.rows" :key="index"><td>{{ row.status }}</td><td>{{ JSON.stringify(row.key) }}</td><td>{{ row.columns.join(', ') }}</td></tr></tbody></table></template>
-    <div v-if="structure || data" class="sql-plan"><div class="actions"><strong>同步 SQL 预览</strong><span class="spacer" /><button :disabled="!statements.length || !resultTarget" @click="emit('sql', resultTarget, statements.join('\n'))">载入目标 SQL 编辑器</button></div><pre>{{ statements.join('\n') || '没有需要同步的 SQL；未覆盖的元数据请参见提示。' }}</pre></div>
+    <div v-if="structure || data" class="sql-plan"><div class="actions"><strong>同步 SQL 预览</strong><span class="spacer" /><button :disabled="!statements.length || !resultTarget" @click="emit('sql', resultTarget, statements.join(';\n'))">载入目标 SQL 编辑器</button></div><pre>{{ statements.join(';\n') || '没有需要同步的 SQL；未覆盖的元数据请参见提示。' }}</pre></div>
   </div></section>
 </template>

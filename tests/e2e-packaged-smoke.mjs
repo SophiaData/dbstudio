@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, posix, resolve, win32 } from 'node:path'
 import {
   assertPackagedRuntime,
   packagedMetadataReader,
@@ -66,7 +66,23 @@ try {
     const config = sqliteSmokeConnection(join(work, 'smoke.db'))
     assert.equal(config.dialectId, 'sqlite')
     assert.notEqual(config.options.file, ':memory:')
-    assert.ok(config.options.file.startsWith('/'), `expected an absolute path, got ${config.options.file}`)
+    assert.ok(isAbsolute(config.options.file), `expected an absolute path, got ${config.options.file}`)
+  })
+
+  await test('absolute path detection accepts Windows drive, UNC and POSIX forms, rejects relative forms', () => {
+    // 冒烟脚本的路径判定必须跨平台：Windows 盘符/UNC 与 POSIX 的 / 都是绝对路径。
+    const absolute = [
+      ['C:\\dbstudio\\smoke.db', win32],
+      ['\\\\server\\share\\smoke.db', win32],
+      ['/tmp/dbstudio/smoke.db', posix]
+    ]
+    for (const [file, impl] of absolute) {
+      assert.equal(impl.isAbsolute(file), true, `expected an absolute path: ${file}`)
+    }
+    for (const file of ['smoke.db', 'out/smoke.db', '.\\smoke.db', '..\\smoke.db', ':memory:']) {
+      assert.equal(win32.isAbsolute(file), false, `expected a relative path: ${file}`)
+      assert.equal(posix.isAbsolute(file), false, `expected a relative path: ${file}`)
+    }
   })
 
   await test('sqlite smoke connection file is created before connecting', async () => {
@@ -108,7 +124,8 @@ try {
     assert.match(source, /evidence: 'unpacked-executable'/)
   })
 } finally {
-  await rm(work, { recursive: true, force: true })
+  // 保留临时目录供审查，不执行删除。
+  console.log(`[retained] ${work}`)
 }
 
 console.log(`Packaged smoke unit tests: ${passed} passed`)

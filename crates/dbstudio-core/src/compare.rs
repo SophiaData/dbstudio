@@ -191,6 +191,26 @@ fn binary(column: &Value) -> bool {
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .any(|part| ["blob", "tinyblob", "mediumblob", "longblob", "bytea", "binary", "varbinary", "image"].contains(&part))
 }
+/// Columns that accept explicit values on the target table.
+///
+/// Every described column must expose the `generated` marker; a description
+/// that omits it cannot prove writability, so the whole write plan is refused
+/// instead of guessing. Generated (virtual/stored), hidden and identity ALWAYS
+/// columns are excluded. Identity BY DEFAULT and auto-increment stay writable.
+fn writable_columns(columns: &[Value]) -> Result<BTreeSet<String>, AppError> {
+    if columns.is_empty() { return Err(invalid("目标表列描述为空，无法确认可写列，已拒绝生成数据同步计划")) }
+    let mut writable = BTreeSet::new();
+    for column in columns {
+        let name = text(&column["name"], "列名称无效")?;
+        let generated = column.get("generated")
+            .ok_or_else(|| invalid("目标表列描述缺少生成列标记，无法确认可写列，已拒绝生成数据同步计划"))?;
+        let generated = generated.as_bool() == Some(true) || generated.as_str().is_some_and(|value| !value.is_empty());
+        let hidden = column["hidden"].as_bool() == Some(true);
+        let identity = column["identity"].as_str() == Some("always") || column["identityGeneration"].as_str() == Some("always");
+        if !generated && !hidden && !identity { writable.insert(name.to_owned()); }
+    }
+    Ok(writable)
+}
 fn quote(name: &str, dialect: &str) -> String {
     if dialect == "mysql" { format!("`{}`", name.replace('`', "``")) } else { format!("\"{}\"", name.replace('"', "\"\"")) }
 }
@@ -336,6 +356,7 @@ fn compare_tables(app: &Application, args: &[Value]) -> Result<Value, AppError> 
     };
     let source_columns = columns(&call(&source.session, "describeTable", vec![json!(source.raw)])?)?;
     let target_columns = columns(&call(&target.session, "describeTable", vec![json!(target.raw)])?)?;
+    let writable = writable_columns(&target_columns)?;
     let mut primary: Vec<_> = source_columns.iter().filter(|c| c["primaryKeyOrdinal"].as_u64().is_some_and(|ordinal| ordinal > 0)).collect();
     primary.sort_by_key(|c| c["primaryKeyOrdinal"].as_u64());
     let keys: Vec<String> = match request.get("keyColumns") {
@@ -360,7 +381,7 @@ fn compare_tables(app: &Application, args: &[Value]) -> Result<Value, AppError> 
     let mut bytes = 0;
     let source_rows = read_rows(&source, &comparable, &keys, max_rows, &mut bytes)?;
     let target_rows = read_rows(&target, &comparable, &keys, max_rows, &mut bytes)?;
-    let mut result = diff_rows(&source_rows, &target_rows, &keys, &target)?;
+    let mut result = diff_rows(&source_rows, &target_rows, &keys, &target, &writable)?;
     let warnings = result["plan"]["warnings"].as_array_mut().ok_or_else(|| invalid("比较计划无效"))?;
     if !binary.is_empty() { warnings.push(json!(format!("二进制列不参与数据比较：{}。", binary.join(", ")))); }
     let source_only = source_names.difference(&target_names).copied().collect::<Vec<_>>();
@@ -438,7 +459,7 @@ fn order_keys(a: &Row, b: &Row, keys: &[String]) -> Ordering {
     }
     Ordering::Equal
 }
-fn diff_rows(source: &Rows, target: &Rows, keys: &[String], table: &Table) -> Result<Value, AppError> {
+fn diff_rows(source: &Rows, target: &Rows, keys: &[String], table: &Table, writable: &BTreeSet<String>) -> Result<Value, AppError> {
     let dialect = table.session.dialect_id.as_str();
     let name = qualified(table);
     let mut tuples = source.keys().chain(target.keys()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
@@ -446,13 +467,15 @@ fn diff_rows(source: &Rows, target: &Rows, keys: &[String], table: &Table) -> Re
     let mut rows = Vec::new();
     let mut statements = Vec::new();
     let (mut insert_count, mut update_count, mut delete_count) = (0, 0, 0);
+    let mut unwritable_rows = 0usize;
     let mut bytes = 0;
     for tuple in tuples {
         let statement_count = statements.len();
         let row = match (source.get(tuple), target.get(tuple)) {
             (Some(left), None) => {
+                let names = left.values.keys().filter(|column| writable.contains(*column)).collect::<Vec<_>>();
+                if names.is_empty() { return Err(invalid("目标表没有可写列，无法生成 INSERT 同步计划")) }
                 insert_count += 1;
-                let names = left.values.keys().collect::<Vec<_>>();
                 let values = names.iter().map(|name| literal(&left.values[*name], dialect)).collect::<Result<Vec<_>, _>>()?;
                 statements.push(format!("INSERT INTO {name} ({}) VALUES ({})", names.iter().map(|c| quote(c, dialect)).collect::<Vec<_>>().join(", "), values.join(", ")));
                 json!({"status":"source-only", "key":display_key(&left.key), "columns":[]})
@@ -466,10 +489,15 @@ fn diff_rows(source: &Rows, target: &Rows, keys: &[String], table: &Table) -> Re
                 let changed = left.values.keys().filter(|name| left.values[*name] != right.values[*name]).cloned().collect::<Vec<_>>();
                 if changed.is_empty() { json!({"status":"same", "key":display_key(&left.key), "columns":[]}) }
                 else {
-                    update_count += 1;
-                    let assignments = changed.iter().map(|column| Ok(format!("{} = {}", quote(column, dialect), literal(&left.values[column], dialect)?))).collect::<Result<Vec<_>, AppError>>()?;
-                    statements.push(format!("UPDATE {name} SET {} WHERE {}", assignments.join(", "), where_sql(&left.key, keys, dialect)?));
+                    let writable_changed = changed.iter().filter(|column| writable.contains(*column)).cloned().collect::<Vec<_>>();
+                    if writable_changed.len() != changed.len() { unwritable_rows += 1; }
+                    // Generated/hidden/ALWAYS identity columns stay visible in the diff but never reach the plan.
                     let changes = changed.iter().map(|column| json!({"column":column, "source":summary(&left.values[column]), "target":summary(&right.values[column])})).collect::<Vec<_>>();
+                    if !writable_changed.is_empty() {
+                        update_count += 1;
+                        let assignments = writable_changed.iter().map(|column| Ok(format!("{} = {}", quote(column, dialect), literal(&left.values[column], dialect)?))).collect::<Result<Vec<_>, AppError>>()?;
+                        statements.push(format!("UPDATE {name} SET {} WHERE {}", assignments.join(", "), where_sql(&left.key, keys, dialect)?));
+                    }
                     json!({"status":"different", "key":display_key(&left.key), "columns":changed, "valueChanges":changes})
                 }
             }
@@ -482,7 +510,8 @@ fn diff_rows(source: &Rows, target: &Rows, keys: &[String], table: &Table) -> Re
         if bytes > MAX_BYTES { return Err(exceeded()); }
         rows.push(row);
     }
-    let warnings = if delete_count > 0 { vec![format!("同步会删除目标端 {delete_count} 行，执行前必须单独确认。")] } else { Vec::new() };
+    let mut warnings = if delete_count > 0 { vec![format!("同步会删除目标端 {delete_count} 行，执行前必须单独确认。")] } else { Vec::new() };
+    if unwritable_rows > 0 { warnings.push(format!("目标端 {unwritable_rows} 行含生成列、隐藏列或 ALWAYS identity 列差异，这些列不写入同步计划。")); }
     Ok(json!({"keyColumns":keys, "rows":rows, "plan":{"insertCount":insert_count,"updateCount":update_count,"deleteCount":delete_count,"statements":statements,"destructive":delete_count > 0,"warnings":warnings}}))
 }
 
@@ -555,5 +584,84 @@ mod tests {
         let key = Map::from_iter([("id".into(), integer)]);
         assert_eq!(display_key(&key)["id"], "9007199254740993");
         assert!(key["id"].is_number());
+    }
+
+    fn fixture_table() -> Table {
+        Table { session: Session::new("fixture".into(), Box::new(MetadataFault { code: "unsupported" })),
+            schema: None, name: "items".into(), raw: "table:items".into() }
+    }
+    fn rows_with(values: &[(&str, Value)]) -> Rows {
+        let values = values.iter().map(|(name, value)| ((*name).to_owned(), value.clone())).collect::<Map<_, _>>();
+        let key = Map::from_iter([("id".to_owned(), values.get("id").unwrap().clone())]);
+        let mut rows = Rows::new();
+        rows.insert(serde_json::to_string(&vec![values.get("id").unwrap().clone()]).unwrap(), Row { key, values });
+        rows
+    }
+    fn writable(names: &[&str]) -> BTreeSet<String> { names.iter().map(|name| (*name).to_owned()).collect() }
+
+    #[test]
+    fn target_writability_metadata_excludes_generated_hidden_and_always_identity_columns() {
+        let description = json!([
+            {"name":"id","generated":null,"identity":"by-default","autoIncrement":true},
+            {"name":"note","generated":null},
+            {"name":"upper_note","generated":"stored"},
+            {"name":"virtual_note","generated":"virtual"},
+            {"name":"generated_flag","generated":true},
+            {"name":"hidden_col","generated":null,"hidden":true},
+            {"name":"always_id","generated":null,"identity":"always"},
+            {"name":"always_id_generation","generated":null,"identityGeneration":"always"}
+        ]);
+        assert_eq!(writable_columns(description.as_array().unwrap()).unwrap(), writable(&["id", "note"]));
+    }
+
+    #[test]
+    fn unreliable_target_descriptions_refuse_to_generate_a_write_plan() {
+        let missing_marker = json!([{"name":"id"}, {"name":"note","generated":null}]);
+        assert_eq!(writable_columns(missing_marker.as_array().unwrap()).unwrap_err().code, "invalid-argument");
+        assert_eq!(writable_columns(&[]).unwrap_err().code, "invalid-argument");
+    }
+
+    #[test]
+    fn insert_plan_projects_writable_columns_and_keeps_names_aligned_with_values() {
+        let table = fixture_table();
+        let source = rows_with(&[("id", json!(1)), ("note", json!("x")), ("upper_note", json!("X"))]);
+        let result = diff_rows(&source, &Rows::new(), &["id".to_owned()], &table, &writable(&["id", "note"])).unwrap();
+        assert_eq!(result["plan"]["insertCount"], 1);
+        assert_eq!(result["plan"]["statements"], json!(["INSERT INTO \"items\" (\"id\", \"note\") VALUES (1, 'x')"]));
+    }
+
+    #[test]
+    fn update_plan_never_writes_generated_columns_but_keeps_them_in_the_visible_diff() {
+        let table = fixture_table();
+        let source = rows_with(&[("id", json!(1)), ("note", json!("left")), ("upper_note", json!("LEFT"))]);
+        let target = rows_with(&[("id", json!(1)), ("note", json!("right")), ("upper_note", json!("RIGHT"))]);
+        let result = diff_rows(&source, &target, &["id".to_owned()], &table, &writable(&["id", "note"])).unwrap();
+        assert_eq!(result["plan"]["updateCount"], 1);
+        assert_eq!(result["plan"]["statements"], json!(["UPDATE \"items\" SET \"note\" = 'left' WHERE \"id\" = 1"]));
+        assert_eq!(result["rows"][0]["status"], "different");
+        assert_eq!(result["rows"][0]["columns"], json!(["note", "upper_note"]));
+    }
+
+    #[test]
+    fn generated_only_differences_are_reported_but_cannot_produce_an_update() {
+        let table = fixture_table();
+        let source = rows_with(&[("id", json!(1)), ("note", json!("same")), ("upper_note", json!("SAME"))]);
+        let target = rows_with(&[("id", json!(1)), ("note", json!("same")), ("upper_note", json!("OTHER"))]);
+        let result = diff_rows(&source, &target, &["id".to_owned()], &table, &writable(&["id", "note"])).unwrap();
+        assert_eq!(result["plan"]["updateCount"], 0);
+        assert_eq!(result["plan"]["statements"], json!([]));
+        assert_eq!(result["rows"][0]["status"], "different");
+        assert_eq!(result["rows"][0]["columns"], json!(["upper_note"]));
+        assert!(result["plan"]["warnings"].to_string().contains("生成列"));
+    }
+
+    #[test]
+    fn ordinary_tables_keep_the_previous_insert_and_update_plan() {
+        let table = fixture_table();
+        let all = writable(&["id", "note"]);
+        let insert = diff_rows(&rows_with(&[("id", json!(2)), ("note", json!("new"))]), &Rows::new(), &["id".to_owned()], &table, &all).unwrap();
+        assert_eq!(insert["plan"]["statements"], json!(["INSERT INTO \"items\" (\"id\", \"note\") VALUES (2, 'new')"]));
+        let update = diff_rows(&rows_with(&[("id", json!(1)), ("note", json!("left"))]), &rows_with(&[("id", json!(1)), ("note", json!("right"))]), &["id".to_owned()], &table, &all).unwrap();
+        assert_eq!(update["plan"]["statements"], json!(["UPDATE \"items\" SET \"note\" = 'left' WHERE \"id\" = 1"]));
     }
 }

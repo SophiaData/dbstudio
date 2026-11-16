@@ -39,12 +39,12 @@ const bundle = await build({
   },
   outfile: path.join(output, 'controller.mjs'), write: false, bundle: true, format: 'esm', platform: 'node',
   plugins: [{ name: 'grid-workflow-memory-only', setup(builder) {
-    builder.onResolve({ filter: /^vue$/ }, () => ({ path: vueEntry, external: true }))
+    builder.onResolve({ filter: /^vue$/ }, () => ({ path: pathToFileURL(vueEntry).href, external: true }))
     builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'native-memory-ipc', namespace: 'grid-memory-ipc' }))
     builder.onLoad({ filter: /.*/, namespace: 'grid-memory-ipc' }, () => ({ contents: 'export const invoke = (...args) => globalThis.__DBSTUDIO_GRID_IPC__(...args)' }))
-    builder.onLoad({ filter: /apps\/desktop\/src\/clipboard\.ts$/ }, () => ({ contents: "export const writeClipboardText = async () => { throw new Error('OS clipboard forbidden in pure grid regressions') }" }))
+    builder.onLoad({ filter: /apps[\\/]desktop[\\/]src[\\/]clipboard\.ts$/ }, () => ({ contents: "export const writeClipboardText = async () => { throw new Error('OS clipboard forbidden in pure grid regressions') }" }))
     builder.onLoad({ filter: /\.vue$/ }, async ({ path: filename }) => {
-      if (!filename.endsWith('/components/ResultGrid.vue')) return { contents: 'export default {}' }
+      if (!filename.replaceAll('\\', '/').endsWith('/components/ResultGrid.vue')) return { contents: 'export default {}' }
       const { descriptor } = parse(await readFile(filename, 'utf8'), { filename })
       return { loader: 'ts', contents: compileScript(descriptor, { id: 'grid-workflow-memory' }).content }
     })

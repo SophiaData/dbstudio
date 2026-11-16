@@ -21,7 +21,7 @@ await build({
     target: 'node22',
     ssr: true,
     minify: false,
-    lib: { entry: resolve(root, 'src/renderer/er-relations.ts'), formats: ['cjs'] },
+    lib: { entry: resolve(root, 'src/core/er-relations.ts'), formats: ['cjs'] },
     rollupOptions: { output: { entryFileNames: 'er-relations.cjs' } }
   }
 })

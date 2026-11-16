@@ -1,5 +1,5 @@
-import { formatSql, scanContexts } from '../../../src/renderer/sql-format'
-import { isFunctionKeyword, isStatementKeyword } from '../../../src/renderer/sql-keywords'
+import { formatSql, scanContexts } from '../../../src/core/sql-format'
+import { isFunctionKeyword, isStatementKeyword } from '../../../src/core/sql-keywords'
 import { splitStatements, type SqlScriptRules } from '../../../src/core/sql-script'
 import {
   bindSqlParameters,
@@ -183,6 +183,10 @@ export function parameterLiteral(value: SqlParameterValue, dialect: SqlParameter
   if (typeof value === 'number') return exactNumberLiteral(value)
   if (typeof value === 'boolean') return dialect === 'postgresql' ? (value ? 'TRUE' : 'FALSE') : (value ? '1' : '0')
   if (typeof value === 'string') {
+    if (dialect === 'mysql') {
+      const hex = [...new TextEncoder().encode(value)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+      return `CONVERT(X'${hex}' USING utf8mb4)`
+    }
     if (value.includes('\0')) throw new Error('文本含 NUL，无法安全生成 SQL 字面量')
     if (dialect === 'sqlite') return `'${value.replace(/'/g, "''")}'`
     const escaped = value.replace(/\\/g, '\\\\').replace(/'/g, "''")

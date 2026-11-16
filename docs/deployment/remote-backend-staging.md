@@ -1,6 +1,6 @@
 # Remote backend staging 部署
 
-HTTP backend 已提供可执行的独立 Node 入口与默认 Electron 环境认证接线。JWT 使用 `jose` 6 验证签名和 claims；部署方提供现有 IdP 签发的 access token、公开 JWKS、TLS 反向代理、持久卷和凭据加密 key。应用不签发 token，不提供自建 IdP、OIDC 登录页面或 refresh-token 服务。
+本文仅适用于 legacy Electron 客户端与独立 Node HTTP backend 的 staging 部署。当前原生 Tauri 桌面使用本地 Rust 核心，架构见 [原生架构](../architecture/tauri-vue-rust.md)。HTTP backend 提供可执行的独立 Node 入口与 legacy Electron 环境认证接线。JWT 使用 `jose` 6 验证签名和 claims；部署方提供现有 IdP 签发的 access token、公开 JWKS、TLS 反向代理、持久卷和凭据加密 key。应用不签发 token，不提供自建 IdP、OIDC 登录页面或 refresh-token 服务。
 
 ## 构建和启动独立 Node 服务
 
@@ -72,7 +72,7 @@ Electron 主进程默认启动也使用同一环境认证配置，无需调用�
 
 ```sh
 # DBSTUDIO_BACKEND_ACCESS_TOKEN 已由平台注入；不要在命令行写 token 字面量。
-DBSTUDIO_BACKEND_ENDPOINT=https://dbstudio.example.test/rpc pnpm run dev
+DBSTUDIO_BACKEND_ENDPOINT=https://dbstudio.example.test/rpc pnpm run legacy:dev
 ```
 
 构建后的桌面应用由启动器提供同样两个变量。这个入口使用单次启动时提供的短期 token；token 过期后，需要由受信任 shell 的 session provider 刷新，或重新登录并以新 token 启动应用。单独设置 endpoint 不会获得身份，也不代表应用提供了浏览器登录流程。
@@ -102,7 +102,7 @@ window.__DBSTUDIO_BACKEND_CONFIG__ = {
 
 由 HTTPS 反向代理终止 TLS，并将 `/rpc`、`/connections`、`/artifacts/` 转发到受控 Node listener。listener 不提供静态站点、登录桥接或健康检查专用 route。代理需要限制请求头、body、response、连接数和超时，不信任客户端自报 owner header。不要把 listener 暴露在允许跳过认证的代理路径下。
 
-同源浏览器反代无需配置 CORS。打包后的 Electron 使用 `file://` 页面；不同版本可能省略 Origin 或发送字面量 `null`。需要支持带 Origin 的桌面请求时，在 **backend 服务端**显式设置 `DBSTUDIO_HTTP_ALLOWED_ORIGINS=null`。`pnpm dev` 的页面来自 Vite，其 origin 是开发服务器的具体地址（例如 `http://localhost:5173`），服务端应显式允许该实际 origin；开发态不要填写 `null`。跨源浏览器部署应填写明确 origin，例如 `DBSTUDIO_HTTP_ALLOWED_ORIGINS=https://frontend.example.test`；多个来源用逗号分隔。禁止 `*`，默认空数组不允许跨源。允许 `null` 会接纳同样使用 opaque origin 的页面，因此只应在需要桌面客户端的受控部署中启用；所有实际业务请求仍必须持有有效 Bearer token。
+同源浏览器反代无需配置 CORS。打包后的 Electron 使用 `file://` 页面；不同版本可能省略 Origin 或发送字面量 `null`。需要支持带 Origin 的桌面请求时，在 **backend 服务端**显式设置 `DBSTUDIO_HTTP_ALLOWED_ORIGINS=null`。`pnpm legacy:dev` 的页面来自 Vite，其 origin 是开发服务器的具体地址（例如 `http://localhost:5173`），服务端应显式允许该实际 origin；开发态不要填写 `null`。跨源浏览器部署应填写明确 origin，例如 `DBSTUDIO_HTTP_ALLOWED_ORIGINS=https://frontend.example.test`；多个来源用逗号分隔。禁止 `*`，默认空数组不允许跨源。允许 `null` 会接纳同样使用 opaque origin 的页面，因此只应在需要桌面客户端的受控部署中启用；所有实际业务请求仍必须持有有效 Bearer token。
 
 仅 JWT 模式或 `DBSTUDIO_HTTP_REQUIRE_AUTH=1` 的部署允许启用该配置；local 固定 owner 模式即使绑定 loopback 也会拒绝启用，避免把本地身份通过跨源页面暴露。预检放行不代表认证成功，CORS 配置不替代 JWT 验签。
 
@@ -142,7 +142,7 @@ DBSTUDIO_HTTP_ALLOWED_ORIGINS=null pnpm run start:http-server
 仓库内定向测试：
 
 ```sh
-pnpm run typecheck
+pnpm run legacy:typecheck
 pnpm run test:http-auth
 pnpm run test:http-server-config
 pnpm run test:http-server-runtime

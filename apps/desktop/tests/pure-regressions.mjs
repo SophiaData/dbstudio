@@ -120,6 +120,17 @@ check('parameter_literal_rejects_rounded_number', () => {
   throws(() => m.materializeQuery('SELECT ?', [{ name: '?1', value: rounded }], 'sqlite'), /安全整数/)
 })
 
+check('mysql_materialized_query_preserves_utf8_bytes_without_backslash_escape_rules', () => {
+  for (const value of ['', 'a\\b', "O'Brien", '中文\n😀', 'nul\0tail']) {
+    const query = m.materializeQuery('SELECT ? AS value', [{ name: '?1', value }], 'mysql')
+    const match = /^SELECT CONVERT\(X'([0-9a-f]*)' USING utf8mb4\) AS value$/.exec(query)
+    assert.ok(match, 'bound text must be a mode-independent UTF-8 hex literal')
+    assert.equal(Buffer.from(match[1], 'hex').toString('utf8'), value)
+  }
+  assert.equal(m.parameterLiteral("a\\b'c", 'sqlite'), "'a\\b''c'")
+  assert.equal(m.parameterLiteral("a\\b'c", 'postgresql'), "E'a\\\\b''c'")
+})
+
 check('connection_secret_preserves_raw_and_unknown_options', () => {
   const fields = [
     { key: 'host', label: 'Host', kind: 'text', required: true },

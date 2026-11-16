@@ -21,6 +21,14 @@ export interface SqlScriptRules {
   readonly supportsDollarQuotedStrings: boolean
   readonly supportsBeginEndBlocks: boolean
   readonly statementTerminators: readonly string[]
+  /** SQLite: `[name]` 是标识符，内部的分号不是语句边界。 */
+  readonly supportsBracketIdentifiers?: boolean
+  /** SQLite / MySQL: `` `name` `` 是标识符，内部的分号不是语句边界。 */
+  readonly supportsBacktickIdentifiers?: boolean
+  /** PostgreSQL: E 前缀字符串内的反斜杠转义单引号，转义后的引号不结束字符串。 */
+  readonly supportsEscapeStrings?: boolean
+  /** PostgreSQL: 块注释可嵌套, 结束标记只关闭最内层. */
+  readonly supportsNestedBlockComments?: boolean
 }
 
 export const SQLITE_SCRIPT_RULES: SqlScriptRules = {
@@ -28,7 +36,9 @@ export const SQLITE_SCRIPT_RULES: SqlScriptRules = {
   blockComment: { start: '/*', end: '*/' },
   supportsDollarQuotedStrings: false,
   supportsBeginEndBlocks: true,
-  statementTerminators: [';']
+  statementTerminators: [';'],
+  supportsBracketIdentifiers: true,
+  supportsBacktickIdentifiers: true
 }
 
 export const POSTGRESQL_SCRIPT_RULES: SqlScriptRules = {
@@ -36,7 +46,9 @@ export const POSTGRESQL_SCRIPT_RULES: SqlScriptRules = {
   blockComment: { start: '/*', end: '*/' },
   supportsDollarQuotedStrings: true,
   supportsBeginEndBlocks: false,
-  statementTerminators: [';']
+  statementTerminators: [';'],
+  supportsEscapeStrings: true,
+  supportsNestedBlockComments: true
 }
 
 export class SqlScriptParseError extends Error {
@@ -52,6 +64,8 @@ export class SqlScriptParseError extends Error {
 }
 
 type ScanState = 'normal' | 'string' | 'quotedIdentifier' | 'lineComment' | 'blockComment' | 'dollarQuote'
+// Bracket identifiers close at the first closing bracket; no doubling escape.
+let bracketIdentifier = false
 
 export function splitStatements(
   sql: string,
@@ -73,8 +87,13 @@ export function splitStatements(
   let segmentStart = 0
   let segmentHasCode = false
   let blockDepth = 0
+  let commentDepth = 0
   let createTrigger = false
   let sawCreate = false
+  // PostgreSQL E 前缀字符串：反斜杠转义下一个字符，转义后的引号不结束字符串。
+  let escapeString = false
+  // Offset where the currently open string, identifier, comment or dollar quote began.
+  let unclosedStart = 0
   let i = 0
 
   const pushSegment = (end: number): void => {
@@ -99,6 +118,8 @@ export function splitStatements(
     segmentStart = nextStart
     segmentHasCode = false
     blockDepth = 0
+    commentDepth = 0
+    escapeString = false
     createTrigger = false
     sawCreate = false
   }
@@ -114,8 +135,15 @@ export function splitStatements(
     }
 
     if (state === 'blockComment') {
-      if (sql.startsWith(rules.blockComment.end, i)) {
-        state = 'normal'
+      if (rules.supportsNestedBlockComments && sql.startsWith(rules.blockComment.start, i)) {
+        commentDepth += 1
+        i += rules.blockComment.start.length
+      } else if (sql.startsWith(rules.blockComment.end, i)) {
+        commentDepth -= 1
+        if (commentDepth <= 0) {
+          state = 'normal'
+          commentDepth = 0
+        }
         i += rules.blockComment.end.length
       } else {
         i += 1
@@ -125,12 +153,17 @@ export function splitStatements(
 
     if (state === 'string' || state === 'quotedIdentifier') {
       segmentHasCode = true
-      if (ch === quote) {
-        if (next === quote) {
+      if (escapeString && ch === '\\') {
+        i += 2
+      } else if (ch === quote) {
+        // Backticks and double quotes escape by doubling; brackets do not.
+        if (!bracketIdentifier && next === quote) {
           i += 2
         } else {
           state = 'normal'
           quote = ''
+          escapeString = false
+          bracketIdentifier = false
           i += 1
         }
       } else {
@@ -151,19 +184,62 @@ export function splitStatements(
 
     const linePrefix = linePrefixes.find((prefix) => sql.startsWith(prefix, i))
     if (linePrefix !== undefined) {
+      unclosedStart = i
       state = 'lineComment'
       i += linePrefix.length
       continue
     }
     if (sql.startsWith(rules.blockComment.start, i)) {
+      unclosedStart = i
       state = 'blockComment'
+      commentDepth = 1
       i += rules.blockComment.start.length
+      continue
+    }
+
+    // PostgreSQL E-prefixed string: backslash escapes the next char; plain identifier E is unaffected.
+    if (
+      rules.supportsEscapeStrings === true &&
+      (ch === 'e' || ch === 'E') &&
+      next === "'" &&
+      (i === 0 || !isWordPart(sql[i - 1] as string))
+    ) {
+      state = 'string'
+      quote = "'"
+      escapeString = true
+      unclosedStart = i
+      segmentHasCode = true
+      i += 2
       continue
     }
 
     if (ch === "'" || ch === '"') {
       state = ch === "'" ? 'string' : 'quotedIdentifier'
       quote = ch
+      unclosedStart = i
+      escapeString = false
+      bracketIdentifier = false
+      segmentHasCode = true
+      i += 1
+      continue
+    }
+
+    // SQLite backtick and bracket identifiers: inner semicolons are not boundaries.
+    if (ch.charCodeAt(0) === 96 && rules.supportsBacktickIdentifiers === true) {
+      state = 'quotedIdentifier'
+      quote = String.fromCharCode(96)
+      unclosedStart = i
+      escapeString = false
+      segmentHasCode = true
+      i += 1
+      continue
+    }
+    if (ch === '[' && rules.supportsBracketIdentifiers === true) {
+      state = 'quotedIdentifier'
+      quote = ']'
+      bracketIdentifier = true
+      unclosedStart = i
+      escapeString = false
       segmentHasCode = true
       i += 1
       continue
@@ -172,6 +248,7 @@ export function splitStatements(
     if (rules.supportsDollarQuotedStrings && ch === '$') {
       const tag = readDollarTag(sql, i)
       if (tag !== null) {
+        unclosedStart = i
         state = 'dollarQuote'
         dollarTag = tag
         segmentHasCode = true
@@ -190,6 +267,9 @@ export function splitStatements(
       if (rules.supportsBeginEndBlocks) {
         if (word === 'create') sawCreate = true
         else if (word === 'trigger' && sawCreate) createTrigger = true
+        // CASE opens its own END; counting it as a block end would close the
+        // trigger body early and split on the next inner semicolon.
+        else if (createTrigger && word === 'case') blockDepth += 1
         else if (createTrigger && word === 'begin') blockDepth += 1
         else if (createTrigger && word === 'end' && blockDepth > 0) blockDepth -= 1
       }
@@ -209,13 +289,16 @@ export function splitStatements(
   }
 
   if (state === 'string' || state === 'quotedIdentifier') {
-    throw new SqlScriptParseError('SQL 脚本中存在未闭合的字符串或引用标识符', i, lineAt(sql, i))
+    const offset = Math.min(unclosedStart, sql.length)
+    throw new SqlScriptParseError('SQL 脚本中存在未闭合的字符串或引用标识符', offset, lineAt(sql, offset))
   }
   if (state === 'blockComment') {
-    throw new SqlScriptParseError('SQL 脚本中存在未闭合的块注释', i, lineAt(sql, i))
+    const offset = Math.min(unclosedStart, sql.length)
+    throw new SqlScriptParseError('SQL 脚本中存在未闭合的块注释', offset, lineAt(sql, offset))
   }
   if (state === 'dollarQuote') {
-    throw new SqlScriptParseError(`SQL 脚本中存在未闭合的 dollar quote ${dollarTag}`, i, lineAt(sql, i))
+    const offset = Math.min(unclosedStart, sql.length)
+    throw new SqlScriptParseError(`SQL 脚本中存在未闭合的 dollar quote ${dollarTag}`, offset, lineAt(sql, offset))
   }
 
   pushSegment(sql.length)

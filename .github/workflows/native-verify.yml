@@ -47,8 +47,16 @@ jobs:
         run: pnpm test:native-release
       - name: Test Vue parameter and data precision regressions
         run: pnpm test:native-ui-models
+      - name: Test native database execution evidence gate
+        run: node --test scripts/native-test-output.test.mjs
+      - name: Test native host execution evidence gate
+        run: node --test scripts/native-host-test-gate.test.mjs
       - name: Test portable Rust workspace
         run: cargo test --locked --workspace --exclude dbstudio-desktop
+      - name: Test desktop shell library
+        run: cargo test --locked -p dbstudio-desktop --lib
+      - name: Test MySQL acceptance host contracts
+        run: pnpm test:native-host
       - name: Build Vue with explicit desktop test controller
         env:
           VITE_DBSTUDIO_TEST_HOOKS: '1'

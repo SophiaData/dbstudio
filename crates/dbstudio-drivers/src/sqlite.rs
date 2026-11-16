@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use dbstudio_protocol::{argument, string_argument, ConnectionConfig, Driver, DriverError, DriverResult, SecretMap};
 use rusqlite::{params_from_iter, types::{Value as SqlValue, ValueRef}, Connection, OpenFlags};
 use serde_json::{json, Map, Value};
-use std::{collections::{BTreeMap, HashMap, HashSet}, ffi::CString, path::Path, sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, HashMap, HashSet}, ffi::CString, path::Path, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::{Duration, Instant}};
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -12,6 +12,10 @@ const MAX_PAGE_SIZE: usize = 1000;
 const MAX_TEXT: usize = 1000;
 const MAX_BLOB: usize = 256;
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+// A cursor keeps the raw rows of one execution so paging and full-value reads never re-run the
+// statement. Beyond either budget the cursor falls back to live re-query and reports stable=false.
+const SNAPSHOT_MAX_ROWS: usize = 5000;
+const SNAPSHOT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn connect(config: &ConnectionConfig, _secret: &SecretMap) -> DriverResult<Box<dyn Driver>> {
     let file = config.options.get("file").and_then(Value::as_str).unwrap_or("").trim();
@@ -29,7 +33,7 @@ pub fn connect(config: &ConnectionConfig, _secret: &SecretMap) -> DriverResult<B
     db.pragma_update(None, "foreign_keys", true).map_err(db_error)?;
     db.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
         .map_err(|e| DriverError::new("connection_failed", format!("不是有效的 SQLite 数据库: {e}")))?;
-    Ok(Box::new(SqliteDriver { db: Some(db), file: file.to_owned(), session: SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed), cursors: HashMap::new(), next_cursor: 0, pending: 0, import_active: false }))
+    Ok(Box::new(SqliteDriver { db: Some(db), file: file.to_owned(), session: SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed), cursors: HashMap::new(), next_cursor: 0, pending: 0, import_active: false, import_failed: false }))
 }
 
 fn db_error(error: rusqlite::Error) -> DriverError { DriverError::new("query_failed", error.to_string()) }
@@ -56,7 +60,8 @@ fn offset(value: Option<&Value>) -> usize {
 }
 
 #[derive(Clone)]
-struct Cursor { sql: String, params: Vec<SqlValue> }
+struct Cursor { sql: String, params: Vec<SqlValue>, snapshot: Option<Arc<Snapshot>> }
+struct Snapshot { columns: Vec<String>, rows: Vec<Vec<SqlValue>> }
 struct SqliteDriver {
     db: Option<Connection>,
     file: String,
@@ -65,6 +70,7 @@ struct SqliteDriver {
     next_cursor: u64,
     pending: u64,
     import_active: bool,
+    import_failed: bool,
 }
 #[derive(Clone)]
 struct Column {
@@ -90,7 +96,12 @@ impl Driver for SqliteDriver {
             "executeStatement" => self.execute_statement(string_argument(&args, 0, "sql")?, args.get(1)),
             "fetchResultPage" | "fetchPage" => {
                 let cursor = self.cursor(string_argument(&args, 0, "cursorId")?)?;
-                self.page(&cursor.sql, &cursor.params, offset(args.get(1)), page_size(args.get(2)), false).map(|(v, _)| v)
+                let start = offset(args.get(1));
+                let limit = page_size(args.get(2));
+                match &cursor.snapshot {
+                    Some(snapshot) => self.snapshot_page(snapshot, start, limit, false),
+                    None => self.page(&cursor.sql, &cursor.params, start, limit, false).map(|(v, _)| v),
+                }
             },
             "fetchCellValue" => self.full_cell(string_argument(&args, 0, "cursorId")?, argument(&args, 1, "rowIndex")?, argument(&args, 2, "columnIndex")?),
             "listChildren" => self.list_children(argument(&args, 0, "parentId")?),
@@ -109,6 +120,7 @@ impl Driver for SqliteDriver {
                 Ok(json!(count))
             },
             "commitTransaction" => {
+                if self.import_failed { return Err(invalid("导入已失败，请先回滚整个导入事务")); }
                 if self.db()?.is_autocommit() { return Err(invalid("当前没有未提交事务，无法提交")); }
                 self.db()?.execute_batch("COMMIT").map_err(db_error)?;
                 self.pending = 0; self.import_active = false;
@@ -124,7 +136,7 @@ impl Driver for SqliteDriver {
                 let mut result = self.query(&plan, Some(&json!({"keepCursor":false})))?;
                 let object = result.as_object_mut().ok_or_else(|| invalid("无执行计划结果"))?;
                 object.insert("dialectId".into(), json!("sqlite")); object.insert("format".into(), json!("tabular"));
-                for key in ["cursorId", "offset", "returned", "hasMore", "elapsedMs"] { object.remove(key); }
+                for key in ["cursorId", "offset", "returned", "hasMore", "elapsedMs", "stable"] { object.remove(key); }
                 Ok(result)
             },
             "createTable" => { self.create_table(argument(&args, 0, "spec")?)?; Ok(Value::Null) },
@@ -165,7 +177,7 @@ impl SqliteDriver {
     }
     fn rollback(&mut self) -> DriverResult<()> {
         if let Some(db) = &self.db { if !db.is_autocommit() { db.execute_batch("ROLLBACK").map_err(db_error)?; } }
-        self.pending = 0; self.import_active = false; Ok(())
+        self.pending = 0; self.import_active = false; self.import_failed = false; Ok(())
     }
     fn cursor(&self, id: &str) -> DriverResult<Cursor> { self.cursors.get(id).cloned().ok_or_else(|| object_error("结果集游标不存在或已关闭")) }
     fn query(&mut self, sql: &str, options: Option<&Value>) -> DriverResult<Value> {
@@ -173,16 +185,26 @@ impl SqliteDriver {
         let params = bind_parameters(self.db()?, &sql, options)?;
         let limit = page_size(options.and_then(|v| v.get("limit")));
         let start = offset(options.and_then(|v| v.get("offset")));
+        let keep_cursor = options.and_then(|v| v.get("keepCursor")).and_then(Value::as_bool) != Some(false);
         let timer = Instant::now();
-        let (mut page, executed) = self.page(&sql, &params, start, limit, false)?;
-        let cursor = if options.and_then(|v| v.get("keepCursor")).and_then(Value::as_bool) == Some(false) { Value::Null } else {
+        // One execution feeds both the first page and the bounded snapshot. A first page that
+        // cannot fit the row budget skips the snapshot attempt and keeps the live path.
+        let (mut page, executed, snapshot) = if keep_cursor && start.saturating_add(limit) <= SNAPSHOT_MAX_ROWS {
+            self.snapshot_query_page(&sql, &params, start, limit)?
+        } else {
+            let (page, executed) = self.page(&sql, &params, start, limit, false)?;
+            (page, executed, None)
+        };
+        let stable = snapshot.is_some();
+        let cursor = if keep_cursor {
             self.next_cursor += 1;
             let id = format!("cur-{}-{}", self.session, self.next_cursor);
-            self.cursors.insert(id.clone(), Cursor { sql, params }); json!(id)
-        };
+            self.cursors.insert(id.clone(), Cursor { sql, params, snapshot }); json!(id)
+        } else { Value::Null };
         let object = page.as_object_mut().ok_or_else(|| invalid("查询结果无效"))?;
         object.insert("cursorId".into(), cursor); object.insert("executedSql".into(), json!(executed));
         object.insert("elapsedMs".into(), json!(timer.elapsed().as_millis() as u64));
+        object.insert("stable".into(), json!(stable));
         Ok(page)
     }
     fn page(&self, sql: &str, params: &[SqlValue], start: usize, limit: usize, full: bool) -> DriverResult<(Value, String)> {
@@ -191,7 +213,8 @@ impl SqliteDriver {
         if !original.readonly() { return Err(DriverError::new("query_failed", "分页查询只允许只读语句，请使用 executeStatement")); }
         let names: Vec<String> = original.column_names().iter().map(|s| (*s).to_owned()).collect();
         let paginate = ["select", "values"].contains(&keyword(sql).as_str());
-        let executed = if paginate { format!("SELECT * FROM (\n{sql}\n) LIMIT {limit} OFFSET {start}") } else { sql.to_owned() };
+        let fetch_limit = limit + 1;
+        let executed = if paginate { format!("SELECT * FROM (\n{sql}\n) LIMIT {fetch_limit} OFFSET {start}") } else { sql.to_owned() };
         drop(original);
         let mut statement = db.prepare(&executed).map_err(db_error)?;
         let mut rows = statement.query(params_from_iter(params.iter())).map_err(db_error)?;
@@ -210,13 +233,99 @@ impl SqliteDriver {
             output.push(json!({"index":start + output.len(),"cells":cells}));
         }
         let count = output.len();
+        let has_more = count == limit && rows.next().map_err(db_error)?.is_some();
         let columns: Vec<Value> = names.into_iter().zip(kinds).map(|(name, kind)| json!({"name":name,"type":kind})).collect();
-        Ok((json!({"columns":columns,"rows":output,"offset":start,"returned":count,"hasMore":count == limit}), executed))
+        Ok((json!({"columns":columns,"rows":output,"offset":start,"returned":count,"hasMore":has_more}), executed))
+    }
+    /// Streams one execution of the statement, rendering the requested page and retaining the raw
+    /// rows in a snapshot. The snapshot is dropped as soon as either budget is exceeded so the
+    /// caller can fall back to live re-query.
+    fn snapshot_query_page(&self, sql: &str, params: &[SqlValue], start: usize, limit: usize) -> DriverResult<(Value, String, Option<Arc<Snapshot>>)> {
+        let db = self.db()?;
+        let original = db.prepare(sql).map_err(db_error)?;
+        if !original.readonly() { return Err(DriverError::new("query_failed", "分页查询只允许只读语句，请使用 executeStatement")); }
+        let names: Vec<String> = original.column_names().iter().map(|s| (*s).to_owned()).collect();
+        let paginate = ["select", "values"].contains(&keyword(sql).as_str());
+        let executed = if paginate { format!("SELECT * FROM (\n{sql}\n) LIMIT {}", SNAPSHOT_MAX_ROWS + 1) } else { sql.to_owned() };
+        drop(original);
+        let mut statement = db.prepare(&executed).map_err(db_error)?;
+        let mut rows = statement.query(params_from_iter(params.iter())).map_err(db_error)?;
+        let mut output = Vec::new();
+        let mut kinds = vec!["unknown"; names.len()];
+        let mut snapshot_rows = Some(Vec::new());
+        let mut snapshot_bytes = 0usize;
+        let mut read = 0usize;
+        loop {
+            let Some(row) = rows.next().map_err(db_error)? else { break };
+            if let Some(retained) = snapshot_rows.as_ref().map(Vec::len) {
+                let mut fits = retained < SNAPSHOT_MAX_ROWS;
+                let mut values = Vec::new();
+                let mut row_bytes = 0usize;
+                if fits {
+                    values.reserve(names.len());
+                    for column in 0..names.len() {
+                        let value = row.get_ref(column).map_err(db_error)?;
+                        row_bytes += value_bytes(value);
+                        if snapshot_bytes.saturating_add(row_bytes) > SNAPSHOT_MAX_BYTES { fits = false; break; }
+                        match owned_value(value) {
+                            Some(owned) => values.push(owned),
+                            None => { fits = false; break; }
+                        }
+                    }
+                }
+                if fits {
+                    if let Some(retained) = snapshot_rows.as_mut() { retained.push(values); }
+                    snapshot_bytes += row_bytes;
+                } else { snapshot_rows = None; }
+            }
+            if read >= start && output.len() < limit {
+                let mut cells = Vec::with_capacity(names.len());
+                for (column, kind) in kinds.iter_mut().enumerate() {
+                    let value = row.get_ref(column).map_err(db_error)?;
+                    if *kind == "unknown" || *kind == "null" { *kind = value_type(value); }
+                    cells.push(cell(value, false)?);
+                }
+                output.push(json!({"index":read,"cells":cells}));
+            }
+            read += 1;
+            // Without a snapshot only the row after the page is still needed for hasMore.
+            if snapshot_rows.is_none() && read > start.saturating_add(limit) { break; }
+        }
+        let has_more = match &snapshot_rows {
+            Some(retained) => start.saturating_add(limit) < retained.len(),
+            None => read > start.saturating_add(limit),
+        };
+        let snapshot = snapshot_rows.map(|rows| Arc::new(Snapshot { columns: names.clone(), rows }));
+        let columns: Vec<Value> = names.into_iter().zip(kinds).map(|(name, kind)| json!({"name":name,"type":kind})).collect();
+        Ok((json!({"columns":columns,"rows":output,"offset":start,"returned":output.len(),"hasMore":has_more}), executed, snapshot))
+    }
+    fn snapshot_page(&self, snapshot: &Snapshot, start: usize, limit: usize, full: bool) -> DriverResult<Value> {
+        let end = start.saturating_add(limit).min(snapshot.rows.len());
+        let mut output = Vec::new();
+        let mut kinds = vec!["unknown"; snapshot.columns.len()];
+        if start < end {
+            for (index, values) in snapshot.rows.iter().enumerate().skip(start).take(end - start) {
+                let mut cells = Vec::with_capacity(values.len());
+                for (column, value) in values.iter().enumerate() {
+                    let kind = &mut kinds[column];
+                    if *kind == "unknown" || *kind == "null" { *kind = value_type(value_ref(value)); }
+                    cells.push(cell(value_ref(value), full)?);
+                }
+                output.push(json!({"index":index,"cells":cells}));
+            }
+        }
+        let columns: Vec<Value> = snapshot.columns.iter().zip(kinds).map(|(name, kind)| json!({"name":name,"type":kind})).collect();
+        Ok(json!({"columns":columns,"rows":output,"offset":start,"returned":output.len(),"hasMore":start.saturating_add(limit) < snapshot.rows.len()}))
     }
     fn full_cell(&self, cursor_id: &str, row: &Value, column: &Value) -> DriverResult<Value> {
         let row = row.as_u64().ok_or_else(|| invalid("rowIndex 必须是非负整数"))? as usize;
         let column = column.as_u64().ok_or_else(|| invalid("columnIndex 必须是非负整数"))? as usize;
         let cursor = self.cursor(cursor_id)?;
+        if let Some(snapshot) = &cursor.snapshot {
+            let values = snapshot.rows.get(row).ok_or_else(|| object_error("单元格不存在，结果集可能已变化"))?;
+            let value = values.get(column).ok_or_else(|| object_error("单元格不存在，结果集可能已变化"))?;
+            return cell(value_ref(value), true);
+        }
         let (page, _) = self.page(&cursor.sql, &cursor.params, row, 1, true)?;
         page.get("rows").and_then(|v| v.get(0)).and_then(|v| v.get("cells")).and_then(|v| v.get(column)).cloned()
             .ok_or_else(|| object_error("单元格不存在，结果集可能已变化"))
@@ -225,6 +334,9 @@ impl SqliteDriver {
         let sql = single_statement(raw)?;
         let params = bind_parameters(self.db()?, &sql, options)?;
         let key = keyword(&sql);
+        if self.import_failed && !(key == "rollback" && sql_words(&sql).iter().all(|w| w.word != "to")) {
+            return Err(invalid("导入已失败，请先回滚整个导入事务"));
+        }
         let statement = self.db()?.prepare(&sql).map_err(db_error)?;
         let columns = statement.column_count();
         let readonly = statement.readonly();
@@ -235,8 +347,21 @@ impl SqliteDriver {
             if columns > 0 { return Err(DriverError::unsupported("带 RETURNING 的写语句尚不支持分页；请分开执行写入与 SELECT")); }
             if self.import_active { return Err(invalid("导入事务期间不能执行普通写入")); }
             let own = self.begin()?;
+            if let Err(error) = self.db()?.execute_batch("SAVEPOINT dbstudio_statement") {
+                if own { self.rollback()?; }
+                return Err(db_error(error));
+            }
             let result = self.db()?.execute(&sql, params_from_iter(params.iter()));
-            let affected = match result { Ok(n) => n, Err(error) => { if own { self.rollback()?; } return Err(db_error(error)); } };
+            let affected = match result {
+                Ok(n) => { self.db()?.execute_batch("RELEASE dbstudio_statement").map_err(db_error)?; n },
+                Err(error) => {
+                    if !self.db()?.is_autocommit() {
+                        self.db()?.execute_batch("ROLLBACK TO dbstudio_statement; RELEASE dbstudio_statement").map_err(db_error)?;
+                    } else { self.pending = 0; }
+                    if own { self.rollback()?; }
+                    return Err(db_error(error));
+                }
+            };
             self.pending += affected as u64;
             return Ok(json!({"kind":"affected","affected":affected,"inTransaction":!self.db()?.is_autocommit(),
                 "transactionState":self.transaction_state(),"executedSql":sql,"elapsedMs":started.elapsed().as_millis() as u64}));
@@ -498,6 +623,12 @@ impl SqliteDriver {
         }
     }
     fn import_batch(&mut self, id: &str, batch: &Value) -> DriverResult<Value> {
+        if self.import_failed { return Err(invalid("导入已失败，请先回滚整个导入事务")); }
+        let result = self.import_batch_inner(id, batch);
+        if result.is_err() && self.import_active { self.import_failed = true; }
+        result
+    }
+    fn import_batch_inner(&mut self, id: &str, batch: &Value) -> DriverResult<Value> {
         let target = self.target(id, false)?;
         let batch = record(batch, "ImportBatch")?;
         let batch_index = batch.get("batchIndex").and_then(Value::as_u64).ok_or_else(|| invalid("batchIndex 必须是非负整数"))?;
@@ -679,6 +810,34 @@ fn relation_kind<'a>(id: &'a str, expected: &str) -> DriverResult<(&'a str, &'a 
     Ok((kind, name))
 }
 fn escape_part(text: &str) -> String { text.replace('\\', "\\\\").replace('.', "\\.") }
+/// Raw byte estimate used by the snapshot budget; NULL and numbers are counted as fixed sizes.
+fn value_bytes(value: ValueRef<'_>) -> usize {
+    match value {
+        ValueRef::Null => 0,
+        ValueRef::Integer(_) | ValueRef::Real(_) => 8,
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
+    }
+}
+/// Owns one cell value for the snapshot. Invalid UTF-8 cannot be represented by `SqlValue`, so it
+/// abandons the snapshot instead of failing the query; the live path keeps reporting the error.
+fn owned_value(value: ValueRef<'_>) -> Option<SqlValue> {
+    Some(match value {
+        ValueRef::Null => SqlValue::Null,
+        ValueRef::Integer(n) => SqlValue::Integer(n),
+        ValueRef::Real(n) => SqlValue::Real(n),
+        ValueRef::Text(bytes) => SqlValue::Text(std::str::from_utf8(bytes).ok()?.to_owned()),
+        ValueRef::Blob(bytes) => SqlValue::Blob(bytes.to_vec()),
+    })
+}
+fn value_ref(value: &SqlValue) -> ValueRef<'_> {
+    match value {
+        SqlValue::Null => ValueRef::Null,
+        SqlValue::Integer(n) => ValueRef::Integer(*n),
+        SqlValue::Real(n) => ValueRef::Real(*n),
+        SqlValue::Text(text) => ValueRef::Text(text.as_bytes()),
+        SqlValue::Blob(bytes) => ValueRef::Blob(bytes),
+    }
+}
 fn value_type(value: ValueRef<'_>) -> &'static str {
     match value { ValueRef::Null => "null", ValueRef::Integer(_) => "integer", ValueRef::Real(_) => "real", ValueRef::Text(_) => "text", ValueRef::Blob(_) => "blob" }
 }
