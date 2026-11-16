@@ -110,6 +110,9 @@ export function parseFilter(text: string, quote: (name: string) => string): Filt
 
   // 用 AND 切分多条件。注意：不考虑字符串字面量里出现的 " AND "（简化版的已知限制，
   // 在注释里写明；真实场景若值里含 AND 请改用 SQL 里的 WHERE）。
+  // 尾随的 AND 不会被 split 切开，会被当成值的一部分（如 `age > 1 AND` 变成
+  // 值 `'1 AND'`），静默生成错误语义的 SQL。这类笔误必须报错。
+  if (/\s+AND$/i.test(trimmed)) return { ok: false, error: '存在空的筛选条件（多余的 AND）' }
   const parts = trimmed.split(/\s+AND\s+/i)
   const conditions: FilterCondition[] = []
   for (const part of parts) {

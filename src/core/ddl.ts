@@ -95,6 +95,8 @@ function previewCreateTable(
     throw new Error('create-table 的 target.name 必须与 spec.name 一致')
   }
   if (spec.columns.length === 0) throw new Error('建表至少需要一列')
+  // 重复列名会生成数据库直接拒绝的 DDL；与索引/外键列使用同一套去重口径。
+  uniqueNames(spec.columns.map((column) => column.name), '列名')
 
   const primaryKeys = spec.columns
     .filter((column) => column.primaryKeyOrdinal !== undefined)
