@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { SQLITE_SCRIPT_RULES } from '@core/sql-script'
+import { SQLITE_SCRIPT_RULES } from '../../../src/core/sql-script'
 import {
   currentSql,
   exactNumberLiteral,

@@ -10,19 +10,17 @@ import {
   rootConnectionId,
   treeWindow
 } from './tree-model'
-import type { TreeNode } from './tree-model'
-
-function connectionNode(id: string, name = 'conn', dialect = 'sqlite'): TreeNode {
+function connectionNode(id: string, name = 'conn', dialect = 'sqlite'): any {
   return {
     ref: { kind: 'connection', id, name, meta: { dialect } },
     children: [],
     loaded: true,
     expanded: false
-  } as unknown as TreeNode
+  } as unknown as any
 }
 
-function childNode(kind: string, id: string, name: string): TreeNode {
-  return { ref: { kind, id, name }, children: [], loaded: true, expanded: false } as unknown as TreeNode
+function childNode(kind: string, id: string, name: string): any {
+  return { ref: { kind, id, name }, children: [], loaded: true, expanded: false } as unknown as any
 }
 
 describe('根连接 id 提取', () => {
@@ -54,7 +52,7 @@ describe('连接身份绑定', () => {
   })
 
   test('没有方言元数据时用空串占位，不会与同名同方言混淆', () => {
-    const noMeta = { ref: { kind: 'connection', id: 'connection:c1', name: 'x' }, children: [], loaded: true } as unknown as TreeNode
+    const noMeta = { ref: { kind: 'connection', id: 'connection:c1', name: 'x' }, children: [], loaded: true } as unknown as any
     expect(connectionIdentity(noMeta)).toBe(JSON.stringify(['x', '']))
   })
 
@@ -170,7 +168,7 @@ describe('树扁平化', () => {
   test('展开的连接把子节点排在后面', () => {
     const root = connectionNode('connection:c1', 'conn')
     ;(root as { expanded: boolean }).expanded = true
-    ;(root as { children: TreeNode[] }).children = [childNode('table', 'table:a', 'a'), childNode('table', 'table:b', 'b')]
+    ;(root as { children: any[] }).children = [childNode('table', 'table:a', 'a'), childNode('table', 'table:b', 'b')]
     const rows = flattenTree([root])
     expect(rows).toHaveLength(3)
     expect(rows[1]?.depth).toBe(1)
@@ -181,12 +179,12 @@ describe('树扁平化', () => {
   test('搜索时保留命中项的父链并过滤掉无关分支', () => {
     const root = connectionNode('connection:c1', 'conn')
     ;(root as { expanded: boolean }).expanded = true
-    ;(root as { children: TreeNode[] }).children = [
+    ;(root as { children: any[] }).children = [
       childNode('table', 'table:orders', 'orders'),
       childNode('table', 'table:users', 'users')
     ]
     const rows = flattenTree([root], 'orders')
-    const names = rows.map((row) => row.node.ref.name)
+    const names = rows.map((row) => (row as { node: any }).node.ref.name)
     expect(names).toContain('orders')
     expect(names).not.toContain('users')
     expect(names).toContain('conn')
@@ -195,15 +193,15 @@ describe('树扁平化', () => {
   test('搜索大小写不敏感', () => {
     const root = connectionNode('connection:c1', 'CONN')
     ;(root as { expanded: boolean }).expanded = true
-    ;(root as { children: TreeNode[] }).children = [childNode('table', 'table:orders', 'Orders')]
+    ;(root as { children: any[] }).children = [childNode('table', 'table:orders', 'Orders')]
     expect(flattenTree([root], 'orders').length).toBeGreaterThan(0)
   })
 
   test('没有命中时不含任何数据行', () => {
     const root = connectionNode('connection:c1', 'conn')
     ;(root as { expanded: boolean }).expanded = true
-    ;(root as { children: TreeNode[] }).children = [childNode('table', 'table:a', 'a')]
+    ;(root as { children: any[] }).children = [childNode('table', 'table:a', 'a')]
     const rows = flattenTree([root], 'zzz-no-match')
-    expect(rows.map((row) => row.node.ref.name)).not.toContain('a')
+    expect(rows.map((row) => (row as { node: any }).node.ref.name)).not.toContain('a')
   })
 })
