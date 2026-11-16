@@ -985,3 +985,95 @@ fn bind_parameters(db: &Connection, sql: &str, options: Option<&Value>) -> Drive
     if supplied.keys().any(|key| !used.contains(key)) { return Err(invalid("提供了没有对应占位符的参数")); }
     Ok(params)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_rejects_empty_and_nul_then_doubles_inner_quotes() {
+        assert!(quote("").is_err());
+        assert!(quote("a\0b").is_err());
+        assert_eq!(quote("plain").unwrap(), "\"plain\"");
+        // 标识符里的双引号必须双写，否则会提前闭合、把后半段当 SQL。
+        assert_eq!(quote("a\"b").unwrap(), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn page_size_clamps_into_valid_range() {
+        assert_eq!(page_size(None), PAGE_SIZE);
+        // 0 与负数都夹到 1：取 0 行会让界面看起来「查不到数据」。
+        assert_eq!(page_size(Some(&json!(0))), 1);
+        assert_eq!(page_size(Some(&json!(-5))), 1);
+        assert_eq!(page_size(Some(&json!(50))), 50);
+        assert_eq!(page_size(Some(&json!(50.9))), 50);
+        assert_eq!(page_size(Some(&json!(10_000))), MAX_PAGE_SIZE);
+        // 非数字与 NaN 回退默认页大小，而不是 panic 或给 0。
+        assert_eq!(page_size(Some(&json!("x"))), PAGE_SIZE);
+    }
+
+    #[test]
+    fn offset_clamps_non_negative_and_falls_back_to_zero() {
+        assert_eq!(offset(None), 0);
+        assert_eq!(offset(Some(&json!(-1))), 0);
+        assert_eq!(offset(Some(&json!(100))), 100);
+        assert_eq!(offset(Some(&json!(1e30))), MAX_SAFE_INTEGER as usize);
+        assert_eq!(offset(Some(&json!(null))), 0);
+    }
+
+    #[test]
+    fn single_statement_rejects_empty_nul_and_multiple_statements() {
+        assert!(single_statement("   ").is_err());
+        assert!(single_statement("SELECT 1\0").is_err());
+        assert_eq!(single_statement("SELECT 1").unwrap(), "SELECT 1");
+        // 结尾分号被去掉；语句本身不变。
+        assert_eq!(single_statement("SELECT 1;").unwrap(), "SELECT 1");
+        let multi = single_statement("SELECT 1; SELECT 2").unwrap_err();
+        assert!(multi.to_string().contains("一次只能执行一条"));
+    }
+
+    #[test]
+    fn single_statement_ignores_semicolons_inside_quotes_and_comments() {
+        // 字符串与注释里的分号不是语句边界。
+        assert_eq!(single_statement("SELECT 'a;b'").unwrap(), "SELECT 'a;b'");
+        assert_eq!(single_statement("SELECT 1 -- ;x").unwrap(), "SELECT 1 -- ;x");
+        assert_eq!(single_statement("SELECT /* ; */ 1").unwrap(), "SELECT /* ; */ 1");
+    }
+
+    #[test]
+    fn normalize_type_allows_known_kinds_and_rejects_others() {
+        assert_eq!(normalize_type("integer").unwrap(), "INTEGER");
+        assert_eq!(normalize_type(" text ").unwrap(), "TEXT");
+        assert_eq!(normalize_type("varchar(64)").unwrap(), "VARCHAR(64)");
+        assert!(normalize_type("INTEGER; DROP TABLE t").is_err());
+        assert!(normalize_type("").is_err());
+        assert!(normalize_type("BOGUS").is_err());
+    }
+
+    #[test]
+    fn split_identifiers_unwraps_quotes_and_doubled_quotes() {
+        assert_eq!(split_identifiers("a,b"), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(split_identifiers(" a , b "), vec!["a".to_string(), "b".to_string()]);
+        // 引号包裹的标识符内部可以有逗号，且双写引号还原成一个。
+        assert_eq!(split_identifiers("\"a,b\""), vec!["a,b".to_string()]);
+        assert_eq!(split_identifiers("\"a\"\"b\""), vec!["a\"b".to_string()]);
+    }
+
+    #[test]
+    fn escape_part_round_trips_dots_and_backslashes() {
+        assert_eq!(escape_part("plain"), "plain");
+        assert_eq!(escape_part("a.b"), "a\\.b");
+        // 反斜杠先转义，否则后面的点转义会被误读。
+        assert_eq!(escape_part("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn relation_accepts_only_table_and_view_ids() {
+        assert_eq!(relation("table:items").unwrap(), ("table", "items"));
+        assert_eq!(relation("view:v").unwrap(), ("view", "v"));
+        assert!(relation("column:items.id").is_err());
+        assert!(relation("table:").is_err());
+        assert!(relation("no-colon").is_err());
+        assert!(relation("table:a\0b").is_err());
+    }
+}
