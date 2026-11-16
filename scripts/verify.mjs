@@ -13,13 +13,12 @@ import { STEPS, checkEnv } from './verify-manifest.mjs'
 // CI 全新 checkout 时不存在，需在这里准备好，否则这些步骤会以 ENOENT 失败。
 mkdirSync(resolve(import.meta.dirname, '..', 'out'), { recursive: true })
 
-const GROUPS = new Set(['node', 'gui', 'external'])
+const GROUPS = new Set(['node', 'external'])
 const HELP = `用法：
   node scripts/verify.mjs [分组] [选项]
 
 分组：
   node       纯 Node 步骤
-  gui        需要真实窗口的步骤
   external   需要外部服务的步骤
   （省略分组时执行全部分组）
 

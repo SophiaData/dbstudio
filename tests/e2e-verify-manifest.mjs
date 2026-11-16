@@ -95,7 +95,7 @@ check('步骤 id 无重复', new Set(ids).size === ids.length)
 check('每一步都有标题', STEPS.every((s) => typeof s.title === 'string' && s.title.length > 0))
 check(
   '分组取值合法',
-  STEPS.every((s) => ['node', 'gui', 'external'].includes(s.group))
+  STEPS.every((s) => ['node', 'external'].includes(s.group))
 )
 
 console.log('\n[4] external 组必须声明环境变量')
@@ -107,7 +107,7 @@ check(
 )
 
 console.log('\n[5] 分组入口齐全且可用')
-for (const group of ['node', 'gui', 'external']) {
+for (const group of ['node', 'external']) {
   check(`stepIds('${group}') 非空`, stepIds(group).length > 0, `${group} 组为空`)
 }
 check(
