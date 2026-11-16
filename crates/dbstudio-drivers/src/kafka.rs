@@ -227,3 +227,80 @@ impl Driver for KafkaDriver {
         Ok(())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Map, json};
+
+    fn config(options: Map<String, Value>) -> ConnectionConfig {
+        ConnectionConfig { dialect_id: "kafka".into(), name: "test".into(), options }
+    }
+
+    #[test]
+    fn parse_brokers_splits_trims_and_keeps_order() {
+        assert_eq!(
+            parse_brokers("a:9092,b:9093").unwrap(),
+            vec!["a:9092".to_string(), "b:9093".to_string()]
+        );
+        // 前后空白与空项被丢掉，不产生空 broker。
+        assert_eq!(
+            parse_brokers(" a:9092 , , b:9093 ").unwrap(),
+            vec!["a:9092".to_string(), "b:9093".to_string()]
+        );
+        // IPv6 的方括号形式地址里有点号与冒号，靠 rsplit 取最后一个冒号做端口分隔。
+        assert_eq!(parse_brokers("[::1]:9092").unwrap(), vec!["[::1]:9092".to_string()]);
+    }
+
+    #[test]
+    fn parse_brokers_rejects_empty_and_malformed_entries() {
+        assert!(parse_brokers("").is_err());
+        assert!(parse_brokers("   ").is_err());
+        assert!(parse_brokers(",,").is_err());
+        // 缺端口
+        assert!(parse_brokers("host").is_err());
+        // 端口非数字、为 0、超出 u16
+        assert!(parse_brokers("host:abc").is_err());
+        assert!(parse_brokers("host:0").is_err());
+        assert!(parse_brokers("host:65536").is_err());
+        // 主机为空、含路径、含空白
+        assert!(parse_brokers(":9092").is_err());
+        assert!(parse_brokers("/tmp/x:9092").is_err());
+        assert!(parse_brokers("h ost:9092").is_err());
+    }
+
+    // 一个坏地址混在好地址里也要整体拒绝：只连上部分 broker 会造成
+    // 「有时能读到元数据、有时读不到」的偶发故障。
+    #[test]
+    fn parse_brokers_rejects_whole_list_when_any_entry_is_bad() {
+        assert!(parse_brokers("good:9092,bad").is_err());
+        assert!(parse_brokers("good:9092,bad:0").is_err());
+    }
+
+    #[test]
+    fn option_returns_fallback_then_trims_strings_and_rejects_non_strings() {
+        let empty = config(Map::new());
+        assert_eq!(option(&empty, "ssl", "off").unwrap(), "off");
+
+        let mut options = Map::new();
+        options.insert("ssl".into(), json!("  on  "));
+        assert_eq!(option(&config(options), "ssl", "off").unwrap(), "on");
+
+        // 数字/布尔/对象都不是合法选项值，必须拒绝而不是偷偷转成字符串。
+        for value in [json!(1), json!(true), json!({"a": 1}), json!([1])] {
+            let mut map = Map::new();
+            map.insert("ssl".into(), value.clone());
+            assert!(option(&config(map), "ssl", "off").is_err(), "应拒绝 {value}");
+        }
+    }
+
+    // 能力声明决定 UI 显示成只读还是可编辑；写错会让界面出现不存在的入口。
+    #[test]
+    fn capabilities_declare_read_only_and_unpaginated() {
+        let caps = capabilities();
+        assert_eq!(caps["supportsInlineEdit"], json!(false));
+        assert_eq!(caps["supportsServerPagination"], json!(false));
+        assert_eq!(caps["supportsCancel"], json!(false));
+        assert_eq!(caps["hasCatalog"], json!(false));
+        assert_eq!(caps["hasSchema"], json!(false));
+    }
+}
