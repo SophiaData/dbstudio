@@ -242,3 +242,32 @@ fn partial_secret_update_does_not_treat_vault_read_failure_as_empty() {
     assert_eq!(error.code, "secret-storage-unavailable"); assert!(!error.message.contains("synthetic-private"));
     assert_eq!(*secrets.values.lock().unwrap(), before); app.close().unwrap();
 }
+
+#[test]
+fn node_id_parsing_accepts_connection_and_scoped_forms() {
+    // 裸连接 id：没有作用域后缀，也不是 connection: 前缀形式。
+    assert_eq!(parse_node_or_connection("c-1").unwrap(), ("c-1", None));
+    // scoped 形式必须带 | 分开的节点路径。
+    assert_eq!(parse_node_or_connection("connection:c-1").unwrap(), ("c-1", None));
+    assert_eq!(parse_node_or_connection("connection:c-1|table:testdb.t").unwrap(),
+        ("c-1", Some("table:testdb.t")));
+}
+
+#[test]
+fn node_id_parsing_rejects_ambiguous_and_empty_forms() {
+    // 含 | 但不带 connection: 前缀时无法判定作用域，必须拒绝。
+    assert!(parse_node_or_connection("c-1|table:t").is_err());
+    assert_eq!(parse_node_or_connection("").unwrap_err().code, "invalid-argument");
+    // 空连接 id 与空作用域都无效。
+    assert!(parse_node_or_connection("connection:").is_err());
+    assert!(parse_node_or_connection("connection:|table:t").is_err());
+    assert!(parse_node_or_connection("connection:c-1|").is_err());
+}
+
+#[test]
+fn node_id_parsing_keeps_escaped_dots_inside_scope() {
+    // 节点路径里的转义点不能被当成作用域分隔符。
+    let (connection, scope) = parse_node_or_connection("connection:c-1|table:testdb.a\\.b").unwrap();
+    assert_eq!(connection, "c-1");
+    assert_eq!(scope, Some("table:testdb.a\\.b"));
+}
