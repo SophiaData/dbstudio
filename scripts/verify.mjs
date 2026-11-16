@@ -5,7 +5,13 @@
  * 执行单步骤前的构建和夹具责任由调用方承担。
  */
 import { spawnSync } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { STEPS, checkEnv } from './verify-manifest.mjs'
+
+// 部分步骤在仓库 out/ 下建临时夹具目录。该目录被 .gitignore 忽略，
+// CI 全新 checkout 时不存在，需在这里准备好，否则这些步骤会以 ENOENT 失败。
+mkdirSync(resolve(import.meta.dirname, '..', 'out'), { recursive: true })
 
 const GROUPS = new Set(['node', 'gui', 'external'])
 const HELP = `用法：
