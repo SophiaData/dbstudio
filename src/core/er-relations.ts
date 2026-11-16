@@ -179,7 +179,7 @@ export function inferSchemaFromObjectId(objectId: string, dialectId: string | nu
   return schema === '' ? null : schema
 }
 
-function firstUnescapedDot(value: string): number {
+export function firstUnescapedDot(value: string): number {
   for (let index = 0; index < value.length; index += 1) {
     const ch = value.charAt(index)
     if (ch === '\\') {
@@ -192,7 +192,7 @@ function firstUnescapedDot(value: string): number {
 }
 
 /** 反转义 id 片段里的 `\.` / `\\`（与各驱动的 `escapePart` 对称）。 */
-function unescapeIdPart(part: string): string {
+export function unescapeIdPart(part: string): string {
   let out = ''
   for (let index = 0; index < part.length; index += 1) {
     const ch = part.charAt(index)

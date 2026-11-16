@@ -1260,17 +1260,15 @@ impl Driver for MysqlDriver {
                     )?;
                     if rows.len() >= limit as usize { counts_hit_limit = true; }
                     // 列所属对象可能是视图，不能一律标成 table。
+                    // 视图清单失败时不能降级成空列表：那会把所有视图列误标成 table。
                     let view_keys: Vec<(String, String)> = self
                         .query(
                             "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_TYPE = 'VIEW' AND (? IS NULL OR TABLE_SCHEMA = ?) LIMIT 5000",
                             &[scope_arg.clone(), scope_arg.clone()],
-                        )
-                        .map(|rows| {
-                            rows.iter()
-                                .map(|row| (text_at(row, 0).unwrap_or_default(), text_at(row, 1).unwrap_or_default()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                        )?
+                        .iter()
+                        .map(|row| (text_at(row, 0).unwrap_or_default(), text_at(row, 1).unwrap_or_default()))
+                        .collect();
                     for row in &rows {
                         let schema_name = text_at(row, 0).unwrap_or_default();
                         let table = text_at(row, 1).unwrap_or_default();

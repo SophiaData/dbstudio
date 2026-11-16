@@ -93,6 +93,27 @@ const withHistory = analyzeFieldLineage({
 assert.equal(withHistory.items.length, 1)
 assert.equal(withHistory.items[0].confidence, 'likely')
 
+// ===== 节点 id 解析：表名里的点必须靠转义区分，不能用 lastIndexOf =====
+const erRelations = load('src/core/er-relations.ts')
+const { firstUnescapedDot, unescapeIdPart } = erRelations
+
+// 普通限定名：唯一的点是分隔符。
+assert.equal(firstUnescapedDot('testdb.users'), 6)
+// 表名里带转义点：分隔符仍是第一个未转义的点。
+const escaped = 'testdb.user\\.archive'
+assert.equal(firstUnescapedDot(escaped), 6, '转义点不能被当成分隔符')
+assert.equal(unescapeIdPart(escaped.slice(0, 6)), 'testdb')
+assert.equal(unescapeIdPart(escaped.slice(7)), 'user.archive', '反转义后应还原真实表名')
+// 反斜杠本身也要能还原。
+assert.equal(unescapeIdPart('a\\\\b'), 'a\\b')
+// 没有未转义点时返回 -1，调用方据此报错而不是猜。
+assert.equal(firstUnescapedDot('testdb'), -1)
+assert.equal(firstUnescapedDot('a\\.b'), -1, '全部转义时没有分隔符')
+
+// 对照：错误做法（lastIndexOf）在同样输入下会切错位置。
+const wrong = escaped.lastIndexOf('.')
+assert.notEqual(wrong, 6, 'lastIndexOf 会落到转义点上，正是要避免的行为')
+
 const failed = []
 if (failed.length) process.exitCode = 1
-console.log(JSON.stringify({ scope: 'field-lineage-analysis-in-memory-transpile', total: 12, passed: 12, failed: 0 }))
+console.log(JSON.stringify({ scope: 'field-lineage-analysis-in-memory-transpile', total: 21, passed: 21, failed: 0 }))

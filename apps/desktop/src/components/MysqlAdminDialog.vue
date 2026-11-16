@@ -14,6 +14,8 @@ import type {
   EventListing, IndexChangeSpec, LineageEvidence, ObjectRef, PartitionChangeSpec,
   SearchObjectsResult, SessionListing, UserListing
 } from '../../../../src/core/model'
+import { analyzeFieldLineage, type FieldLineageResult } from '../../../../src/core/field-lineage'
+import { firstUnescapedDot, unescapeIdPart } from '../../../../src/core/er-relations'
 import { errorText } from '../backend'
 import type { Workbench } from '../workbench'
 
@@ -32,6 +34,28 @@ const searchKeyword = ref('')
 const searchResult = shallowRef<SearchObjectsResult | null>(null)
 const lineageColumn = ref('')
 const lineageEvidence = shallowRef<LineageEvidence | null>(null)
+/**
+ * 血缘分档结果。
+ *
+ * 驱动只给原始证据（外键、视图、同名列），可信度判断在渲染进程做：
+ * 外键是确定的，视图引用要看定义里是否同时出现表与列，同名列只能算可能。
+ */
+const lineageAnalysis = computed<FieldLineageResult | null>(() => {
+  const evidence = lineageEvidence.value
+  const nodeId = tableNodeId.value
+  if (!evidence || nodeId === null) return null
+  const raw = nodeId.split('|').length > 1 ? nodeId.split('|')[1]! : ''
+  const qualified = raw.startsWith('table:') ? raw.slice('table:'.length) : raw
+  const dot = firstUnescapedDot(qualified)
+  if (dot <= 0) return null
+  const schema = unescapeIdPart(qualified.slice(0, dot))
+  const table = unescapeIdPart(qualified.slice(dot + 1))
+  return analyzeFieldLineage({
+    target: { schema, table, column: lineageColumn.value.trim() },
+    tables: evidence.tables ?? [],
+    views: evidence.views ?? []
+  })
+})
 const newUser = ref('')
 const newUserHost = ref('%')
 const newUserPassword = ref('')
@@ -154,10 +178,12 @@ async function loadLineage() {
   const parts = nodeId.split('|')
   const raw = parts.length > 1 ? parts[1] : ''
   const qualified = raw.startsWith('table:') ? raw.slice('table:'.length) : raw
-  const dot = qualified.lastIndexOf('.')
+  // 节点 id 里的标识符会转义 `.` 与 `\\`，不能用 lastIndexOf 切分。
+  const dot = firstUnescapedDot(qualified)
   if (dot <= 0) throw new Error('请选择具体的表节点')
-  const schema = qualified.slice(0, dot)
-  const table = qualified.slice(dot + 1)
+  const schema = unescapeIdPart(qualified.slice(0, dot))
+  const table = unescapeIdPart(qualified.slice(dot + 1))
+  if (!schema || !table) throw new Error('请选择具体的表节点')
   await run(async () => {
     lineageEvidence.value = await props.workbench.fieldLineage(props.connectionId, table, lineageColumn.value.trim(), schema)
   })
@@ -366,18 +392,20 @@ void switchTab(tab.value)
           <label>列名<input v-model="lineageColumn" maxlength="64" placeholder="例如 parent_id" required /></label>
           <button type="submit" :disabled="busy || !tableNodeId">读取血缘</button>
         </form>
-        <ul v-if="lineageEvidence" class="admin-list">
-          <li v-for="key in lineageEvidence.foreignKeys" :key="key.name + key.table + key.column">
-            <strong>外键（确定）</strong>
-            {{ key.table }}.{{ key.column }} → {{ key.refTable }}.{{ key.refColumn }}（{{ key.direction }}）
-          </li>
-          <li v-for="view in lineageEvidence.views" :key="view.name">
-            <span v-if="view.ddl.includes(lineageColumn.trim())">
-              <strong>视图（可能）</strong> {{ view.name }}
-            </span>
+        <p v-if="lineageAnalysis" class="muted">
+          确定 {{ lineageAnalysis.counts.certain }} · 可能 {{ lineageAnalysis.counts.possible }}
+        </p>
+        <ul v-if="lineageAnalysis && lineageAnalysis.items.length" class="admin-list">
+          <li v-for="item in lineageAnalysis.items" :key="item.id">
+            <strong>{{ item.confidence === 'certain' ? '确定' : item.confidence === 'likely' ? '较可能' : '可能' }}</strong>
+            {{ item.title }}
+            <span v-if="item.description" class="muted"> · {{ item.description }}</span>
           </li>
         </ul>
-        <p v-if="lineageEvidence && !lineageEvidence.foreignKeys.length" class="muted">没有外键证据</p>
+        <p v-else-if="lineageAnalysis" class="muted">没有找到字段血缘证据</p>
+        <p v-if="lineageAnalysis && lineageAnalysis.counts.certain === 0 && lineageAnalysis.items.length > 0" class="muted">
+          以上均为推测证据，需要人工确认
+        </p>
       </div>
 
       <div v-if="tab === 'source'" class="admin-panel">
