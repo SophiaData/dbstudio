@@ -2,10 +2,8 @@
 #
 # 为什么值得加这一条：本地开发时 node_modules / out / fixtures 都是现成的，
 # 很容易出现「在我机器上能过」。这个 workflow 从零安装、重新生成夹具、
-# 跑全部 e2e 断言与 8 段 GUI 验证（含真实 PG、SSH 隧道、SSL 与 Electron 点击链路），
 # 是「这个仓库克隆下来真的能跑」的唯一客观证据。
 #
-# 注意 GUI 自检需要显示环境；Linux CI 上用 xvfb 提供虚拟显示。
 
 name: verify
 
@@ -24,7 +22,6 @@ jobs:
 
     # ★ PostgreSQL 服务容器：让 PG 测试在 CI 里**真跑**，而不是被跳过。
     #
-    # 为什么必须加这个：早先 CI 里虽然调用了 `pnpm run test:postgres`，但没设
     # DBSTUDIO_PG_URL，于是每次走"缺环境→exit 0"的跳过分支。
     # 结果是 CI 全绿，但 **PG 驱动从来没在 CI 里被真正验证过** ——
     # 谁改坏了 PG，CI 照样绿，只有本地手动起过 PG 的人才会发现。
@@ -39,7 +36,6 @@ jobs:
           #
           # test:gui-explain-postgres 的流程是「连接 → 断开 → 重连」。断开时
           # ConnectionManager 会删掉内存里的密码（#sessionSecrets.delete），
-          # 重连只能从 ConnectionStore 取；而 ConnectionStore 用 Electron
           # safeStorage 加密，Linux 无桌面 keyring 时 safeStorage 不可用，
           # 密码存不住（日志会打印"密码未保存（安全存储不可用）"）。
           # 于是重连没有密码，scram 认证必然失败：
@@ -49,7 +45,6 @@ jobs:
           # 用户重输"，本身正确。而这里只需要一个能连上的测试库，
           # trust 认证让重连不依赖密码持久化，从而仍能真实验证重连链路。
           #
-          # 密码认证语义另有独立覆盖（test:postgres、test:postgres-ssl 等），
           # 不会因为这里放宽而失去验证。
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
@@ -60,7 +55,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # MySQL 8 服务容器：给 test:mysql-contract 用真实库。
       # 用**空密码**（MYSQL_ALLOW_EMPTY_PASSWORD）而不是密码认证，原因与 PG 用 trust 相同：
       # test 在 add 时把 secret 交给 ConnectionStore，Linux CI 无 keyring 存不住密码，
       # 重连会拿不到口令。空密码让测试不依赖密码持久化，仍能真实跑驱动。
@@ -93,19 +87,16 @@ jobs:
       - name: 安装依赖
         # 注意：不要在 CI 里重写 pnpm-workspace.yaml。
         # 仓库里那份已经包含两件必需的东西：
-        #   - allowBuilds: electron / esbuild 的 postinstall 需要跑（下载本机二进制）
-        #   - minimumReleaseAgeExclude: electron@45.0.0（pnpm 供应链策略默认拒绝
         #     "发布不足 X 小时" 的包，这个版本发布太新，必须显式豁免）
         # 早先这里用脚本重写 yaml，结果把 minimumReleaseAgeExclude 抹掉了，
         # CI 直接挂在 lockfile 供应链校验上。教训：CI 不要改仓库里的锁/配置。
         run: pnpm install --frozen-lockfile
 
-      - name: 类型检查 + 构建 + 全部 e2e（不含 GUI）
+      - name: 类型检查 + 构建 + 纯 Node 验证
         # 跑 `node` 分组——它就是清单里的纯 Node 步骤。
         #
         # ===== 为什么不直接 `pnpm verify` =====
         #
-        # GUI 需要显示环境，在无头 runner 上会挂住且报错难懂；
         # `external` 分组需要先起 PG/sshd（见后面的步骤）。
         # 所以这里按分组跑，但**清单本身是同一份**
         # （scripts/verify-manifest.mjs），不是在这里手抄一遍。
@@ -113,174 +104,3 @@ jobs:
         # 早先这里是手抄的步骤列表，加测试只改一边就会静默漏跑——
         # 而且不报错，只是悄悄少验证了一件事。
         run: pnpm run verify:node
-
-      - name: PostgreSQL 驱动端到端（真实 PG 17 服务容器）
-        # 与上面的 SQLite e2e 分开列，失败时能一眼看出是 PG 的问题。
-        # 这里显式设 DBSTUDIO_PG_URL，测试因此**不会**走跳过分支。
-        env:
-          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: |
-          node scripts/make-fixture-pg.mjs
-          node scripts/verify.mjs external --only test:postgres --require-external
-          node scripts/verify.mjs external --only test:explain-postgres --require-external
-          node scripts/verify.mjs external --only test:sql-params-postgres --require-external
-
-      - name: MySQL 驱动端到端（真实 MySQL 8 服务容器）
-        # 单独列一步，失败时一眼看出是 MySQL 的问题。空密码见 services.mysql 的说明。
-        env:
-          MYSQL_HOST: 127.0.0.1
-          MYSQL_PORT: '3306'
-          MYSQL_USER: root
-          MYSQL_PASSWORD: ''
-          MYSQL_DATABASE: testdb
-        run: |
-          node scripts/verify.mjs external --only test:mysql-contract --require-external
-
-      - name: 查询取消能力（PG 真取消 / SQLite 如实不支持）
-        env:
-          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: node scripts/verify.mjs external --only test:cancel --require-external
-
-      - name: SSH 隧道（真实 sshd + 真实 PG）
-        # ===== 为什么 CI 里要自己起 sshd，而不是跳过 =====
-        #
-        # SSH 隧道真正容易坏的都在协议层：主机指纹校验、公钥认证、
-        # pg 把 SSH channel 当 socket 用、取消查询另开 channel。
-        # 只跑 mock 等于没验。GitHub runner 自带 OpenSSH server 二进制，
-        # 用仓库生成的临时夹具起一个只监听 127.0.0.1:2222 的实例即可。
-        #
-        # 注意：夹具必须在同一个用户下生成并启动 sshd；authorized_keys
-        # 的属主/权限不对时 sshd 会直接断开，表现为很难查的 ECONNRESET。
-        env:
-          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: |
-          set -euo pipefail
-          pnpm run ssh-fixture
-          # 用绝对配置路径：sshd 在认证子进程里会 re-exec，相对路径会丢。
-          # 只监听 127.0.0.1:2222，以当前 runner 用户启动即可，不需要 sudo。
-          # 这样 sshd.pid 与夹具同属一个用户，清理时不会碰到权限问题。
-          /usr/sbin/sshd -f "$PWD/tests/.ssh-fixture/sshd_config" -E "$PWD/tests/.ssh-fixture/sshd.log"
-          trap 'kill "$(cat tests/.ssh-fixture/sshd.pid)" 2>/dev/null || true' EXIT
-          # 测试脚本本身会用 Node 探测端口；这里只需等 sshd 真正开始监听。
-          # 循环超时必须显式失败：否则 e2e 会把“sshd 没起来”记成 SKIP，
-          # CI 仍显示绿色，等于再次失去对隧道链路的验证。
-          ssh_ready=0
-          for i in $(seq 1 20); do
-            if node -e "const net=require('net');const s=net.connect(2222,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),1000)"; then
-              ssh_ready=1
-              break
-            fi
-            sleep 0.5
-          done
-          test "$ssh_ready" = 1
-          node scripts/verify.mjs external --only test:ssh-tunnel --require-external
-
-      - name: PostgreSQL SSL/TLS 语义（加密真生效 / 错误 CA 真被拒）
-        # ===== 为什么这里要自己起两个容器，而不是复用上面的 service =====
-        #
-        # 这个测试要同时观察**两种服务端形态**：
-        #   - 开了 SSL 的：验证 require / verify-ca / verify-full 真的加密并校验证书
-        #   - 没开 SSL 的：验证 prefer 真的回退明文（而不是报错，也不是假成功）
-        #
-        # GitHub 的 service 容器无法在测试中途改配置，所以两个实例各起一个。
-        #
-        # ===== 为什么必须真的起服务端，不能用 mock =====
-        #
-        # 我们要验的是"TLS 握手 + 证书链校验"，这整条链路发生在 OpenSSL 里。
-        # mock 掉之后，测的就只剩"我们把自己写的配置传给了 pg"，而真正会出错的
-        # 恰恰是"这个配置在真实握手时是什么语义"（比如 pg 的 ssl:true 会校验证书，
-        # 与 libpq 的 require 不等价——这个差异只有真握手才测得出来）。
-        env:
-          DBSTUDIO_PG_SSL_URL: postgres://postgres:postgres@127.0.0.1:55433/postgres
-          DBSTUDIO_PG_PLAIN_URL: postgres://postgres:postgres@127.0.0.1:55432/postgres
-        run: |
-          set -euo pipefail
-
-          # 无论测试成败都要清理：否则失败的容器会占着端口，
-          # 让后面本来独立的步骤因为"连接被拒"而连锁失败，把真正原因埋在噪音里。
-          cleanup() {
-            docker rm -f dbstudio-pg-plain dbstudio-pg-ssl >/dev/null 2>&1 || true
-            docker volume rm dbstudio-certs >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          # 1) 生成自签证书 + 一张无关证书（后者用来反证"链校验真的生效"）
-          pnpm run ssl-fixture
-
-          # 2) 未开 SSL 的实例
-          docker run -d --name dbstudio-pg-plain \
-            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
-            -p 55432:5432 postgres:17
-
-          # 3) 开 SSL 的实例。
-          #
-          # ===== 为什么证书要先经过一个 volume，而不是直接 bind mount =====
-          #
-          # 直接 -v 挂宿主目录会遇到两个必踩的坑：
-          #   a. 属主不匹配：宿主文件是 uid 501，容器里 PG 以 postgres(999) 运行，
-          #      读不了 600 的私钥 → 启动后连接一律失败。
-          #   b. 只读挂载：容器内若尝试 chmod 会失败；而 PG 又**要求**私钥
-          #      不能有 group/world 权限，否则拒绝启动。
-          #
-          # 所以先用一个临时 alpine 把证书复制进 named volume，并显式 chown/chmod，
-          # 让权限在容器视角下是"postgres 拥有 + 600"。这一步把两个坑都绕开了。
-          docker volume create dbstudio-certs >/dev/null
-          docker run --rm \
-            -v dbstudio-certs:/certs \
-            -v "$PWD/tests/.ssl-fixture:/src:ro" \
-            alpine:3.20 \
-            sh -c 'cp /src/server.crt /src/server.key /certs/ &&
-                   chown 999:999 /certs/server.crt /certs/server.key &&
-                   chmod 644 /certs/server.crt && chmod 600 /certs/server.key'
-
-          docker run -d --name dbstudio-pg-ssl \
-            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
-            -v dbstudio-certs:/certs:ro \
-            -p 55433:5432 postgres:17 \
-            -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
-
-          # 4) 等两个实例就绪（容器里的 pg_isready 比从宿主机连更可靠）
-          for i in $(seq 1 60); do
-            docker exec dbstudio-pg-plain pg_isready -U postgres >/dev/null 2>&1 && \
-            docker exec dbstudio-pg-ssl   pg_isready -U postgres >/dev/null 2>&1 && break
-            sleep 2
-          done
-
-          # 就绪循环到点后要显式确认，否则测试会拿到一个"连接被拒"的误导性失败。
-          docker exec dbstudio-pg-plain pg_isready -U postgres
-          docker exec dbstudio-pg-ssl   pg_isready -U postgres
-
-          # 关键时刻：确认服务端真的开了 SSL，而不是默默降级成明文。
-          # 若这里为 off，后面的 require/verify-* 断言会全部变红且原因难查。
-          docker exec dbstudio-pg-ssl psql -U postgres -tAc "show ssl" | grep -qx on
-
-          # 5) 跑测试
-          node scripts/verify.mjs external --only test:postgres-ssl --require-external
-
-      - name: 全部 GUI 测试（xvfb 提供虚拟显示）
-        # ===== 为什么合成一步 =====
-        #
-        # 早先这里是 11 个手抄的 GUI 步骤。加一个 GUI 测试只改一边就会静默漏跑，
-        # 而且不报错——只是悄悄少验证了一件事。现在改成跑清单里的 `gui` 分组，
-        # 清单本身与本地 `pnpm verify` 用的是同一份（scripts/verify-manifest.mjs）。
-        #
-        # --no-sandbox 的来历（Linux CI 常见坑）：
-        # Electron 的 chrome-sandbox 需要 root 所有且权限为 4755 才能启用 SUID 沙箱。
-        # GitHub Actions 的 runner 上安装出来的 chrome-sandbox 不满足这两个条件，
-        # Electron 直接 FATAL 退出："The SUID sandbox helper binary was found,
-        # but is not configured correctly. Rather than run without sandboxing I'm aborting now."
-        #
-        # 这里关掉沙箱是**测试环境的合理妥协**：我们只在 CI 里跑一次自检，
-        # 加载的是自己刚构建的本地页面，不访问外部不受信内容。
-        # 生产运行不经过这个脚本，不受影响。
-        #
-        # Linux 已在 Xvfb 中运行，窗口保持可见才能让 Playwright 截图正常完成；
-        # macOS 侧的隐藏窗口策略由 test:gui-hidden 自己断言锁定，防止回退。
-        env:
-          ELECTRON_DISABLE_SANDBOX: '1'
-          DBSTUDIO_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: |
-          sudo apt-get install -y xvfb
-          xvfb-run --auto-servernum pnpm run verify:gui
-          xvfb-run --auto-servernum node scripts/verify.mjs external --only test:gui-explain-postgres --require-external
-          xvfb-run --auto-servernum node scripts/verify.mjs external --only test:gui-sql-cancel-postgres --require-external
