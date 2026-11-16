@@ -173,3 +173,120 @@ fn validate_library(library: &Library) -> Result<(), AppError> {
 pub(crate) fn save_library(base: &Path, library: &Library) -> Result<(), AppError> {
     write_json(&base.join("sql-library-v2.json"), &LibraryFile { schema_version: 2, library: library.clone() })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbstudio_protocol::ConnectionConfig;
+    use serde_json::{json, Map};
+    use std::collections::BTreeMap;
+
+    fn config(name: &str, dialect: &str, options: Map<String, Value>) -> ConnectionConfig {
+        ConnectionConfig { dialect_id: dialect.into(), name: name.into(), options }
+    }
+    fn options_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
+    }
+
+    #[test]
+    fn validate_config_rejects_empty_name_or_dialect() {
+        let empty = Map::new();
+        assert!(validate_config(&config("", "sqlite", empty.clone())).is_err());
+        assert!(validate_config(&config("   ", "sqlite", empty.clone())).is_err());
+        assert!(validate_config(&config("ok", "", empty.clone())).is_err());
+        assert!(validate_config(&config("ok", "sqlite", empty)).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_oversized_name() {
+        let empty = Map::new();
+        assert!(validate_config(&config(&"x".repeat(1024), "sqlite", empty.clone())).is_ok());
+        assert!(validate_config(&config(&"x".repeat(1025), "sqlite", empty)).is_err());
+    }
+
+    #[test]
+    fn validate_config_blocks_secrets_in_any_key_spelling() {
+        // 键名先归一化（小写、去掉 _ 与 -）再比对，任何拼写都不应绕过。
+        for key in [
+            "password", "Password", "DB_PASSWORD", "dbPassword", "DB-PASSWORD",
+            "ssh_password", "sshPassphrase", "token", "accessToken", "ACCESS-TOKEN",
+            "apiKey", "API_KEY", "secret", "privateKeyData",
+        ] {
+            let options = options_of(&[(key, json!("hunter2"))]);
+            assert!(validate_config(&config("ok", "sqlite", options)).is_err(),
+                "机密参数应以任何拼写被拒绝：{key}");
+        }
+    }
+
+    #[test]
+    fn validate_config_allows_ordinary_options() {
+        let options = options_of(&[("host", json!("127.0.0.1")), ("port", json!(3306)), ("ssl", json!(true))]);
+        assert!(validate_config(&config("ok", "mysql", options)).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_non_scalar_option_values() {
+        for value in [json!({"nested": 1}), json!([1, 2]), json!(null)] {
+            let options = options_of(&[("host", value.clone())]);
+            assert!(validate_config(&config("ok", "sqlite", options)).is_err(),
+                "嵌套值应被拒绝：{value}");
+        }
+    }
+
+    #[test]
+    fn validate_library_accepts_well_formed_entries() {
+        let library = Library {
+            saved: vec![json!({"id": "s1", "name": "q", "sql": "select 1", "updatedAt": 1})],
+            history: vec![json!({"id": "h1", "sql": "select 1", "connectionId": "c1",
+                "connectionName": "n", "dialectId": "sqlite", "startedAt": 1, "elapsedMs": 1.5,
+                "status": "success", "error": null, "returnedRows": 1})],
+        };
+        assert!(validate_library(&library).is_ok());
+    }
+
+    #[test]
+    fn validate_library_rejects_unknown_keys_and_bad_shapes() {
+        // 未知键说明数据来源不可信，直接拒绝而不是忽略。
+        assert!(validate_library(&Library {
+            saved: vec![json!({"id": "s1", "name": "q", "sql": "s", "updatedAt": 1, "evil": 1})],
+            history: vec![],
+        }).is_err());
+        assert!(validate_library(&Library {
+            saved: vec![json!({"id": "s1", "name": "q", "sql": "   ", "updatedAt": 1})],
+            history: vec![],
+        }).is_err());
+        assert!(validate_library(&Library {
+            saved: vec![json!({"id": "s1", "name": "q", "sql": "s"})],
+            history: vec![],
+        }).is_err());
+    }
+
+    #[test]
+    fn validate_library_rejects_bad_history_status_and_metrics() {
+        let with_patch = |patch: Value| {
+            let mut entry = json!({"id": "h1", "sql": "s", "connectionId": "c1",
+                "connectionName": "n", "dialectId": "sqlite", "startedAt": 1,
+                "elapsedMs": 1.0, "status": "success", "error": null, "returnedRows": null});
+            if let (Some(target), Some(src)) = (entry.as_object_mut(), patch.as_object()) {
+                for (k, v) in src { target.insert(k.clone(), v.clone()); }
+            }
+            Library { saved: vec![], history: vec![entry] }
+        };
+        assert!(validate_library(&with_patch(json!({}))).is_ok());
+        assert!(validate_library(&with_patch(json!({"status": "running"}))).is_err());
+        assert!(validate_library(&with_patch(json!({"elapsedMs": -1.0}))).is_err());
+        assert!(validate_library(&with_patch(json!({"elapsedMs": "1"}))).is_err());
+        assert!(validate_library(&with_patch(json!({"error": 1}))).is_err());
+        assert!(validate_library(&with_patch(json!({"returnedRows": -1}))).is_err());
+    }
+
+    #[test]
+    fn migration_status_warns_only_when_legacy_secrets_exist() {
+        let plain = migration_status(true, false);
+        assert_eq!(plain["warnings"].as_array().map(|w| w.len()), Some(0));
+        let legacy = migration_status(true, true);
+        assert_eq!(legacy["legacySecretsRequireReentry"], json!(true));
+        assert_eq!(legacy["warnings"].as_array().map(|w| w.len()), Some(1));
+        assert_eq!(migration_status(false, false)["legacyConfigImported"], json!(false));
+    }
+}
