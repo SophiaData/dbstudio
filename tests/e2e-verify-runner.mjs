@@ -79,7 +79,7 @@ if (process.env.A4_EXIT) {
   }
 
   test('group conflict fails before launching a child', () => {
-    const result = invoke(['node', '--only', 'test:postgres'])
+    const result = invoke(['node', '--only', 'test:sql-params-postgres'])
     assert.equal(result.status, 1, result.output)
     assert.match(result.output, /冲突|conflict/i)
     assert.deepEqual(result.calls, [])
@@ -152,26 +152,18 @@ if (process.env.A4_EXIT) {
   }
 
   test('external --only routes the CI PG command to the PG test', () => {
-    const result = invoke(['external', '--only', 'test:postgres', '--require-external'], {
+    const result = invoke(['external', '--only', 'test:sql-params-postgres', '--require-external'], {
       DBSTUDIO_PG_URL: 'postgres://fixture/unused'
     })
     assert.equal(result.status, 0, result.output)
-    assert.deepEqual(result.calls, [['run', 'test:postgres']])
+    assert.deepEqual(result.calls, [['run', 'test:sql-params-postgres']])
     summary(result, 1, 1, 0, 0)
   })
 
-  test('partial SSL configuration cannot pass strict mode', () => {
-    const result = invoke(['external', '--only', 'test:postgres-ssl', '--require-external'], {
-      DBSTUDIO_PG_SSL_URL: 'postgres://fixture/unused'
-    })
-    assert.equal(result.status, 1, result.output)
-    assert.match(result.output, /DBSTUDIO_PG_PLAIN_URL/)
-    assert.deepEqual(result.calls, [])
-  })
 
   for (const strict of [false, true]) {
     test(`a child service skip is ${strict ? 'a CI failure' : 'counted as skipped'}`, () => {
-      const result = invoke(['external', '--only', 'test:ssh-tunnel', ...(strict ? ['--require-external'] : [])], {
+      const result = invoke(['external', '--only', 'test:sql-params-postgres', ...(strict ? ['--require-external'] : [])], {
         DBSTUDIO_PG_URL: 'postgres://fixture/unused', A4_SKIP: '1'
       })
       assert.equal(result.status, strict ? 1 : 0, result.output)

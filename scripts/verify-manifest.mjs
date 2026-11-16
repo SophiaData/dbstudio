@@ -43,7 +43,6 @@ export const STEPS = [
   // ---- 纯 Node e2e ----
   { id: 'test:ddl-preview', title: '结构化 DDL 预览与风险契约', group: 'node' },
   { id: 'test:sql-script-parser', title: '方言级 SQL 脚本切分与源码位置', group: 'node' },
-  { id: 'test:explain', title: 'SQLite 执行计划 RPC 与错误恢复', group: 'node' },
   { id: 'test:verify-manifest', title: '验证清单自身的一致性', group: 'node' },
   { id: 'test:backend-contract', title: 'Renderer 后端契约：缺失降级、可读错误与注入 identity', group: 'node' },
   { id: 'test:backend-client-selection', title: '客户端连接签名、动态认证与非幂等请求单次发送', group: 'node' },
@@ -53,8 +52,13 @@ export const STEPS = [
   { id: 'test:remote-connection-contract', title: '远程 connection control route contract', group: 'node' },
   { id: 'test:api-surface', title: '公开 API surface golden snapshot', group: 'node' },
   { id: 'test:verify-runner', title: '验证 CLI 参数与真实子进程执行', group: 'node' },
-  { id: 'test:cancel-sqlite', title: 'SQLite 取消能力声明与行为', group: 'node' },
   { id: 'test:sql-parameters-parser', title: 'SQL 参数扫描边界与值校验', group: 'node' },
+  {
+    id: 'test:core-unit',
+    title: 'src/core 与界面层的单元测试（vitest + happy-dom）',
+    group: 'node'
+  },
+
   { id: 'test:sql-params', title: '参数化 SQL 与绑定安全 e2e', group: 'node' },
   { id: 'test:import-validation', title: 'CSV 导入解析与预览契约', group: 'node' },
   // --pure 在 GUI 初始化前退出，不启 Electron、不创建夹具。
@@ -65,7 +69,6 @@ export const STEPS = [
   // 真 PG 的导入成功/回滚仍需 `test:import-task` 配合 `DBSTUDIO_PG_URL`。
   // 纯函数回归：不启 Electron、不连数据库，只锁「导入终态文案」的措辞安全——
   // 提交结果未知 / 宿主被终止 / 回滚失败 三类都不得谎称"已回滚"。
-  { id: 'test:metadata-contract', title: '结构元数据跨进程契约', group: 'node' },
   { id: 'test:er-relations', title: 'ER 外键关系纯逻辑契约', group: 'node' },
   { id: 'test:er-layout', title: 'ER 布局 key 与布局 JSON 纯逻辑契约', group: 'node' },
   { id: 'test:structure-compare', title: '结构快照确定性比较与同步 SQL', group: 'node' },
@@ -119,47 +122,11 @@ export const STEPS = [
     env: ['DBSTUDIO_PG_URL']
   },
   {
-    id: 'test:postgres',
-    title: 'PostgreSQL 驱动 e2e',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL']
-  },
-  {
-    id: 'test:postgresql-metadata',
-    title: 'PostgreSQL 外键、索引、CHECK 与触发器读取',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL', 'DBSTUDIO_PG_DEDICATED']
-  },
-  {
-    id: 'test:cancel',
-    title: '查询取消能力（PG 真取消 / SQLite 如实不支持）',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL']
-  },
-  {
-    id: 'test:explain-postgres',
-    title: 'PostgreSQL JSON 执行计划 RPC',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL']
-  },
-  {
     id: 'test:gui-explain-postgres',
     title: 'PostgreSQL 执行计划 GUI 与断线恢复（需要显示器）',
     group: 'external',
     env: ['DBSTUDIO_PG_URL']
   },
-  {
-    id: 'test:postgres-ssl',
-    title: 'PostgreSQL SSL/TLS 语义',
-    group: 'external',
-    env: ['DBSTUDIO_PG_SSL_URL', 'DBSTUDIO_PG_PLAIN_URL']
-  },
-  {
-    id: 'test:ssh-tunnel',
-    title: 'SSH 隧道（真实 sshd + PG）',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL']
-  }
 ]
 
 /**

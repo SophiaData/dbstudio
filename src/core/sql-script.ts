@@ -64,8 +64,6 @@ export class SqlScriptParseError extends Error {
 }
 
 type ScanState = 'normal' | 'string' | 'quotedIdentifier' | 'lineComment' | 'blockComment' | 'dollarQuote'
-// Bracket identifiers close at the first closing bracket; no doubling escape.
-let bracketIdentifier = false
 
 export function splitStatements(
   sql: string,
@@ -94,6 +92,10 @@ export function splitStatements(
   let escapeString = false
   // Offset where the currently open string, identifier, comment or dollar quote began.
   let unclosedStart = 0
+  // Bracket identifiers close at the first closing bracket; no doubling escape.
+  // 该状态必须属于单次调用：放在模块作用域会让上一次解析的残留值
+  // 把下一次的反引号双写转义误判成结束引号。
+  let bracketIdentifier = false
   let i = 0
 
   const pushSegment = (end: number): void => {
