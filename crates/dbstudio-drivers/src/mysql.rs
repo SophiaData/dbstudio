@@ -6,18 +6,6 @@ use base64::{engine::general_purpose::STANDARD,Engine};
 use crate::{network as n,tls::{self,TlsMode},tunnel::{self,SshTunnel}};
 use std::{collections::HashMap,net::{IpAddr,Ipv4Addr,Ipv6Addr,SocketAddr,ToSocketAddrs},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Instant};
 
-/// CREATE/DROP EVENT 需要库名限定：未带库名时
-/// 按当前连接的库补齐，否则真实 MySQL 会以 1044 拒绝。
-fn qualify_event_ddl(sql:&str,keyword:&str,object_kind:&str,current_db:&str)->Option<String>{
-    let trimmed=sql.trim_start();
-    let mut parts=trimmed.splitn(4,char::is_whitespace);
-    let first=parts.next()?;let second=parts.next()?;let name=parts.next()?;let tail=parts.next().unwrap_or("");
-    if !first.eq_ignore_ascii_case(keyword)||!second.eq_ignore_ascii_case(object_kind){return None;}
-    if name.contains('.')||current_db.is_empty(){return None;}
-    let bare=name.trim_matches('`');
-    if bare.is_empty(){return None;}
-    Some(format!("{} {} {}.{} {}",keyword,object_kind,n::quote(current_db,true),n::quote(bare,true),tail).trim_end().to_owned())
-}
 fn error(error:mysql::Error)->DriverError{
     match error {
         mysql::Error::MySqlError(e)=>{
@@ -589,6 +577,48 @@ impl MysqlDriver {
 mod tests{
     use super::*;
     fn address(value:&str)->SocketAddr{value.parse().unwrap()}
+    #[test]
+    fn page_columns_maps_declared_types_to_display_kinds(){
+        use mysql::consts::ColumnType;
+        let kinds=|t:ColumnType,cs:u16|{
+            let mut c=mysql::Column::new(t); c=c.with_character_set(cs);
+            page_columns(&[c])[0].get("type").and_then(Value::as_str).unwrap_or("").to_owned()
+        };
+        for t in [ColumnType::MYSQL_TYPE_TINY,ColumnType::MYSQL_TYPE_SHORT,ColumnType::MYSQL_TYPE_LONG,ColumnType::MYSQL_TYPE_INT24]{
+            assert_eq!(kinds(t,63),"integer","{t:?}");
+        }
+        // LONGLONG 走文本：超出 2^53 的值无法用 JS 数字无损承载。
+        assert_eq!(kinds(ColumnType::MYSQL_TYPE_LONGLONG,63),"text");
+        for t in [ColumnType::MYSQL_TYPE_FLOAT,ColumnType::MYSQL_TYPE_DOUBLE]{
+            assert_eq!(kinds(t,63),"real","{t:?}");
+        }
+        for t in [ColumnType::MYSQL_TYPE_DATE,ColumnType::MYSQL_TYPE_DATETIME,ColumnType::MYSQL_TYPE_TIMESTAMP]{
+            assert_eq!(kinds(t,63),"date","{t:?}");
+        }
+        for t in [ColumnType::MYSQL_TYPE_DECIMAL,ColumnType::MYSQL_TYPE_NEWDECIMAL,ColumnType::MYSQL_TYPE_JSON,ColumnType::MYSQL_TYPE_TIME]{
+            assert_eq!(kinds(t,63),"text","{t:?}");
+        }
+        // 二进制字符集的其他类型是 blob，文本字符集则是 text。
+        assert_eq!(kinds(ColumnType::MYSQL_TYPE_BLOB,63),"blob");
+        assert_eq!(kinds(ColumnType::MYSQL_TYPE_BLOB,45),"text");
+    }
+
+    #[test]
+    fn management_preview_drops_payload_but_keeps_kind(){
+        // 预览只给类型和缩略内容，不带完整载荷。
+        let full=json!({"kind":"text","text":"hello world","truncated":true});
+        let preview=management_preview(&full).unwrap();
+        assert_eq!(preview.get("kind").and_then(Value::as_str),Some("text"));
+        assert!(preview.get("truncated").is_none(),"预览不应携带完整读取标记");
+
+        // 非文本/二进制类型原样透传。
+        let plain=json!({"kind":"number","value":42});
+        assert_eq!(management_preview(&plain).unwrap(),plain);
+
+        // 结构损坏必须报错，不能静默返回空值。
+        assert!(management_preview(&json!({"kind":"text"})).is_err());
+        assert!(management_preview(&json!({"kind":"blob","previewBase64":"!!!not-base64!!!"})).is_err());
+    }
     #[test]
     fn management_float_text_binary_consistent(){
         let text=management_real(b"0.1",true).unwrap();
