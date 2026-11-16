@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync,
-  statSync, symlinkSync, writeFileSync
+  realpathSync, statSync, symlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -18,7 +18,9 @@ import {
 const NODE = process.execPath
 const PYTHON = '/usr/bin/python3'
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const fixtureRoot = join(tmpdir(), `mysql-acceptance-storage-tests-${randomUUID()}`)
+// macOS 的 /var 是指向 /private/var 的符号链接，直接用 tmpdir() 会得到非规范路径，
+// 而存储策略要求 root === resolve(root)。先解析真实路径再拼夹具目录。
+const fixtureRoot = join(realpathSync(tmpdir()), `mysql-acceptance-storage-tests-${randomUUID()}`)
 mkdirSync(fixtureRoot, { recursive: true, mode: 0o700 })
 // 夹具根位于系统临时目录，不写入仓库；保留供审查，不执行删除。
 after(() => console.log(`[retained] ${fixtureRoot}`))

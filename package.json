@@ -42,7 +42,7 @@
     "test:gui-compare": "node tests/gui-compare.mjs",
     "test:gui-explain-postgres": "node tests/gui-explain.mjs --pg-only",
     "test:verify-manifest": "node tests/e2e-verify-manifest.mjs",
-    "check:bundle-boundaries": "node scripts/check-bundle-boundaries.mjs",
+    "check:bundle-boundaries": "vite build --config apps/desktop/vite.config.ts && node scripts/check-bundle-boundaries.mjs",
     "test:backend-contract": "node tests/e2e-backend-contract.mjs",
     "test:backend-client-selection": "node tests/e2e-backend-client-selection.mjs",
     "test:http-transport": "node tests/e2e-http-transport.mjs",
