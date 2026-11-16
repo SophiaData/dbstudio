@@ -665,3 +665,73 @@ mod tests {
         assert_eq!(update["plan"]["statements"], json!(["UPDATE \"items\" SET \"note\" = 'left' WHERE \"id\" = 1"]));
     }
 }
+
+#[test]
+fn literal_uses_hex_for_mysql_to_dodge_backslash_mode() {
+    // MySQL 的 sql_mode 可能把反斜杠当转义符；十六进制字面量不受影响。
+    assert_eq!(literal(&json!("a'b"), "mysql").unwrap(), "CONVERT(X'612762' USING utf8mb4)");
+    assert_eq!(literal(&json!("a\\b"), "mysql").unwrap(), "CONVERT(X'615c62' USING utf8mb4)");
+    // 含 NUL 也必须能安全表达。
+    assert_eq!(literal(&json!("a\0b"), "mysql").unwrap(), "CONVERT(X'610062' USING utf8mb4)");
+}
+
+#[test]
+fn literal_escapes_postgres_and_rejects_embedded_nul() {
+    assert_eq!(literal(&json!("plain"), "postgresql").unwrap(), "E'plain'");
+    // E'' 串里反斜杠要双写，单引号按 SQL 习惯双写。
+    assert_eq!(literal(&json!("a\\b"), "postgresql").unwrap(), "E'a\\\\b'");
+    assert_eq!(literal(&json!("it's"), "postgresql").unwrap(), "E'it''s'");
+    // PostgreSQL 文本类型不能携带 NUL，必须拒绝而不是截断。
+    assert!(literal(&json!("a\0b"), "postgresql").is_err());
+}
+
+#[test]
+fn literal_handles_scalars_and_other_dialects() {
+    assert_eq!(literal(&Value::Null, "sqlite").unwrap(), "NULL");
+    assert_eq!(literal(&json!(42), "sqlite").unwrap(), "42");
+    assert_eq!(literal(&json!(1.5), "sqlite").unwrap(), "1.5");
+    // 布尔在不同方言下的字面量不同。
+    assert_eq!(literal(&json!(true), "postgresql").unwrap(), "TRUE");
+    assert_eq!(literal(&json!(false), "postgresql").unwrap(), "FALSE");
+    assert_eq!(literal(&json!(true), "mysql").unwrap(), "1");
+    assert_eq!(literal(&json!(false), "sqlite").unwrap(), "0");
+    // 非标量不能进同步计划。
+    assert!(literal(&json!({"a": 1}), "sqlite").is_err());
+    assert!(literal(&json!([1]), "sqlite").is_err());
+}
+
+#[test]
+fn scalar_keeps_exact_integers_and_rejects_unreadable_cells() {
+    assert_eq!(scalar(&json!({"kind": "null"})).unwrap(), Value::Null);
+    // 精确整数保持整数类型，不在比较阶段转浮点。
+    assert_eq!(scalar(&json!({"kind": "number", "value": 9007199254740993_i64})).unwrap(),
+        json!(9007199254740993_i64));
+    assert_eq!(scalar(&json!({"kind": "boolean", "value": true})).unwrap(), json!(true));
+    assert_eq!(scalar(&json!({"kind": "text", "text": "hi"})).unwrap(), json!("hi"));
+
+    // 截断文本无法取全文，必须报错而不是拿预览做比较。
+    assert!(scalar(&json!({"kind": "text", "text": "hi", "truncated": true})).is_err());
+    // 二进制不参与数据比较。
+    assert!(scalar(&json!({"kind": "blob"})).is_err());
+    assert!(scalar(&json!({"kind": "unknown"})).is_err());
+    assert!(scalar(&json!({"kind": "number", "value": "1"})).is_err());
+}
+
+#[test]
+fn display_key_stringifies_integers_beyond_js_safe_range() {
+    let mut key = Map::new();
+    key.insert("small".into(), json!(42));
+    key.insert("safe_edge".into(), json!(9007199254740991_i64));
+    key.insert("unsafe".into(), json!(9007199254740993_i64));
+    key.insert("unsafe_neg".into(), json!(-9007199254740993_i64));
+    key.insert("unsafe_u64".into(), json!(18446744073709551615_u64));
+    key.insert("text".into(), json!("x"));
+    let out = display_key(&key);
+    // 边界内保持原类型，越界降级为字符串以免前端失真。
+    assert_eq!(out["small"], json!(42));
+    assert_eq!(out["safe_edge"], json!(9007199254740991_i64));
+    assert_eq!(out["unsafe"], json!("9007199254740993"));
+    assert_eq!(out["unsafe_neg"], json!("-9007199254740993"));
+    assert_eq!(out["unsafe_u64"], json!("18446744073709551615"));
+    assert_eq!(out["text"], json!("x"));
+}
