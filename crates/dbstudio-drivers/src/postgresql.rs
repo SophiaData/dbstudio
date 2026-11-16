@@ -561,4 +561,74 @@ mod tests{
         cursors.remove("read");
         assert_eq!(snapshot_usage(&cursors),(PG_SNAPSHOT_MAX_CURSORS-1,1024+(PG_SNAPSHOT_MAX_CURSORS-2)));
     }
+    #[test]
+    fn snapshot_bounds_slices_pages_and_flags_more_rows() {
+        // 首页：还有更多。
+        assert_eq!(snapshot_bounds(100, 0, 10), (0, 10, true));
+        // 正好取到末尾：不再有更多。
+        assert_eq!(snapshot_bounds(100, 90, 10), (90, 100, false));
+        // 请求超过剩余行数时收敛到总数。
+        assert_eq!(snapshot_bounds(100, 90, 20), (90, 100, false));
+        // 偏移超过总数时返回空页而不是 panic。
+        assert_eq!(snapshot_bounds(100, 200, 10), (100, 100, false));
+        assert_eq!(snapshot_bounds(0, 0, 10), (0, 0, false));
+        // 极大 limit 不能溢出。
+        let (start, end, more) = snapshot_bounds(10, 5, usize::MAX);
+        assert_eq!((start, end, more), (5, 10, false));
+    }
+
+    /// 按 PostgreSQL numeric 二进制格式拼一段字节：头 8 字节 + ndigits 个 u16。
+    fn numeric(words: &[u16], weight: i16, sign: u16, dscale: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(words.len() as u16).to_be_bytes());
+        out.extend_from_slice(&weight.to_be_bytes());
+        out.extend_from_slice(&sign.to_be_bytes());
+        out.extend_from_slice(&dscale.to_be_bytes());
+        for word in words {
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn decimal_rejects_malformed_numeric_payloads() {
+        assert!(decimal(&[]).is_err());
+        assert!(decimal(&[0, 0, 0, 0]).is_err());
+        // 声明 2 个 digit 但只给 1 个：长度对不上必须拒绝，不能按残缺数据解码。
+        let mut bad = numeric(&[1], 0, 0, 0);
+        bad[1] = 2;
+        assert!(decimal(&bad).is_err());
+    }
+
+    #[test]
+    fn decimal_decodes_special_values() {
+        assert_eq!(decimal(&numeric(&[], 0, 0xC000, 0)).unwrap(), "NaN");
+        assert_eq!(decimal(&numeric(&[], 0, 0xD000, 0)).unwrap(), "Infinity");
+        assert_eq!(decimal(&numeric(&[], 0, 0xF000, 0)).unwrap(), "-Infinity");
+    }
+
+    #[test]
+    fn decimal_decodes_integers_and_signs() {
+        assert_eq!(decimal(&numeric(&[], 0, 0, 0)).unwrap(), "0");
+        assert_eq!(decimal(&numeric(&[1], 0, 0, 0)).unwrap(), "1");
+        // sign 0x4000 表示负数。
+        assert_eq!(decimal(&numeric(&[1], 0, 0x4000, 0)).unwrap(), "-1");
+        // 两个 digit：高位不加零填充，低位补足 4 位。
+        assert_eq!(decimal(&numeric(&[1, 2345], 1, 0, 0)).unwrap(), "12345");
+        assert_eq!(decimal(&numeric(&[1, 2345, 6789], 2, 0, 0)).unwrap(), "123456789");
+    }
+
+    #[test]
+    fn decimal_decodes_fractional_scales_without_losing_digits() {
+        // 1.5 → weight=0, dscale=1, digits=[1, 5000]
+        assert_eq!(decimal(&numeric(&[1, 5000], 0, 0, 1)).unwrap(), "1.5");
+        // 0.5 → weight=-1（整数部分没有数字，前面补 0）
+        assert_eq!(decimal(&numeric(&[5000], -1, 0, 1)).unwrap(), "0.5");
+        // 0.0001 → weight=-1, dscale=4
+        assert_eq!(decimal(&numeric(&[1], -1, 0, 4)).unwrap(), "0.0001");
+        // 12.3456 → weight=0, dscale=4, digits=[12, 3456]
+        assert_eq!(decimal(&numeric(&[12, 3456], 0, 0, 4)).unwrap(), "12.3456");
+        // 负数小数保留符号。
+        assert_eq!(decimal(&numeric(&[1, 5000], 0, 0x4000, 1)).unwrap(), "-1.5");
+    }
 }
