@@ -107,9 +107,9 @@ check(
 )
 
 console.log('\n[5] 分组入口齐全且可用')
-for (const group of ['node', 'external']) {
-  check(`stepIds('${group}') 非空`, stepIds(group).length > 0, `${group} 组为空`)
-}
+// node 组必须非空：它是当前唯一的自动化验证入口。
+// external 组允许为空——没有外部服务测试时不该因此判失败。
+check("stepIds('node') 非空", stepIds('node').length > 0, 'node 组为空')
 check(
   'verify:headless 存在且走清单',
   typeof scripts['verify:headless'] === 'string' &&

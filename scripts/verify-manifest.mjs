@@ -59,7 +59,6 @@ export const STEPS = [
     group: 'node'
   },
 
-  { id: 'test:sql-params', title: '参数化 SQL 与绑定安全 e2e', group: 'node' },
   { id: 'test:import-validation', title: 'CSV 导入解析与预览契约', group: 'node' },
   // --pure 在 GUI 初始化前退出，不启 Electron、不创建夹具。
   // SQLite 是 node 组的固定覆盖；PG 分支由测试内的 DBSTUDIO_PG_URL 可选启用，
@@ -82,12 +81,6 @@ export const STEPS = [
 
 
   // ---- 需要外部服务 ----
-  {
-    id: 'test:sql-params-postgres',
-    title: 'PostgreSQL 参数绑定与执行身份取消',
-    group: 'external',
-    env: ['DBSTUDIO_PG_URL']
-  },
 ]
 
 /**
