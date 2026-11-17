@@ -898,7 +898,7 @@ function isPositiveInteger(value: unknown): value is number {
  *   3. 版本不匹配（部署错误：SDK 与宿主来自不同发布批次）
  *
  * 版本字段缺失时按 legacy 接受并返回 warning。这是为了兼容老宿主；
- * 新宿主必须发送全部字段（见 `src/driver-host/index.ts` 的 `#handshake`）。
+ * 新宿主必须发送全部字段（RPC 通道的宿主遵循同一形状）。
  */
 export function validateHandshake(
   frame: unknown,

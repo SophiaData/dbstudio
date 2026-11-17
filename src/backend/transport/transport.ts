@@ -3,12 +3,11 @@
  *
  * ===== 边界 =====
  *
- * 本文件只定义类型，不实现任何 transport。第一个实现仍是
- * `backend-client.ts` 里的 Electron preload 对象；以后可能出现 Tauri IPC
- * 或 HTTP。所有实现都必须满足这里的调用/响应形状，这样渲染层可以只依赖
+ * 本文件只定义类型，不实现任何 transport。当前实现经 Tauri 命令桥；
+ * 所有实现都必须满足这里的调用/响应形状，这样渲染层可以只依赖
  * `BackendApi`，而不认识具体通道。
  *
- * **禁止** import electron、node 内置模块、main、preload、driver-host 或驱动实现。
+ * **禁止** import electron、node 内置模块或驱动实现。
  * 这里只允许依赖 application contract 的类型，保证在浏览器、Node、测试环境
  * 里都能安全参与类型检查。
  */

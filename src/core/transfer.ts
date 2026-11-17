@@ -1,5 +1,5 @@
 /**
- * 流式导出任务的跨进程契约（renderer ⇄ main ⇄ driver-host）。
+ * 流式导出任务的跨进程契约（界面层 ⇄ Tauri 命令 ⇄ Rust 驱动层）。
  *
  * ===== 这一层要解决的真实矛盾 =====
  *
@@ -10,7 +10,7 @@
  *
  * 所以链路是：
  *
- *   renderer ──startTransfer──▶ main(TransferManager) ──open/read──▶ driver-host
+ *   界面层 ──startTransfer──▶ Tauri 命令(TransferManager) ──open/read──▶ 驱动层
  *        ▲                          │  持有文件句柄                        │
  *        └───getTransferProgress───┘  逐批拉取、边拉边写                   │
  *
