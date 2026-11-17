@@ -200,7 +200,8 @@ impl Driver for RedisDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::display_key;
+    use super::{capabilities, display_key, parse_keyspace};
+    use serde_json::json;
 
     #[test]
     fn key_display_keeps_text_unchanged_and_binary_keys_lossless() {
@@ -213,5 +214,61 @@ mod tests {
         assert_ne!(display_key(b"\xffalpha"), display_key(b"\xfealpha"));
         assert_ne!(display_key(b"\xff"), display_key(b"\xff\x00"));
         assert_ne!(display_key(b"\\\xff"), display_key(b"\xff"));
+    }
+    #[test]
+    fn keyspace_parses_standard_info_output() {
+        // 真实 INFO keyspace 的典型形状。
+        let info = "# Keyspace\ndb0:keys=1,expires=0,avg_ttl=0\ndb3:keys=42,expires=7,avg_ttl=900";
+        assert_eq!(parse_keyspace(info), vec![(0, 1), (3, 42)]);
+    }
+
+    #[test]
+    fn keyspace_always_reports_db0_even_when_absent() {
+        // 空实例或没有 db0 时仍要给出 db0，否则界面缺少默认库入口。
+        assert_eq!(parse_keyspace(""), vec![(0, 0)]);
+        assert_eq!(parse_keyspace("# Keyspace"), vec![(0, 0)]);
+        assert_eq!(parse_keyspace("db5:keys=9"), vec![(0, 0), (5, 9)]);
+    }
+
+    #[test]
+    fn keyspace_ignores_unparsable_lines() {
+        // 非 db 前缀、缺 keys 字段、数字非法、字段顺序不同的行都不能让解析崩。
+        let info = [
+            "redis_version:7.2.0",
+            "used_memory_human:1.2M",
+            "db_extra:keys=1",
+            "dbx:keys=2",
+            "db1:expires=5",
+            "db2:keys=abc",
+            "db4:avg_ttl=1,keys=8,expires=0",
+            "db-1:keys=3",
+            "db:keys=4",
+        ]
+        .join("\n");
+        // 只有 db4 的 keys= 能解析出来；db2 数字非法被丢；db-1/db 前缀不成立被丢。
+        assert_eq!(parse_keyspace(&info), vec![(0, 0), (4, 8)]);
+    }
+
+    #[test]
+    fn keyspace_output_is_sorted_and_deduplicated() {
+        // BTreeMap 保证按库号升序，重复的 db 行后者覆盖前者。
+        let info = "db9:keys=9\ndb1:keys=1\ndb1:keys=11\ndb0:keys=2";
+        assert_eq!(parse_keyspace(info), vec![(0, 2), (1, 11), (9, 9)]);
+    }
+
+    #[test]
+    fn keyspace_handles_large_counts_and_zero() {
+        let info = "db0:keys=0\ndb1:keys=18446744073709551615";
+        assert_eq!(parse_keyspace(info), vec![(0, 0), (1, u64::MAX)]);
+    }
+
+    #[test]
+    fn capabilities_declare_read_only_and_unpaginated() {
+        let caps = capabilities();
+        assert_eq!(caps["supportsInlineEdit"], json!(false));
+        assert_eq!(caps["supportsServerPagination"], json!(false));
+        assert_eq!(caps["supportsCancel"], json!(false));
+        assert_eq!(caps["hasCatalog"], json!(false));
+        assert_eq!(caps["hasSchema"], json!(false));
     }
 }
