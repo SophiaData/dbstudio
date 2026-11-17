@@ -92,7 +92,7 @@ jobs:
         # CI 直接挂在 lockfile 供应链校验上。教训：CI 不要改仓库里的锁/配置。
         run: pnpm install --frozen-lockfile
 
-      - name: 类型检查 + 构建 + 纯 Node 验证
+      - name: 纯 Node 验证
         # 跑 `node` 分组——它就是清单里的纯 Node 步骤。
         #
         # ===== 为什么不直接 `pnpm verify` =====

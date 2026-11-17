@@ -37,6 +37,12 @@
 /** @type {Step[]} */
 export const STEPS = [
   // ---- 准备 ----
+  {
+    id: 'check:typecheck',
+    title: '类型检查（界面层 vue-tsc + 根级 tsc）',
+    group: 'node'
+  },
+
   { id: 'check:bundle-boundaries', title: '构建产物边界：驱动实现与 Node 运行时隔离', group: 'node' },
   { id: 'fixture', title: '生成测试夹具', group: 'node' },
 

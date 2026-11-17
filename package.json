@@ -56,7 +56,9 @@
     "test:native-ui-models": "node apps/desktop/tests/pure-regressions.mjs && node apps/desktop/tests/sql-workflow-regressions.mjs && node apps/desktop/tests/grid-workflow-regressions.mjs && node apps/desktop/tests/audit-ui-regressions.mjs",
     "build:desktop": "vue-tsc --noEmit -p apps/desktop/tsconfig.json && vite build --config apps/desktop/vite.config.ts",
     "typecheck:desktop": "vue-tsc --noEmit -p apps/desktop/tsconfig.json",
-    "typecheck": "vue-tsc --noEmit -p apps/desktop/tsconfig.json",
+    "typecheck": "vue-tsc --noEmit -p apps/desktop/tsconfig.json && tsc --noEmit -p tsconfig.json",
+    "check:typecheck": "pnpm run typecheck",
+    "typecheck:core": "tsc --noEmit -p tsconfig.json",
     "ssh-fixture": "node scripts/make-ssh-fixture.mjs tests/.ssh-fixture",
     "ssl-fixture": "node scripts/make-ssl-fixture.mjs tests/.ssl-fixture"
   },
