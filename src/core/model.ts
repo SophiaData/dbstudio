@@ -193,7 +193,7 @@ export type FolderId = 'tables' | 'views' | 'indexes' | 'triggers' | 'columns'
 /**
  * 一个元数据对象的最小可序列化表示。
  *
- * 这是**跨进程边界**传输的东西（driver-host → main → renderer），
+ * 这是**跨进程边界**传输的东西（Rust 驱动层 → Tauri 命令 → 界面层），
  * 所以只允许放结构化克隆能处理的值——不放函数、不放类实例、不放连接句柄。
  */
 export interface ObjectRef {

@@ -109,7 +109,7 @@ describe('握手校验', () => {
   })
 
   test('错误可被类型判定函数识别', () => {
-    const error = new HandshakeValidationError('x')
+    const error = new HandshakeValidationError('malformed_handshake', 'x')
     expect(isHandshakeValidationError(error)).toBe(true)
     expect(isHandshakeValidationError(new Error('x'))).toBe(false)
     expect(isHandshakeValidationError('x')).toBe(false)

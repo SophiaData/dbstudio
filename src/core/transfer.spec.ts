@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
+import type { CellValue } from './resultset'
 import {
   DEFAULT_TRANSFER_BATCH_SIZE,
   MAX_TRANSFER_BATCH_SIZE,
@@ -124,7 +125,7 @@ describe('截断检测', () => {
 
   // 导出遇到截断值必须失败：写预览会静默破坏数据。
   test('发现截断时给出所在行列', () => {
-    const rows = [
+    const rows: CellValue[][] = [
       [{ kind: 'text', text: 'ok' }],
       [{ kind: 'text', text: 'abc', truncated: true }]
     ]
