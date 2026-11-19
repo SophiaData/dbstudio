@@ -22,7 +22,7 @@
     "fixture": "node scripts/make-fixture.mjs",
     "test": "cargo test --workspace --exclude dbstudio-desktop",
     "verify:headless": "DBSTUDIO_TEST_HIDDEN=1 node scripts/verify.mjs",
-    "verify": "pnpm test:native-architecture && pnpm typecheck:desktop && pnpm test:native-ui-models && pnpm test:native && pnpm test:native-release && pnpm test:native-test-output",
+    "verify": "pnpm test:native-architecture && pnpm typecheck && pnpm test:native-ui-models && pnpm test:native && pnpm test:native-release && pnpm test:native-test-output",
     "verify:node": "node scripts/verify.mjs node",
     "verify:gui": "node scripts/verify.mjs gui",
     "verify:external": "node scripts/verify.mjs external",
