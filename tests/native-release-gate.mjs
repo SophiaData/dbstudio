@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
@@ -35,6 +35,35 @@ await test('the actual aggregate CLI requires only the two configured release ta
   const gate = JSON.parse(await readFile(join(directory, 'native-gate.json'), 'utf8'))
   assert.equal(gate.version, version)
   assert.deepEqual(gate.manifests.map((manifest) => manifest.target), ['mac-arm64', 'win-x64'])
+})
+await test('the production wrapper passes a relative asset directory to Tauri', async () => {
+  const root = await mkdtemp(join(work, 'frontend-path-'))
+  await mkdir(join(root, 'scripts'))
+  await mkdir(join(root, 'src-tauri'))
+  const wrapper = join(root, 'scripts', 'build-native-desktop.mjs')
+  await copyFile(new URL('../scripts/build-native-desktop.mjs', import.meta.url), wrapper)
+  const pnpm = join(root, 'pnpm-fixture.mjs')
+  await writeFile(pnpm, `
+import assert from 'node:assert/strict'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
+const [, command, ...args] = process.argv.slice(2)
+if (command === 'vite') {
+  const output = args[args.indexOf('--outDir') + 1]
+  mkdirSync(join(output, 'assets'), { recursive: true })
+  writeFileSync(join(output, 'index.html'), 'asset fixture')
+} else if (command === 'tauri') {
+  const { build: { frontendDist } } = JSON.parse(args[args.indexOf('--config') + 1])
+  assert(!isAbsolute(frontendDist) && !URL.canParse(frontendDist), 'frontendDist must be a relative directory')
+  assert.equal(readFileSync(resolve('src-tauri', frontendDist, 'index.html'), 'utf8'), 'asset fixture')
+} else {
+  assert.equal(command, 'vue-tsc')
+}
+`)
+  const result = spawnSync(process.execPath, [wrapper, '--no-bundle', '--target', 'x86_64-pc-windows-msvc'], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, npm_execpath: pnpm }
+  })
+  assert.equal(result.status, 0, result.stderr)
 })
 await test('tampered installer is rejected after transport', async () => {
   const root = await fixture(['mac-arm64'])

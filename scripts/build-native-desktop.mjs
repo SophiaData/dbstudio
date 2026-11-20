@@ -28,7 +28,9 @@ for (let index = 0; index < args.length; index++) {
 }
 const env = { ...process.env, VITE_DBSTUDIO_TEST_HOOKS: '0', VITE_MYSQL_PARITY: '0', OPENSSL_STATIC: '1' }
 delete env.DBSTUDIO_NATIVE_SMOKE_ROOT
-const output = resolve(root, 'dist', `native-production-${randomUUID()}`)
+// Tauri can parse an absolute Windows path as a URL, which skips asset embedding.
+const frontendDist = `../dist/native-production-${randomUUID()}`
+const output = resolve(root, 'src-tauri', frontendDist)
 assert.ok(!existsSync(output), '生产前端产物必须写入全新目录')
 function run(command) {
   const result = spawnSync(process.execPath, [pnpmScript, 'exec', ...command], { cwd: root, env, stdio: 'inherit' })
@@ -47,7 +49,7 @@ for (const entry of readdirSync(assets, { withFileTypes: true })) {
     }
   }
 }
-run(['tauri', 'build', '--config', JSON.stringify({ build: { frontendDist: output } }), ...args])
+run(['tauri', 'build', '--config', JSON.stringify({ build: { frontendDist } }), ...args])
 const targetIndex = args.indexOf('--target')
 const target = targetIndex >= 0 ? args[targetIndex + 1] : null
 if (process.platform === 'darwin' && (!target || target.endsWith('-apple-darwin'))) {

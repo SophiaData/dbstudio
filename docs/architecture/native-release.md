@@ -10,7 +10,7 @@ pnpm build --bundles app --no-sign
 pnpm build:app:mac
 ```
 
-生产入口创建全新的前端输出目录，显式关闭 Vite 测试标志并检查编译产物，再将该目录传给 Tauri。入口只允许列出的目标与包类型参数，拒绝调试、feature、runner 和外部 config 覆盖；Rust release 也拒绝 test-hooks。
+生产入口创建全新的前端输出目录，显式关闭 Vite 测试标志并检查编译产物。构建脚本以相对于 `src-tauri` 的目录传入 `frontendDist`。Tauri 会将带盘符的 Windows 绝对路径解析成 URL，跳过前端资源嵌入，安装后启动时显示 `ERR_FILE_NOT_FOUND`。发布回归检查传入的路径及其中的 `index.html`。入口只允许列出的目标与包类型参数，拒绝调试、feature、runner 和外部 config 覆盖；Rust release 也拒绝 test-hooks。
 
 当前 macOS 默认输出为 `target/release/dbstudio-desktop` 和 `target/release/bundle/macos/dbstudio.app`。显式指定 Rust target 时，路径包含该 target 子目录。最终本地构建使用 `aarch64-apple-darwin`，应用位于 `target/aarch64-apple-darwin/release/bundle/macos/dbstudio.app`。
 
