@@ -282,6 +282,52 @@ function Assert-GridClipboard($App, [string]$Expected) {
     Stop-Acceptance 'CLIPBOARD_CONTENT_MISMATCH'
 }
 
+function Assert-GridPage($App, [string[]]$Expected, [string]$MarkerPrefix) {
+    $types = @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem)
+    $null = Find-Control $App.Window $types $Expected[-1] -AllowOffscreen
+    $condition = [Windows.Automation.OrCondition]::new([Windows.Automation.Condition[]]@(
+        foreach ($type in $types) {
+            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $type)
+        }
+    ))
+    $pattern = '^' + [regex]::Escape($MarkerPrefix) + '[0-9]{4}$'
+    $text = [Collections.Generic.List[string]]::new()
+    $cells = [Collections.Generic.List[string]]::new()
+    foreach ($control in $App.Window.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
+        $value = $control.Current.Name
+        if ($value -cnotmatch $pattern) { continue }
+        if ($control.Current.ControlType -eq [Windows.Automation.ControlType]::Text) { $text.Add($value) }
+        else { $cells.Add($value) }
+    }
+    # The provider may expose the same value as a cell and as its child text.
+    $actual = if ($text.Count) { @($text.ToArray()) } else { @($cells.ToArray()) }
+    if (($actual -join '|') -cne ($Expected -join '|')) {
+        $report.pageMismatch = @{ expectedRows = $Expected.Count; renderedRows = @($actual).Count }
+        Stop-Acceptance 'PAGE_CONTENT_MISMATCH'
+    }
+}
+
+function Assert-GridPaging($App, [string[]]$Expected, [string]$MarkerPrefix) {
+    $script:action = 'query_paging_fixture'
+    $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
+    Set-EditText $editor 'SELECT marker FROM dbstudio_ci.paging_rows ORDER BY id;'
+    Invoke-Button $App.Window '执行 SQL'
+    $script:action = 'first_page'
+    Assert-GridPage $App $Expected[0..199] $MarkerPrefix
+    $script:action = 'second_page'
+    Invoke-Button $App.Window '下一页'
+    Assert-GridPage $App $Expected[200..399] $MarkerPrefix
+    $script:action = 'last_page'
+    Invoke-Button $App.Window '下一页'
+    Assert-GridPage $App $Expected[400..404] $MarkerPrefix
+    $script:action = 'back_to_second_page'
+    Invoke-Button $App.Window '上一页'
+    Assert-GridPage $App $Expected[200..399] $MarkerPrefix
+    $script:action = 'back_to_first_page'
+    Invoke-Button $App.Window '上一页'
+    Assert-GridPage $App $Expected[0..199] $MarkerPrefix
+}
+
 try {
     if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
         -not [Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) {
@@ -340,6 +386,7 @@ public static class AcceptanceDesktop {
     $installDir = Join-Path $root 'app'
     $profile = "dbstudio-ci-$run"
     $marker = $run.Substring(0, 16)
+    $pagingMarkerPrefix = "pg-$marker-"
     $initialization = Invoke-PrivateProcess (New-ProcessInfo $server @('--no-defaults', '--initialize-insecure', "--basedir=$mysqlBase", "--datadir=$dataDir", '--console')) 90
     if ($initialization.ExitCode -ne 0) { Stop-Acceptance 'FIXTURE_INIT_FAILED' }
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -369,6 +416,10 @@ INSERT INTO dbstudio_ci.copy_rows VALUES
 (9007199254740993, CONCAT('$marker', CHAR(9), CHAR(34), 'quoted', CHAR(34), CHAR(13,10), REPEAT('x', 1400))),
 (9007199254740994, 'not-selected'),
 (9007199254740995, 'third-row');
+CREATE TABLE dbstudio_ci.paging_rows (id INT NOT NULL PRIMARY KEY, marker VARCHAR(32) NOT NULL);
+INSERT INTO dbstudio_ci.paging_rows (id, marker)
+WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 405)
+SELECT n, CONCAT('$pagingMarkerPrefix', LPAD(n, 4, '0')) FROM seq;
 CREATE USER 'dbstudio_ci'@'127.0.0.1' IDENTIFIED BY '$syntheticSecret';
 GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
 "@
@@ -393,6 +444,12 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         }
         if ($expectedLines.Count -ne 3) { Stop-Acceptance 'CLIPBOARD_OBSERVER_COUNT' }
         $expectedClipboard = $expectedLines -join "`r`n"
+        $pagingRows = Invoke-FixtureSql 'dbstudio_ci' 'SELECT marker FROM dbstudio_ci.paging_rows ORDER BY id;' $syntheticSecret
+        $expectedPaging = @($pagingRows.Out -split '\r?\n')
+        if ($pagingRows.ExitCode -ne 0 -or $expectedPaging.Count -ne 405 -or
+            ($expectedPaging -join '|') -cne ((1..405 | ForEach-Object { '{0}{1:D4}' -f $pagingMarkerPrefix, $_ }) -join '|')) {
+            Stop-Acceptance 'PAGING_OBSERVER_MISMATCH'
+        }
     }
 
     if ($env:DBSTUDIO_PROBE_CANDIDATE_STARTUP -eq '1') {
@@ -469,9 +526,12 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         $probe = "SELECT CONCAT(marker, ':restart:', CURRENT_USER()) AS proof FROM dbstudio_ci.probe;"
         $expected = "${marker}:restart:dbstudio_ci@127.0.0.1"
         Assert-AppProbe $app
+        $report.checks.sameVersionReconnect = $true
+        $script:stage = 'candidate_paging'
+        Assert-GridPaging $app $expectedPaging $pagingMarkerPrefix
+        $report.checks.paging = $true
         $script:action = 'close_restarted_candidate'
         Close-App $app
-        $report.checks.sameVersionReconnect = $true
         $report.status = 'passed'
         return
     }
