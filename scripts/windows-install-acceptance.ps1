@@ -246,11 +246,19 @@ function Assert-GridClipboard($App, [string]$Expected) {
     Invoke-Button $App.Window '执行 SQL'
     $script:action = 'select_result_rows'
     foreach ($position in @(3, 1)) {
-        $row = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) "选择第 $position 行"
+        $label = "选择第 $position 行"
+        $row = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) $label
         $toggle = $row.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
         if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { Stop-Acceptance 'RESULT_ROW_ALREADY_SELECTED' }
         $toggle.Toggle()
-        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::On) { Stop-Acceptance 'RESULT_ROW_NOT_SELECTED' }
+        $deadline = [datetime]::UtcNow.AddSeconds(5)
+        do {
+            $row = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) $label
+            $state = $row.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Current.ToggleState
+            if ($state -eq [Windows.Automation.ToggleState]::On) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([datetime]::UtcNow -lt $deadline)
+        if ($state -ne [Windows.Automation.ToggleState]::On) { Stop-Acceptance 'RESULT_ROW_NOT_SELECTED' }
     }
     if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { Stop-Acceptance 'BLOCKED_CLIPBOARD_STA' }
     $script:action = 'copy_result_rows'
