@@ -86,7 +86,7 @@ function Install-App([string]$Installer, [switch]$Update) {
 function Open-App([string]$Binary) {
     $info = New-ProcessInfo $Binary @()
     # Enable Chromium's native accessibility provider for this CI-launched app.
-    $info.Environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = '--force-renderer-accessibility'
+    $info.Environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = '--force-renderer-accessibility --enable-features=UiaProvider'
     $process = Start-OwnedProcess $info
     $deadline = [datetime]::UtcNow.AddSeconds(45)
     do {
@@ -136,10 +136,23 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
     } while ([datetime]::UtcNow -lt $deadline)
     if ($script:action -eq 'open_connection_form') {
         $controls = $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        $summary = [ordered]@{ descendants = $controls.Count; buttons = 0; documents = 0; matching = 0; enabled = 0; visible = 0 }
+        $summary = [ordered]@{
+            descendants = $controls.Count; buttons = 0; documents = 0; matching = 0; enabled = 0; visible = 0
+            appDocument = $false; workbenchText = $false; browserError = $false
+            windowWidth = [int]$Scope.Current.BoundingRectangle.Width
+            windowHeight = [int]$Scope.Current.BoundingRectangle.Height
+        }
         foreach ($control in $controls) {
             try {
-                if ($control.Current.ControlType -eq [Windows.Automation.ControlType]::Document) { $summary.documents++ }
+                $controlName = $control.Current.Name
+                if ($control.Current.ControlType -eq [Windows.Automation.ControlType]::Document) {
+                    $summary.documents++
+                    if ($controlName -eq 'dbstudio') { $summary.appDocument = $true }
+                }
+                if ($controlName -like '*数据库工作台*') { $summary.workbenchText = $true }
+                if ($controlName -match 'ERR_[A-Z_]+|can.t reach this page|无法访问此页面|应用启动预检失败') {
+                    $summary.browserError = $true
+                }
                 if ($control.Current.ControlType -ne [Windows.Automation.ControlType]::Button) { continue }
                 $summary.buttons++
                 if ($control.Current.Name -notlike '*新建连接*') { continue }
