@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $script:stage = 'runner'
+$script:action = $null
 $script:failure = 'CHECK_FAILED'
 $script:children = [Collections.Generic.List[Diagnostics.Process]]::new()
 $report = [ordered]@{
@@ -83,7 +84,10 @@ function Install-App([string]$Installer, [switch]$Update) {
 }
 
 function Open-App([string]$Binary) {
-    $process = Start-OwnedProcess (New-ProcessInfo $Binary @())
+    $info = New-ProcessInfo $Binary @()
+    # Enable Chromium's native accessibility provider for this CI-launched app.
+    $info.Environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = '--force-renderer-accessibility'
+    $process = Start-OwnedProcess $info
     $deadline = [datetime]::UtcNow.AddSeconds(45)
     do {
         $process.Refresh()
@@ -151,17 +155,22 @@ function Set-EditText($Edit, [string]$Value) {
 }
 
 function Connect-Saved($App) {
+    $script:action = 'find_saved_connection'
     $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
     $row = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $profile -ContainsName
     Send-ControlKeys $row ' '
+    $script:action = 'connect_saved_profile'
     Invoke-Button $App.Window '连接'
 }
 
 function Assert-AppProbe($App) {
+    $script:action = 'edit_probe_sql'
     $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
     Set-EditText $editor $probe
+    $script:action = 'execute_probe_sql'
     Invoke-Button $App.Window '执行 SQL'
-    $null = Find-Control $App.Window ([Windows.Automation.ControlType]::Text) $expected
+    $script:action = 'read_probe_result'
+    $null = Find-Control $App.Window @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem) $expected
 }
 
 try {
@@ -262,15 +271,27 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     $report.checks.baselineInstalled = $true
 
     $script:stage = 'baseline_save_and_query'
+    $script:action = 'launch_baseline'
     $app = Open-App $baseline
+    $script:action = 'open_connection_form'
     Invoke-Button $app.Window '＋ 新建连接'
+    $script:action = 'select_mysql'
     $combo = Find-Control $app.Window ([Windows.Automation.ControlType]::ComboBox) '数据库类型'
     Send-ControlKeys $combo '%{DOWN}m{ENTER}'
-    foreach ($field in ([ordered]@{ '连接名' = $profile; '主机' = '127.0.0.1'; '端口' = [string]$port; '数据库' = 'dbstudio_ci'; '用户名' = 'dbstudio_ci' }).GetEnumerator()) {
-        $types = @([Windows.Automation.ControlType]::Edit)
-        if ($field.Key -eq '端口') { $types += [Windows.Automation.ControlType]::Spinner }
-        Set-EditText (Find-Control $app.Window $types $field.Key) $field.Value
+    $fields = [ordered]@{
+        connection_name = @('连接名', $profile)
+        host = @('主机', '127.0.0.1')
+        port = @('端口', [string]$port)
+        database = @('数据库', 'dbstudio_ci')
+        username = @('用户名', 'dbstudio_ci')
     }
+    foreach ($field in $fields.GetEnumerator()) {
+        $script:action = 'fill_' + $field.Key
+        $types = @([Windows.Automation.ControlType]::Edit)
+        if ($field.Key -eq 'port') { $types += [Windows.Automation.ControlType]::Spinner }
+        Set-EditText (Find-Control $app.Window $types $field.Value[0]) $field.Value[1]
+    }
+    $script:action = 'fill_credential'
     $secretEdit = Find-Control $app.Window ([Windows.Automation.ControlType]::Edit) '密码'
     if (-not $secretEdit.Current.IsPassword) { Stop-Acceptance 'UI_CREDENTIAL_FIELD_NOT_PROTECTED' }
     $valuePattern = $null
@@ -279,6 +300,7 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     }
     $valuePattern.SetValue($syntheticSecret)
     $syntheticSecret = $null
+    $script:action = 'save_and_connect'
     Invoke-Button $app.Window '保存并连接'
     Assert-AppProbe $app
     Close-App $app
@@ -309,6 +331,7 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
 } catch {
     $report.status = if ($script:failure.StartsWith('BLOCKED_')) { 'blocked' } else { 'failed' }
     $report.stage = $script:stage
+    if ($script:action) { $report.action = $script:action }
     $report.code = $script:failure
 } finally {
     foreach ($process in $script:children) {
