@@ -344,15 +344,21 @@ function Open-TransactionTable($App) {
 }
 
 function Invoke-ControlDoubleClick($App, $Control) {
-    $scroll = $null
-    if ($Control.Current.IsOffscreen -and $Control.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
-        $scroll.ScrollIntoView()
-    }
-    $point = [Windows.Point]::new(0, 0)
-    if (-not $Control.TryGetClickablePoint([ref]$point) -or
-        -not [AcceptanceDesktop]::DoubleClickInWindow($App.Process.MainWindowHandle, [int]$point.X, [int]$point.Y)) {
-        Stop-Acceptance 'UI_CONTROL_NOT_CLICKABLE'
-    }
+    $deadline = [datetime]::UtcNow.AddSeconds(3)
+    do {
+        $point = [Windows.Point]::new(0, 0)
+        if ($Control.TryGetClickablePoint([ref]$point) -and
+            [AcceptanceDesktop]::DoubleClickInWindow($App.Process.MainWindowHandle, [int]$point.X, [int]$point.Y)) { return }
+        $scroll = $null
+        $target = $Control
+        if ($Control.Current.ControlType -eq [Windows.Automation.ControlType]::Text) {
+            $parent = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($Control)
+            if ($parent -and $parent.Current.ControlType -eq [Windows.Automation.ControlType]::DataItem) { $target = $parent }
+        }
+        if ($target.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) { $scroll.ScrollIntoView() }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    Stop-Acceptance 'UI_CONTROL_NOT_CLICKABLE'
 }
 
 function Edit-GridValue($App, [string]$Old, [string]$Value, [switch]$NullValue) {
@@ -362,7 +368,15 @@ function Edit-GridValue($App, [string]$Old, [string]$Value, [switch]$NullValue) 
     $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '单元格值'
     if ($NullValue) {
         $checkbox = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) 'NULL'
-        $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+        $toggle = $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { Stop-Acceptance 'NULL_EDITOR_UNEXPECTED_STATE' }
+        $toggle.Toggle()
+        $deadline = [datetime]::UtcNow.AddSeconds(5)
+        do {
+            if ($toggle.Current.ToggleState -eq [Windows.Automation.ToggleState]::On) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([datetime]::UtcNow -lt $deadline)
+        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::On) { Stop-Acceptance 'NULL_EDITOR_NOT_SELECTED' }
     } else {
         Set-EditText $editor $Value
     }
@@ -395,6 +409,8 @@ function Assert-GridTransaction($App) {
     Assert-TransactionObserver $start 'ROLLBACK_OBSERVER_MISMATCH'
     $report.checks.rollbackRestored = $true
 
+    $script:action = 'stage_unicode_edit'
+    Edit-GridValue $App 'body-seed' '提交'
     $script:action = 'stage_bigint_edit'
     Edit-GridValue $App '9007199254740993' '9007199254740995'
     $script:action = 'stage_decimal_edit'
@@ -403,8 +419,6 @@ function Assert-GridTransaction($App) {
     Edit-GridValue $App 'optional-seed' -NullValue
     $script:action = 'stage_empty_text_edit'
     Edit-GridValue $App 'empty-seed' ''
-    $script:action = 'stage_unicode_edit'
-    Edit-GridValue $App 'body-seed' '提交'
     $script:action = 'apply_precise_edits'
     Invoke-Button $App.Window '应用修改 (1)'
     $null = Find-Control $App.Window $types '未提交 · 1 行'
