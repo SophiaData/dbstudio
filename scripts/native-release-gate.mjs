@@ -122,9 +122,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const identity = await currentIdentity()
     if (operation === 'manifest' && args.length === 3) {
       await createCandidate({ target: args[0], sourceDir: args[1], outputDir: args[2], identity })
-    } else if (operation === 'aggregate' && args.length === 1) {
+    } else if ((operation === 'aggregate' || operation === 'verify') && args.length === 1) {
       const gate = await aggregateCandidates(args[0], identity)
-      await writeFile(join(args[0], 'native-gate.json'), JSON.stringify(gate, null, 2) + '\n', { flag: 'wx' })
+      if (operation === 'aggregate') {
+        await writeFile(join(args[0], 'native-gate.json'), JSON.stringify(gate, null, 2) + '\n', { flag: 'wx' })
+      }
     } else throw new Error('Invalid native release gate arguments')
     console.log('Native candidate integrity gate passed; installer acceptance remains unverified')
   } catch {

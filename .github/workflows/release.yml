@@ -109,7 +109,7 @@ jobs:
           name: verified-native-candidates-${{ github.run_id }}-${{ github.run_attempt }}
           path: candidates
       - name: Verify candidate identity and hashes before running installers
-        run: node scripts/native-release-gate.mjs aggregate candidates
+        run: node scripts/native-release-gate.mjs verify candidates
       - name: Download the v0.8.1 Windows baseline
         env:
           GH_TOKEN: ${{ github.token }}
