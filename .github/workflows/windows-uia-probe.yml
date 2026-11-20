@@ -6,42 +6,51 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
-  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-  CARGO_BUILD_JOBS: '1'
+  CANDIDATE_BUILD_RUN: '44751988785'
+  CANDIDATE_BUILD_SHA: 'b9344c1053c2ff78a32105e06d4a20829bc58bd8'
 
 jobs:
   installed-ui:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Build and record the Windows candidate
+      - name: Check the source build
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          pnpm build --ci --target x86_64-pc-windows-msvc --bundles nsis
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_BUILD_RUN" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/native-release-gate.mjs manifest win-x64 target/x86_64-pc-windows-msvc/release/bundle candidates/win-x64
-          exit $LASTEXITCODE
-      - uses: actions/upload-artifact@v4
+          if ($run.conclusion -ne 'success' -or $run.path -ne '.github/workflows/release.yml' -or
+              $run.head_branch -ne 'main' -or $run.head_sha -ne $env:CANDIDATE_BUILD_SHA -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) {
+            throw 'The candidate was not produced by the expected successful main build.'
+          }
+          "attempt=$($run.run_attempt)" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
         with:
-          name: native-win-x64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: candidates/win-x64/
-          if-no-files-found: error
+          github-token: ${{ github.token }}
+          run-id: ${{ env.CANDIDATE_BUILD_RUN }}
+          name: verified-native-candidates-${{ env.CANDIDATE_BUILD_RUN }}-${{ steps.source.outputs.attempt }}
+          path: candidates
+      - name: Verify the main candidate before running it
+        env:
+          CANDIDATE_ATTEMPT: ${{ steps.source.outputs.attempt }}
+        run: |
+          $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
+          $env:GITHUB_RUN_ID = $env:CANDIDATE_BUILD_RUN
+          $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
+          node scripts/native-release-gate.mjs verify candidates
+          exit $LASTEXITCODE
       - name: Download the v0.8.1 Windows baseline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,6 +63,7 @@ jobs:
         run: |
           $baseline = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline\dbstudio_0.8.1_x64-setup.exe'
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
+          $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
           $report = Join-Path $env:RUNNER_TEMP 'dbstudio-windows-acceptance.json'
           ./scripts/windows-install-acceptance.ps1 -BaselineInstaller $baseline -CandidateInstaller $candidate -ReportPath $report
           exit $LASTEXITCODE
