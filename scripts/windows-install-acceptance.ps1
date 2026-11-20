@@ -1,8 +1,9 @@
 #Requires -Version 7.4
 param(
-    [Parameter(Mandatory)][string]$BaselineInstaller,
     [Parameter(Mandatory)][string]$CandidateInstaller,
-    [Parameter(Mandatory)][string]$ReportPath
+    [Parameter(Mandatory)][string]$ReportPath,
+    [string]$BaselineInstaller,
+    [switch]$FirstUse
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +19,7 @@ $report = [ordered]@{
     runId = $env:GITHUB_RUN_ID
     runAttempt = $env:GITHUB_RUN_ATTEMPT
     candidateSha = $env:GITHUB_SHA
-    baseline = 'v0.8.1'
+    scenario = if ($FirstUse) { 'clean_install_grid_copy' } else { 'replacement' }
     checks = [ordered]@{}
 }
 
@@ -108,7 +109,7 @@ function Close-App($App) {
     if ($App.Process.ExitCode -ne 0) { Stop-Acceptance 'APP_EXIT_NONZERO' }
 }
 
-function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
+function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel) {
     $typeConditions = [Windows.Automation.Condition[]]@(
         foreach ($controlType in @($Type)) {
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $controlType)
@@ -116,7 +117,7 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
     )
     $condition = if ($typeConditions.Count -eq 1) { $typeConditions[0] }
         else { [Windows.Automation.OrCondition]::new($typeConditions) }
-    if ($Name -and -not $ContainsName) {
+    if ($Name -and -not $ContainsName -and -not $FieldLabel) {
         $condition = [Windows.Automation.AndCondition]::new($condition,
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name))
     }
@@ -125,7 +126,8 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
         try {
             foreach ($control in $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
                 if ($control.Current.IsEnabled -and -not $control.Current.IsOffscreen -and
-                    (-not $ContainsName -or $control.Current.Name.Contains($Name, [StringComparison]::Ordinal))) {
+                    (-not $ContainsName -or $control.Current.Name.Contains($Name, [StringComparison]::Ordinal)) -and
+                    (-not $FieldLabel -or $control.Current.Name.TrimEnd([char[]]' *') -ceq $Name)) {
                     return $control
                 }
             }
@@ -208,6 +210,36 @@ function Assert-AppProbe($App) {
     $null = Find-Control $App.Window @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem) $expected
 }
 
+function Assert-GridClipboard($App, [string]$Expected) {
+    $script:action = 'query_clipboard_fixture'
+    $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
+    Set-EditText $editor 'SELECT id, body FROM dbstudio_ci.copy_rows ORDER BY id;'
+    Invoke-Button $App.Window '执行 SQL'
+    $script:action = 'select_result_rows'
+    foreach ($position in @(3, 1)) {
+        $row = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) "选择第 $position 行"
+        $toggle = $row.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { Stop-Acceptance 'RESULT_ROW_ALREADY_SELECTED' }
+        $toggle.Toggle()
+        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::On) { Stop-Acceptance 'RESULT_ROW_NOT_SELECTED' }
+    }
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { Stop-Acceptance 'BLOCKED_CLIPBOARD_STA' }
+    $script:action = 'copy_result_rows'
+    [Windows.Forms.Clipboard]::SetText('dbstudio-fixture-before-copy')
+    Invoke-Button $App.Window '复制选中行'
+    $deadline = [datetime]::UtcNow.AddSeconds(25)
+    do {
+        try {
+            $clipboard = [Windows.Forms.Clipboard]::GetText([Windows.Forms.TextDataFormat]::UnicodeText)
+            if ($clipboard -ceq $Expected) { return }
+        } catch [Runtime.InteropServices.ExternalException] {
+            # Another process can briefly hold the runner clipboard open.
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([datetime]::UtcNow -lt $deadline)
+    Stop-Acceptance 'CLIPBOARD_CONTENT_MISMATCH'
+}
+
 try {
     if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
         -not [Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) {
@@ -249,12 +281,14 @@ public static class AcceptanceDesktop {
     $report.checks.runnerPreflight = $true
 
     $script:stage = 'installer_integrity'
-    $report.baselineInstallerSha256 = (Get-FileHash -LiteralPath $BaselineInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($report.baselineInstallerSha256 -ne '41403e3117aaade4dd8c9b9eb433684cb2bc925da8a489e89d726e1c6e9da292') {
-        Stop-Acceptance 'BASELINE_HASH_MISMATCH'
-    }
     $report.candidateInstallerSha256 = (Get-FileHash -LiteralPath $CandidateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($report.candidateInstallerSha256 -eq $report.baselineInstallerSha256) { Stop-Acceptance 'INSTALLERS_IDENTICAL' }
+    if (-not $FirstUse) {
+        $report.baselineInstallerSha256 = (Get-FileHash -LiteralPath $BaselineInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($report.baselineInstallerSha256 -ne '41403e3117aaade4dd8c9b9eb433684cb2bc925da8a489e89d726e1c6e9da292') {
+            Stop-Acceptance 'BASELINE_HASH_MISMATCH'
+        }
+        if ($report.candidateInstallerSha256 -eq $report.baselineInstallerSha256) { Stop-Acceptance 'INSTALLERS_IDENTICAL' }
+    }
 
     $script:stage = 'fixture'
     $run = [guid]::NewGuid().ToString('N')
@@ -288,6 +322,11 @@ public static class AcceptanceDesktop {
 CREATE DATABASE dbstudio_ci;
 CREATE TABLE dbstudio_ci.probe (marker VARCHAR(16) NOT NULL);
 INSERT INTO dbstudio_ci.probe VALUES ('$marker');
+CREATE TABLE dbstudio_ci.copy_rows (id BIGINT NOT NULL PRIMARY KEY, body TEXT NOT NULL);
+INSERT INTO dbstudio_ci.copy_rows VALUES
+(9007199254740993, CONCAT('$marker', CHAR(9), CHAR(34), 'quoted', CHAR(34), CHAR(13,10), REPEAT('x', 1400))),
+(9007199254740994, 'not-selected'),
+(9007199254740995, 'third-row');
 CREATE USER 'dbstudio_ci'@'127.0.0.1' IDENTIFIED BY '$syntheticSecret';
 GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
 "@
@@ -299,6 +338,20 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     $observed = Invoke-FixtureSql 'dbstudio_ci' $probe $syntheticSecret
     if ($observed.ExitCode -ne 0 -or $observed.Out -cne $expected) { Stop-Acceptance 'FIXTURE_OBSERVER_MISMATCH' }
     $report.checks.fixtureAuthentication = $true
+    if ($FirstUse) {
+        $copyRows = Invoke-FixtureSql 'dbstudio_ci' 'SELECT id, HEX(body) FROM dbstudio_ci.copy_rows WHERE id IN (9007199254740993, 9007199254740995) ORDER BY id;' $syntheticSecret
+        $expectedLines = @("id`tbody")
+        if ($copyRows.ExitCode -ne 0) { Stop-Acceptance 'CLIPBOARD_OBSERVER_QUERY_FAILED' }
+        foreach ($line in ($copyRows.Out -split '\r?\n')) {
+            if ($line -cnotmatch '^(9007199254740993|9007199254740995)\t([0-9A-F]+)$') { Stop-Acceptance 'CLIPBOARD_OBSERVER_ROW_INVALID' }
+            $id = $Matches[1]
+            $body = [Text.Encoding]::UTF8.GetString([Convert]::FromHexString($Matches[2]))
+            if ($body -match '["\t\r\n]') { $body = '"' + $body.Replace('"', '""') + '"' }
+            $expectedLines += "$id`t$body"
+        }
+        if ($expectedLines.Count -ne 3) { Stop-Acceptance 'CLIPBOARD_OBSERVER_COUNT' }
+        $expectedClipboard = $expectedLines -join "`r`n"
+    }
 
     if ($env:DBSTUDIO_PROBE_CANDIDATE_STARTUP -eq '1') {
         $script:stage = 'candidate_clean_install'
@@ -315,14 +368,21 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         return
     }
 
-    $script:stage = 'baseline_install'
-    $baseline = Install-App $BaselineInstaller
-    $report.baselineBinarySha256 = (Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash.ToLowerInvariant()
-    $report.checks.baselineInstalled = $true
-
-    $script:stage = 'baseline_save_and_query'
-    $script:action = 'launch_baseline'
-    $app = Open-App $baseline
+    if ($FirstUse) {
+        $script:stage = 'candidate_clean_install'
+        $binary = Install-App $CandidateInstaller
+        $report.checks.candidateInstalled = $true
+        $script:stage = 'candidate_connect_and_copy'
+    } else {
+        $script:stage = 'baseline_install'
+        $baseline = Install-App $BaselineInstaller
+        $report.baselineBinarySha256 = (Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash.ToLowerInvariant()
+        $report.checks.baselineInstalled = $true
+        $script:stage = 'baseline_save_and_query'
+        $binary = $baseline
+    }
+    $script:action = 'launch_application'
+    $app = Open-App $binary
     $script:action = 'open_connection_form'
     Invoke-Button $app.Window '新建连接' -ContainsName
     $script:action = 'select_mysql'
@@ -339,7 +399,7 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         $script:action = 'fill_' + $field.Key
         $types = @([Windows.Automation.ControlType]::Edit)
         if ($field.Key -eq 'port') { $types += [Windows.Automation.ControlType]::Spinner }
-        Set-EditText (Find-Control $app.Window $types $field.Value[0]) $field.Value[1]
+        Set-EditText (Find-Control $app.Window $types $field.Value[0] -FieldLabel) $field.Value[1]
     }
     $script:action = 'fill_credential'
     $secretEdit = Find-Control $app.Window ([Windows.Automation.ControlType]::Edit) '密码'
@@ -353,6 +413,14 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     $script:action = 'save_and_connect'
     Invoke-Button $app.Window '保存并连接'
     Assert-AppProbe $app
+    if ($FirstUse) {
+        $report.checks.mysqlConnectedAndQueried = $true
+        Assert-GridClipboard $app $expectedClipboard
+        Close-App $app
+        $report.checks.selectedRowsClipboard = $true
+        $report.status = 'passed'
+        return
+    }
     Close-App $app
     $report.checks.baselineSavedAndQueried = $true
 

@@ -1,16 +1,17 @@
-name: Windows installed UI probe
+name: Windows MySQL grid clipboard acceptance
 
 on:
   push:
-    branches: [ci/windows-installer-uia-probe]
+    branches: [ci/windows-dbeaver-first-use]
 
 permissions:
   contents: read
   actions: read
 
 env:
-  CANDIDATE_BUILD_RUN: '44751988785'
-  CANDIDATE_BUILD_SHA: 'b9344c1053c2ff78a32105e06d4a20829bc58bd8'
+  CANDIDATE_BUILD_RUN: '44771568587'
+  CANDIDATE_BUILD_SHA: 'ad72a038083162cc5c3dad090e1b9c5d78190cde'
+  CANDIDATE_BUILD_BRANCH: 'feat/dbeaver-replacement'
 
 jobs:
   installed-ui:
@@ -31,9 +32,9 @@ jobs:
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_BUILD_RUN" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($run.conclusion -ne 'success' -or $run.path -ne '.github/workflows/release.yml' -or
-              $run.head_branch -ne 'main' -or $run.head_sha -ne $env:CANDIDATE_BUILD_SHA -or
+              $run.head_branch -ne $env:CANDIDATE_BUILD_BRANCH -or $run.head_sha -ne $env:CANDIDATE_BUILD_SHA -or
               $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) {
-            throw 'The candidate was not produced by the expected successful main build.'
+            throw 'The candidate was not produced by the expected successful feature build.'
           }
           "attempt=$($run.run_attempt)" >> $env:GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
@@ -42,7 +43,7 @@ jobs:
           run-id: ${{ env.CANDIDATE_BUILD_RUN }}
           name: verified-native-candidates-${{ env.CANDIDATE_BUILD_RUN }}-${{ steps.source.outputs.attempt }}
           path: candidates
-      - name: Verify the main candidate before running it
+      - name: Verify the feature candidate before running it
         env:
           CANDIDATE_ATTEMPT: ${{ steps.source.outputs.attempt }}
         run: |
@@ -51,22 +52,17 @@ jobs:
           $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
           node scripts/native-release-gate.mjs verify candidates
           exit $LASTEXITCODE
-      - name: Download the v0.8.1 Windows baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Install the candidate, query MySQL and verify the Windows clipboard
         run: |
-          gh release download v0.8.1 --repo $env:GITHUB_REPOSITORY --pattern 'dbstudio_0.8.1_x64-setup.exe' --dir (Join-Path $env:RUNNER_TEMP 'dbstudio-baseline')
-          exit $LASTEXITCODE
-      - name: Inspect the candidate on a clean Windows installation
-        env:
-          DBSTUDIO_PROBE_CANDIDATE_STARTUP: '1'
-        run: |
-          $baseline = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline\dbstudio_0.8.1_x64-setup.exe'
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
           $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
           $report = Join-Path $env:RUNNER_TEMP 'dbstudio-windows-acceptance.json'
-          ./scripts/windows-install-acceptance.ps1 -BaselineInstaller $baseline -CandidateInstaller $candidate -ReportPath $report
-          exit $LASTEXITCODE
+          pwsh -NoProfile -Sta -File ./scripts/windows-install-acceptance.ps1 -FirstUse -CandidateInstaller $candidate -ReportPath $report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($result.status -ne 'passed' -or $result.checks.selectedRowsClipboard -ne $true) {
+            throw 'The candidate must have passed the clipboard comparison.'
+          }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
