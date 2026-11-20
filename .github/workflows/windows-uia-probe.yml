@@ -52,7 +52,7 @@ jobs:
           $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
           node scripts/native-release-gate.mjs verify candidates
           exit $LASTEXITCODE
-      - name: Install the candidate, query MySQL and verify the Windows clipboard
+      - name: Verify MySQL query, clipboard and reconnect after restarting the installed app
         run: |
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
           $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
@@ -60,8 +60,9 @@ jobs:
           pwsh -NoProfile -Sta -File ./scripts/windows-install-acceptance.ps1 -FirstUse -CandidateInstaller $candidate -ReportPath $report
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-          if ($result.status -ne 'passed' -or $result.checks.selectedRowsClipboard -ne $true) {
-            throw 'The candidate must have passed the clipboard comparison.'
+          if ($result.status -ne 'passed' -or $result.checks.selectedRowsClipboard -ne $true -or
+              $result.checks.sameVersionReconnect -ne $true) {
+            throw 'The candidate must have passed the clipboard and restart checks.'
           }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

@@ -224,7 +224,12 @@ function Connect-Saved($App) {
     $script:action = 'find_saved_connection'
     $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
     $row = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $profile -ContainsName
-    Send-ControlKeys $row ' '
+    $invoke = $null
+    if ($row.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+        $invoke.Invoke()
+    } else {
+        Send-ControlKeys $row ' '
+    }
     $script:action = 'connect_saved_profile'
     Invoke-Button $App.Window '连接'
 }
@@ -454,6 +459,19 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         Assert-GridClipboard $app $expectedClipboard
         Close-App $app
         $report.checks.selectedRowsClipboard = $true
+
+        $script:stage = 'candidate_same_version_restart'
+        $script:action = 'relaunch_candidate'
+        $firstProcessId = $app.Process.Id
+        $app = Open-App $binary
+        if ($app.Process.Id -eq $firstProcessId) { Stop-Acceptance 'APP_PROCESS_NOT_REPLACED' }
+        Connect-Saved $app
+        $probe = "SELECT CONCAT(marker, ':restart:', CURRENT_USER()) AS proof FROM dbstudio_ci.probe;"
+        $expected = "${marker}:restart:dbstudio_ci@127.0.0.1"
+        Assert-AppProbe $app
+        $script:action = 'close_restarted_candidate'
+        Close-App $app
+        $report.checks.sameVersionReconnect = $true
         $report.status = 'passed'
         return
     }
