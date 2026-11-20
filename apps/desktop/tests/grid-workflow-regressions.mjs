@@ -42,7 +42,7 @@ const bundle = await build({
     builder.onResolve({ filter: /^vue$/ }, () => ({ path: pathToFileURL(vueEntry).href, external: true }))
     builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'native-memory-ipc', namespace: 'grid-memory-ipc' }))
     builder.onLoad({ filter: /.*/, namespace: 'grid-memory-ipc' }, () => ({ contents: 'export const invoke = (...args) => globalThis.__DBSTUDIO_GRID_IPC__(...args)' }))
-    builder.onLoad({ filter: /apps[\\/]desktop[\\/]src[\\/]clipboard\.ts$/ }, () => ({ contents: "export const writeClipboardText = async () => { throw new Error('OS clipboard forbidden in pure grid regressions') }" }))
+    builder.onLoad({ filter: /apps[\\/]desktop[\\/]src[\\/]clipboard\.ts$/ }, () => ({ contents: 'export const writeClipboardText = (text) => globalThis.__DBSTUDIO_GRID_CLIPBOARD__(text)' }))
     builder.onLoad({ filter: /\.vue$/ }, async ({ path: filename }) => {
       if (!filename.replaceAll('\\', '/').endsWith('/components/ResultGrid.vue')) return { contents: 'export default {}' }
       const { descriptor } = parse(await readFile(filename, 'utf8'), { filename })
@@ -90,6 +90,8 @@ function fixture() {
   })
   wb.tabs.value.push(tab); wb.activateTab(tab)
   const inserted = []
+  const clipboard = []
+  globalThis.__DBSTUDIO_GRID_CLIPBOARD__ = async (value) => { clipboard.push(value) }
   let transactionActive = false
   nativeMethods = {
     transactionState: async () => ({ active: transactionActive, pendingAffected: inserted.length }),
@@ -105,8 +107,9 @@ function fixture() {
   const deferred = [], inFlight = []
   let unmounted = false
   return {
-    wb, tab, rows, makePage, inserted, grid, get bindings() { return bindings },
+    wb, tab, rows, makePage, inserted, clipboard, grid, get bindings() { return bindings },
     deferCell() { const request = defer(); deferred.push(request); nativeMethods.fetchCellValue = () => request.promise; return request },
+    deferReload() { const request = defer(); deferred.push(request); nativeMethods.runQuery = () => request.promise; return request },
     open(row = rows[0]) { const pending = grid.openCell(row, 1); inFlight.push(pending); return pending },
     unmount() { if (!unmounted) { renderer.render(null, root); unmounted = true } },
     async finish() {
@@ -125,6 +128,70 @@ async function test(name, run) {
   catch (error) { results.push({ name, passed: false, error: error instanceof Error ? error.message : String(error) }) }
   finally { await context.finish() }
 }
+
+await test('copy_marked_rows_uses_grid_order_and_complete_quoted_values', async (f) => {
+  f.tab.selectedRows.add(1).add(0)
+  f.rows[0].cells[0] = text('9007199254740993')
+  f.tab.page.columns[3].name = 'optional\tvalue'
+  f.tab.dirty.set(1, { changes: { note: text('1234567890.123456789012345678') } })
+  const completeBody = '完整\t字段 "引号"\r\n下一行'
+  const request = f.deferCell()
+  const copy = f.grid.copyMarkedRows()
+  assert.deepEqual(f.clipboard, [])
+  request.resolve(text(completeBody)); await copy
+  assert.deepEqual(f.clipboard, [
+    'id\tbody\tnote\t"optional\tvalue"\r\n' +
+    '9007199254740993\t"完整\t字段 ""引号""\r\n下一行"\tnote-1\t\r\n' +
+    '2\tsecond-original\t1234567890.123456789012345678\t'
+  ])
+  assert.equal(f.tab.busy, false)
+})
+await test('copy_marked_rows_keeps_clipboard_when_fetch_fails', async (f) => {
+  f.tab.selectedRows.add(0).add(1)
+  const request = f.deferCell()
+  const copy = f.grid.copyMarkedRows()
+  request.reject(new Error('synthetic full value unavailable')); await copy
+  assert.deepEqual(f.clipboard, [])
+  assert.match(f.grid.error, /synthetic full value unavailable/)
+  assert.equal(f.tab.busy, false)
+})
+await test('copy_marked_rows_disregards_rows_outside_the_current_page', async (f) => {
+  f.tab.selectedRows.add(10)
+  await f.grid.copyMarkedRows()
+  assert.deepEqual(f.clipboard, [])
+})
+await test('copy_marked_rows_discards_pending_copy_after_page_replacement', async (f) => {
+  f.tab.selectedRows.add(0)
+  const request = f.deferCell()
+  const copy = f.grid.copyMarkedRows()
+  f.tab.page = f.makePage(200)
+  request.resolve(text('synthetic old page')); await copy
+  assert.deepEqual(f.clipboard, [])
+  assert.equal(f.tab.busy, false)
+})
+
+await test('copy_marked_rows_does_not_unlock_a_pending_reload', async (f) => {
+  f.tab.selectedRows.add(0)
+  const fullValue = f.deferCell()
+  const copy = f.grid.copyMarkedRows()
+  const query = f.deferReload()
+  const reload = f.wb.reloadTab(f.tab, false)
+  fullValue.resolve(text('synthetic old page')); await copy
+  const busyDuringReload = f.tab.busy
+  query.resolve(f.makePage(0)); await reload
+  assert.deepEqual(f.clipboard, [])
+  assert.equal(busyDuringReload, true)
+  assert.equal(f.tab.busy, false)
+})
+await test('copy_marked_rows_keeps_the_values_visible_when_copy_started', async (f) => {
+  f.tab.selectedRows.add(0).add(1)
+  f.tab.dirty.set(1, { changes: { note: text('original-draft') } })
+  const fullValue = f.deferCell()
+  const copy = f.grid.copyMarkedRows()
+  f.tab.dirty.set(1, { changes: { note: text('later-draft') } })
+  fullValue.resolve(text('synthetic full')); await copy
+  assert.deepEqual(f.clipboard, ['id\tbody\tnote\tomitted\r\n1\tsynthetic full\tnote-1\t\r\n2\tsecond-original\toriginal-draft\t'])
+})
 
 await test('late_success_preserves_new_editor_draft_without_table_busy', async (f) => {
   const request = f.deferCell(), first = f.open()
