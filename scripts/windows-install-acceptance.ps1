@@ -339,22 +339,26 @@ function Open-TransactionTable($App) {
     }
     $script:action = 'open_transaction_table'
     $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) 'grid_transaction' -ContainsName
-    Send-ControlKeys $table '{ENTER}'
+    Invoke-ControlDoubleClick $App $table
     $null = Find-Control $App.Window @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem) 'body-seed' -AllowOffscreen
+}
+
+function Invoke-ControlDoubleClick($App, $Control) {
+    $scroll = $null
+    if ($Control.Current.IsOffscreen -and $Control.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
+        $scroll.ScrollIntoView()
+    }
+    $point = [Windows.Point]::new(0, 0)
+    if (-not $Control.TryGetClickablePoint([ref]$point) -or
+        -not [AcceptanceDesktop]::DoubleClickInWindow($App.Process.MainWindowHandle, [int]$point.X, [int]$point.Y)) {
+        Stop-Acceptance 'UI_CONTROL_NOT_CLICKABLE'
+    }
 }
 
 function Edit-GridValue($App, [string]$Old, [string]$Value, [switch]$NullValue) {
     $types = @([Windows.Automation.ControlType]::DataItem, [Windows.Automation.ControlType]::Text)
     $cell = Find-Control $App.Window $types $Old -AllowOffscreen
-    $scroll = $null
-    if ($cell.Current.IsOffscreen -and $cell.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
-        $scroll.ScrollIntoView()
-    }
-    $point = [Windows.Point]::new(0, 0)
-    if (-not $cell.TryGetClickablePoint([ref]$point) -or
-        -not [AcceptanceDesktop]::DoubleClickInWindow($App.Process.MainWindowHandle, [int]$point.X, [int]$point.Y)) {
-        Stop-Acceptance 'GRID_CELL_NOT_CLICKABLE'
-    }
+    Invoke-ControlDoubleClick $App $cell
     $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '单元格值'
     if ($NullValue) {
         $checkbox = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) 'NULL'
