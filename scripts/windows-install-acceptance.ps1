@@ -300,6 +300,21 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     if ($observed.ExitCode -ne 0 -or $observed.Out -cne $expected) { Stop-Acceptance 'FIXTURE_OBSERVER_MISMATCH' }
     $report.checks.fixtureAuthentication = $true
 
+    if ($env:DBSTUDIO_PROBE_CANDIDATE_STARTUP -eq '1') {
+        $script:stage = 'candidate_clean_install'
+        $installed = Install-App $CandidateInstaller
+        $report.checks.candidateInstalled = $true
+        $script:stage = 'candidate_clean_startup'
+        $app = Open-App $installed
+        $script:action = 'open_connection_form'
+        Invoke-Button $app.Window '新建连接' -ContainsName
+        $null = Find-Control $app.Window ([Windows.Automation.ControlType]::Edit) '连接名'
+        Close-App $app
+        $report.checks.candidateConnectionFormOpened = $true
+        $report.status = 'passed'
+        return
+    }
+
     $script:stage = 'baseline_install'
     $baseline = Install-App $BaselineInstaller
     $report.baselineBinarySha256 = (Get-FileHash -LiteralPath $baseline -Algorithm SHA256).Hash.ToLowerInvariant()

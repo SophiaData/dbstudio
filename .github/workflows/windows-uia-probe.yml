@@ -38,7 +38,9 @@ jobs:
         run: |
           gh release download v0.8.1 --repo $env:GITHUB_REPOSITORY --pattern 'dbstudio_0.8.1_x64-setup.exe' --dir (Join-Path $env:RUNNER_TEMP 'dbstudio-baseline')
           exit $LASTEXITCODE
-      - name: Inspect the installed UI and run the reconnect scenario
+      - name: Inspect the candidate on a clean Windows installation
+        env:
+          DBSTUDIO_PROBE_CANDIDATE_STARTUP: '1'
         run: |
           $baseline = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline\dbstudio_0.8.1_x64-setup.exe'
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
