@@ -24,14 +24,26 @@ pnpm build:app:mac
 
 每个目标必须具有非空安装包，并附清单：源码 SHA、版本、workflow run ID/attempt、目标平台、文件大小与 SHA-256。清单生成时核对 package/Cargo/Tauri 版本。下载后的聚合步骤只要求 macOS 和 Windows 两个目标来自同一次运行及 attempt，重新验证大小和哈希；缺少任一目标、路径穿越、符号链接、额外文件和来源不匹配均会失败。Artifact 名包含 run ID/attempt，保留旧运行证据；失败后需使用“重新运行所有作业”，生成同一新 attempt 的双平台候选包。完整版本 token 校验拒绝将 `10.8.0` 或 `0.8.0-rc.1` 文件声明为 `0.8.0`。
 
-候选包以 GitHub Actions artifacts 保留。清单固定标记 `installerAcceptance: unverified`；不能靠修改清单将安装验收提升为已通过。当前工作流不自动发布 GitHub Release，避免把尚未完成各平台安装验收的原生候选包分发为正式版本。
+候选包以 GitHub Actions artifacts 保留。清单固定标记 `installerAcceptance: unverified`。安装结果由单独的验收作业及报告记录。工作流不自动发布 GitHub Release。
+
+### Agent Note: Windows 安装与 MySQL 重连
+
+**状态** 已接入工作流，实际通过情况以每次运行的报告为准。
+
+**问题** 现有双平台聚合校验只能确认安装包完整性。调试版桌面测试和真库驱动测试无法验证正式安装包更换后保存的连接是否仍能使用。
+
+**决定** 聚合校验完成后，`windows-2025` 作业再次核对候选包清单和哈希，然后安装固定哈希的正式版 `v0.8.1`。作业在同一 Windows 用户下通过实际桌面界面保存专用 MySQL 连接并查询合成数据，重启旧版复查已保存连接，再用 NSIS `/UPDATE` 覆盖安装候选版。通过条件是候选版确实替换了应用二进制，且用同一连接直接查询到本轮标记和正确的 MySQL 账号。独立客户端验证正确凭据可用、空凭据被拒绝。详见 [Issue #15](https://github.com/SophiaData/dbstudio/issues/15)。
+
+**备选方案** 本机 Sandbox 依赖用户桌面和系统状态。调试版桌面测试无法覆盖生产安装器的覆盖安装路径。
+
+**验收标准** 此作业需要可交互桌面、WebView2 和 MySQL 服务端。前置条件缺失时作业返回失败并记录 `blocked`。`windows-installer-acceptance-<run_id>-<run_attempt>` 报告只记录来源、哈希、阶段及脱敏错误码。首轮两份安装包都标记为 `0.8.1`，验收覆盖同版本跨构建重装。
 
 ## 现有证据与后续平台验收
 
 - macOS 真实 Tauri WebView 的业务检查、原生工作区/宿主单测，以及 OS keyring 合成凭据往返均在本机执行。
 - 原生 PostgreSQL/MySQL、Redis TLS/Kafka TLS SASL、SQL TLS/固定指纹 SSH 已使用专用服务夹具实测；错误 CA、证书名称与取消通道有独立反例。
 - 安装包内部完整性、来源及传输后哈希校验通过合成负例验证；这不替代安装/升级/卸载测试。
-- macOS DMG 安装、Developer ID 签名/公证及 Windows EXE 安装尚需对应平台验收。此前已进行远端 CI 试跑，结果见[CI 记录](native-ci.md)；双平台配置与候选包门禁回归已在本地通过，后续执行以该配置提交的远端 CI 和下载后哈希核验为准。工作流不自动正式发布。
+- macOS DMG 安装、Developer ID 签名和公证，以及 Windows 11 的系统提示与安装交互，按各自平台验收。此前的远端试跑见 [CI 记录](native-ci.md)。
 - OS 保存对话框与剪贴板的实际系统交互保留人工平台验收；自动检查覆盖组件状态、导出内容及原生文件写入保护。
 
 所有夹具仅访问专用临时数据。容器停止后保留；私有证书、环境文件、备份与原始日志不上传为 artifacts。钥匙串验收保留一个唯一命名的公开合成条目，不访问已有用户凭据。

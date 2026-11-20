@@ -90,4 +90,44 @@ jobs:
           path: candidates/
           if-no-files-found: error
       - name: Record acceptance boundary
-        run: echo 'Native candidate integrity verified. Installer execution, signing and notarization require platform acceptance before publication.'
+        run: echo 'Native candidate integrity verified. Platform acceptance is recorded separately.'
+
+  windows-installer-acceptance:
+    name: Windows installer and MySQL reconnect acceptance
+    needs: gate
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-native-candidates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidates
+      - name: Verify candidate identity and hashes before running installers
+        run: node scripts/native-release-gate.mjs aggregate candidates
+      - name: Download the v0.8.1 Windows baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline'
+          gh release download v0.8.1 --repo $env:GITHUB_REPOSITORY --pattern 'dbstudio_0.8.1_x64-setup.exe' --dir $destination
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install, save a MySQL connection, and reconnect after replacement
+        run: |
+          $baseline = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline\dbstudio_0.8.1_x64-setup.exe'
+          $manifest = Get-Content -LiteralPath 'candidates/win-x64/manifest.json' -Raw | ConvertFrom-Json
+          $candidate = Join-Path $PWD ('candidates/win-x64/' + $manifest.files[0].name)
+          $report = Join-Path $env:RUNNER_TEMP 'dbstudio-windows-acceptance.json'
+          ./scripts/windows-install-acceptance.ps1 -BaselineInstaller $baseline -CandidateInstaller $candidate -ReportPath $report
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: windows-installer-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dbstudio-windows-acceptance.json
+          if-no-files-found: ignore
