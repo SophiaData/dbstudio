@@ -134,11 +134,29 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
         }
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $deadline)
+    if ($script:action -eq 'open_connection_form') {
+        $controls = $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+        $summary = [ordered]@{ descendants = $controls.Count; buttons = 0; documents = 0; matching = 0; enabled = 0; visible = 0 }
+        foreach ($control in $controls) {
+            try {
+                if ($control.Current.ControlType -eq [Windows.Automation.ControlType]::Document) { $summary.documents++ }
+                if ($control.Current.ControlType -ne [Windows.Automation.ControlType]::Button) { continue }
+                $summary.buttons++
+                if ($control.Current.Name -notlike '*新建连接*') { continue }
+                $summary.matching++
+                if ($control.Current.IsEnabled) { $summary.enabled++ }
+                if (-not $control.Current.IsOffscreen) { $summary.visible++ }
+            } catch [Windows.Automation.ElementNotAvailableException] {
+                # The probe reports only controls still present in the window.
+            }
+        }
+        $report.uiProbe = $summary
+    }
     Stop-Acceptance 'UI_CONTROL_TIMEOUT'
 }
 
-function Invoke-Button($Window, [string]$Name) {
-    $button = Find-Control $Window ([Windows.Automation.ControlType]::Button) $Name
+function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
+    $button = Find-Control $Window ([Windows.Automation.ControlType]::Button) $Name -ContainsName:$ContainsName
     $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 
@@ -274,7 +292,7 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     $script:action = 'launch_baseline'
     $app = Open-App $baseline
     $script:action = 'open_connection_form'
-    Invoke-Button $app.Window '＋ 新建连接'
+    Invoke-Button $app.Window '新建连接' -ContainsName
     $script:action = 'select_mysql'
     $combo = Find-Control $app.Window ([Windows.Automation.ControlType]::ComboBox) '数据库类型'
     Send-ControlKeys $combo '%{DOWN}m{ENTER}'

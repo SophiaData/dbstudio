@@ -1,0 +1,53 @@
+name: Windows installed UI probe
+
+on:
+  push:
+    branches: [ci/windows-installer-uia-probe]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  installed-ui:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 44739521209
+          name: verified-native-candidates-44739521209-1
+          path: candidates
+      - name: Verify the earlier candidate
+        run: |
+          $env:GITHUB_SHA = 'b6d0dc4dc2bd08acc3b86bcb969403004235e530'
+          $env:GITHUB_RUN_ID = '44739521209'
+          $env:GITHUB_RUN_ATTEMPT = '1'
+          node scripts/native-release-gate.mjs verify candidates
+          exit $LASTEXITCODE
+      - name: Download the v0.8.1 Windows baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.8.1 --repo $env:GITHUB_REPOSITORY --pattern 'dbstudio_0.8.1_x64-setup.exe' --dir (Join-Path $env:RUNNER_TEMP 'dbstudio-baseline')
+          exit $LASTEXITCODE
+      - name: Inspect the installed UI and run the reconnect scenario
+        run: |
+          $baseline = Join-Path $env:RUNNER_TEMP 'dbstudio-baseline\dbstudio_0.8.1_x64-setup.exe'
+          $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
+          $report = Join-Path $env:RUNNER_TEMP 'dbstudio-windows-acceptance.json'
+          ./scripts/windows-install-acceptance.ps1 -BaselineInstaller $baseline -CandidateInstaller $candidate -ReportPath $report
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: windows-uia-probe
+          path: ${{ runner.temp }}/dbstudio-windows-acceptance.json
+          if-no-files-found: ignore
