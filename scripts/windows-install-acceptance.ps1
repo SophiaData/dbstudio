@@ -346,11 +346,15 @@ function Open-TransactionTable($App) {
 function Edit-GridValue($App, [string]$Old, [string]$Value, [switch]$NullValue) {
     $types = @([Windows.Automation.ControlType]::DataItem, [Windows.Automation.ControlType]::Text)
     $cell = Find-Control $App.Window $types $Old -AllowOffscreen
-    while ($cell -and -not $cell.Current.IsKeyboardFocusable) {
-        $cell = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($cell)
+    $scroll = $null
+    if ($cell.Current.IsOffscreen -and $cell.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
+        $scroll.ScrollIntoView()
     }
-    if (-not $cell -or ($cell.Current.ControlType -notin $types)) { Stop-Acceptance 'GRID_CELL_NOT_FOCUSABLE' }
-    Send-ControlKeys $cell '{ENTER}'
+    $point = [Windows.Point]::new(0, 0)
+    if (-not $cell.TryGetClickablePoint([ref]$point) -or
+        -not [AcceptanceDesktop]::DoubleClickInWindow($App.Process.MainWindowHandle, [int]$point.X, [int]$point.Y)) {
+        Stop-Acceptance 'GRID_CELL_NOT_CLICKABLE'
+    }
     $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '单元格值'
     if ($NullValue) {
         $checkbox = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) 'NULL'
@@ -418,7 +422,7 @@ try {
             if (Test-Path -LiteralPath (Join-Path $folder $profileName)) { Stop-Acceptance 'BLOCKED_NONEMPTY_PROFILE' }
         }
     }
-    Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Windows.Forms
+    Add-Type -AssemblyName WindowsBase,UIAutomationClient,UIAutomationTypes,System.Windows.Forms
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -429,6 +433,31 @@ public static class AcceptanceDesktop {
 
     [DllImport("user32.dll")]
     private static extern bool CloseDesktop(IntPtr desktop);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point { public int X; public int Y; }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(Point point);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+
+    public static bool DoubleClickInWindow(IntPtr window, int x, int y) {
+        var target = WindowFromPoint(new Point { X = x, Y = y });
+        if (window == IntPtr.Zero || GetAncestor(target, 2) != window || !SetCursorPos(x, y)) return false;
+        for (var i = 0; i < 2; i++) {
+            mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+        }
+        return true;
+    }
 
     public static bool InputDesktopAvailable() {
         var desktop = OpenInputDesktop(0, false, 1); // DESKTOP_READOBJECTS
