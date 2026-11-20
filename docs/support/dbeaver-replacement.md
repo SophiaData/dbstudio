@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 全新安装和启动 | 安装后打开工作台与新建连接表单 | [已在 Windows 托管 runner 实测](https://github.com/SophiaData/dbstudio/actions/runs/44756068629/attempts/2) |
 | 保存连接、查询和重启 | 保存专用连接，完整退出，同一安装包重启后无需重录凭据即可查询 | `ad72a03` Windows 候选包已通过。首次运行在启动时未找到连接表单，第二次在新 runner 上用同一安装包完成初次查询、退出、新进程重连与新查询。[Windows 重启验收](https://github.com/SophiaData/dbstudio/actions/runs/44782064834/attempts/2) · [macOS 测试构建](mysql-parity/public/real-acceptance-results.md#同二进制重启编辑守卫与回滚实际通过) |
-| 查询、分页和多行复制 | 独立连接确认分页顺序与结果。选中当前页多行后核对系统剪贴板的列名、行序、长文本与精确值 | [Windows 候选包通过 MySQL 查询和系统剪贴板核对](https://github.com/SophiaData/dbstudio/actions/runs/44777573723)，分页待验 |
+| 查询、分页和多行复制 | 独立连接确认分页顺序与结果。选中当前页多行后核对系统剪贴板的列名、行序、长文本与精确值 | `ad72a03` Windows 候选包已通过。405 行按 200/200/5 分页，正向逐页核对后再返回首页，内容与独立 MySQL 查询逐行一致。首次运行未找到连接表单，第二次使用同一安装包通过。[分页和复制验收](https://github.com/SophiaData/dbstudio/actions/runs/44783704190/attempts/2) |
 | 网格编辑和事务 | 独立连接验证未提交不可见、回滚恢复，以及提交后值保持精确。覆盖 BIGINT、DECIMAL、UTF-8、NULL 和空串 | [macOS 测试构建有部分类型和事务证据](mysql-parity/public/real-acceptance-results.md#首组六字段精确网格编辑与应用后提交真实通过)，Windows 候选包待验 |
 | CSV 导入导出 | 通过桌面入口导出 CSV，再导入专用表。独立解析文件并回读行数、值与编码，覆盖引号、换行、NULL 和空串 | [SQLite 原生桌面及 SQL 驱动有分层实测](native-migration-matrix.md)，Windows MySQL 候选包待验 |
 
