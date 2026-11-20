@@ -109,7 +109,7 @@ function Close-App($App) {
     if ($App.Process.ExitCode -ne 0) { Stop-Acceptance 'APP_EXIT_NONZERO' }
 }
 
-function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel) {
+function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel, [switch]$AllowOffscreen) {
     $typeConditions = [Windows.Automation.Condition[]]@(
         foreach ($controlType in @($Type)) {
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $controlType)
@@ -125,7 +125,7 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [swit
     do {
         try {
             foreach ($control in $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
-                if ($control.Current.IsEnabled -and -not $control.Current.IsOffscreen -and
+                if ($control.Current.IsEnabled -and ($AllowOffscreen -or -not $control.Current.IsOffscreen) -and
                     (-not $ContainsName -or $control.Current.Name.Contains($Name, [StringComparison]::Ordinal)) -and
                     (-not $FieldLabel -or $control.Current.Name.TrimEnd([char[]]' *') -ceq $Name)) {
                     return $control
@@ -175,7 +175,11 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [swit
 }
 
 function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
-    $button = Find-Control $Window ([Windows.Automation.ControlType]::Button) $Name -ContainsName:$ContainsName
+    $button = Find-Control $Window ([Windows.Automation.ControlType]::Button) $Name -ContainsName:$ContainsName -AllowOffscreen
+    $scroll = $null
+    if ($button.Current.IsOffscreen -and $button.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
+        $scroll.ScrollIntoView()
+    }
     $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 
