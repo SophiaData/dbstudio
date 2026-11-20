@@ -139,6 +139,7 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
         $summary = [ordered]@{
             descendants = $controls.Count; buttons = 0; documents = 0; matching = 0; enabled = 0; visible = 0
             appDocument = $false; workbenchText = $false; browserError = $false
+            browserCode = $null; tauriOrigin = $false; developmentOrigin = $false
             windowWidth = [int]$Scope.Current.BoundingRectangle.Width
             windowHeight = [int]$Scope.Current.BoundingRectangle.Height
         }
@@ -150,9 +151,12 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName) {
                     if ($controlName -eq 'dbstudio') { $summary.appDocument = $true }
                 }
                 if ($controlName -like '*数据库工作台*') { $summary.workbenchText = $true }
+                if ($controlName -match '\b(ERR_[A-Z_]+)\b') { $summary.browserCode = $Matches[1] }
                 if ($controlName -match 'ERR_[A-Z_]+|can.t reach this page|无法访问此页面|应用启动预检失败') {
                     $summary.browserError = $true
                 }
+                if ($controlName -like '*tauri.localhost*') { $summary.tauriOrigin = $true }
+                if ($controlName -like '*127.0.0.1:1420*') { $summary.developmentOrigin = $true }
                 if ($control.Current.ControlType -ne [Windows.Automation.ControlType]::Button) { continue }
                 $summary.buttons++
                 if ($control.Current.Name -notlike '*新建连接*') { continue }
