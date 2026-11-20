@@ -6,32 +6,42 @@ on:
 
 permissions:
   contents: read
-  actions: read
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+  CARGO_BUILD_JOBS: '1'
 
 jobs:
   installed-ui:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          github-token: ${{ github.token }}
-          run-id: 44739521209
-          name: verified-native-candidates-44739521209-1
-          path: candidates
-      - name: Verify the earlier candidate
+          targets: x86_64-pc-windows-msvc
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build and record the Windows candidate
         run: |
-          $env:GITHUB_SHA = 'b6d0dc4dc2bd08acc3b86bcb969403004235e530'
-          $env:GITHUB_RUN_ID = '44739521209'
-          $env:GITHUB_RUN_ATTEMPT = '1'
-          node scripts/native-release-gate.mjs verify candidates
+          pnpm build --ci --target x86_64-pc-windows-msvc --bundles nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/native-release-gate.mjs manifest win-x64 target/x86_64-pc-windows-msvc/release/bundle candidates/win-x64
           exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-win-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidates/win-x64/
+          if-no-files-found: error
       - name: Download the v0.8.1 Windows baseline
         env:
           GH_TOKEN: ${{ github.token }}
