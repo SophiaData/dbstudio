@@ -187,8 +187,33 @@ function Send-ControlKeys($Control, [string]$Keys) {
 }
 
 function Set-EditText($Edit, [string]$Value) {
-    $escaped = [regex]::Replace($Value, '[+^%~(){}\[\]]', { param($match) '{' + $match.Value + '}' })
-    Send-ControlKeys $Edit ('^a' + $escaped)
+    $pattern = $null
+    if ($Edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {
+        $pattern.SetValue($Value)
+        return
+    }
+    if ($Value -match '^\d+$' -and
+        $Edit.TryGetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {
+        $pattern.SetValue([double]$Value)
+        return
+    }
+    Stop-Acceptance 'UI_EDIT_PATTERN_UNAVAILABLE'
+}
+
+function Select-MySql($Window) {
+    $combo = Find-Control $Window ([Windows.Automation.ControlType]::ComboBox) '数据库类型'
+    $expand = $null
+    if (-not $combo.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)) {
+        Stop-Acceptance 'UI_DIALECT_EXPAND_UNAVAILABLE'
+    }
+    $expand.Expand()
+    $choice = Find-Control $Window @([Windows.Automation.ControlType]::ListItem, [Windows.Automation.ControlType]::DataItem) 'MySQL / MariaDB'
+    $selection = $null
+    if (-not $choice.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selection)) {
+        Stop-Acceptance 'UI_DIALECT_SELECTION_UNAVAILABLE'
+    }
+    $selection.Select()
+    if ($expand.Current.ExpandCollapseState -eq [Windows.Automation.ExpandCollapseState]::Expanded) { $expand.Collapse() }
 }
 
 function Connect-Saved($App) {
@@ -386,8 +411,7 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
     $script:action = 'open_connection_form'
     Invoke-Button $app.Window '新建连接' -ContainsName
     $script:action = 'select_mysql'
-    $combo = Find-Control $app.Window ([Windows.Automation.ControlType]::ComboBox) '数据库类型'
-    Send-ControlKeys $combo '%{DOWN}m{ENTER}'
+    Select-MySql $app.Window
     $fields = [ordered]@{
         connection_name = @('连接名', $profile)
         host = @('主机', '127.0.0.1')
