@@ -9,8 +9,8 @@
 | 用户任务 | 通过条件 | 当前证据 |
 | --- | --- | --- |
 | 全新安装和启动 | 安装后打开工作台与新建连接表单 | [已在 Windows 托管 runner 实测](https://github.com/SophiaData/dbstudio/actions/runs/44756068629/attempts/2) |
-| 保存连接、查询和重启 | 保存专用连接，完整退出，同一安装包重启后无需重录凭据即可查询 | [macOS 测试构建有同二进制实测](mysql-parity/public/real-acceptance-results.md#同二进制重启编辑守卫与回滚实际通过)，Windows 候选包待验 |
-| 查询、分页和多行复制 | 独立连接确认分页顺序与结果。选中当前页多行后核对系统剪贴板的列名、行序、长文本与精确值 | 多行 TSV 已有组件回归，Windows 安装包业务链待验 |
+| 保存连接、查询和重启 | 保存专用连接，完整退出，同一安装包重启后无需重录凭据即可查询 | [Windows 候选包已从连接表单保存并查询](https://github.com/SophiaData/dbstudio/actions/runs/44777573723)，同一安装包重启待验。[macOS 测试构建有同二进制实测](mysql-parity/public/real-acceptance-results.md#同二进制重启编辑守卫与回滚实际通过) |
+| 查询、分页和多行复制 | 独立连接确认分页顺序与结果。选中当前页多行后核对系统剪贴板的列名、行序、长文本与精确值 | [Windows 候选包通过 MySQL 查询和系统剪贴板核对](https://github.com/SophiaData/dbstudio/actions/runs/44777573723)，分页待验 |
 | 网格编辑和事务 | 独立连接验证未提交不可见、回滚恢复，以及提交后值保持精确。覆盖 BIGINT、DECIMAL、UTF-8、NULL 和空串 | [macOS 测试构建有部分类型和事务证据](mysql-parity/public/real-acceptance-results.md#首组六字段精确网格编辑与应用后提交真实通过)，Windows 候选包待验 |
 | CSV 导入导出 | 通过桌面入口导出 CSV，再导入专用表。独立解析文件并回读行数、值与编码，覆盖引号、换行、NULL 和空串 | [SQLite 原生桌面及 SQL 驱动有分层实测](native-migration-matrix.md)，Windows MySQL 候选包待验 |
 
@@ -25,7 +25,7 @@
 
 ## Agent Note · 第一批多行复制
 
-**状态** 源码已实现，实际候选包剪贴板待验。
+**状态** 已在 Windows 托管 runner 上使用实际候选安装包验证。
 
 **问题** 结果网格已有单元格和整行复制，当前页勾选多行后需要一个批量复制入口。
 
@@ -33,4 +33,4 @@
 
 **备选方案** 矩形选择、跨页复制和批量粘贴分开实现，以便分别验证行列选区、数据规模和事务副作用。
 
-**验收** 组件回归验证多行列序、TSV 引号、长文本和精确数值，覆盖过期结果及取值失败。真实 Windows 系统剪贴板按上表单独核对。
+**验收** 组件回归覆盖多行列序、TSV 引号、长文本、精确数值、过期结果及取值失败。Windows 托管 runner 从 `ad72a03` 候选 EXE 全新安装，通过连接表单保存专用 MySQL 连接并执行查询，再逆序勾选两行。独立 MySQL 查询生成预期值，系统剪贴板逐字匹配表头、显示顺序、精确整数和长文本。安装包 SHA-256 为 `e5c20d2bc3a6427878ed98c7ddb7beb26e1cb344f543ae75147ec4483ba08dc2`。[候选包构建](https://github.com/SophiaData/dbstudio/actions/runs/44771568587) · [验收报告](https://github.com/SophiaData/dbstudio/actions/runs/44777573723)
