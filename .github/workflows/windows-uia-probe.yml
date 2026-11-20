@@ -52,7 +52,7 @@ jobs:
           $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
           node scripts/native-release-gate.mjs verify candidates
           exit $LASTEXITCODE
-      - name: Verify MySQL query, clipboard, reconnect and pagination
+      - name: Verify MySQL query, clipboard, reconnect, pagination and grid transactions
         run: |
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
           $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
@@ -61,8 +61,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
           if ($result.status -ne 'passed' -or $result.checks.selectedRowsClipboard -ne $true -or
-              $result.checks.sameVersionReconnect -ne $true -or $result.checks.paging -ne $true) {
-            throw 'The candidate must have passed the clipboard, restart and pagination checks.'
+              $result.checks.sameVersionReconnect -ne $true -or $result.checks.paging -ne $true -or
+              $result.checks.rollbackRestored -ne $true -or $result.checks.preciseCommit -ne $true) {
+            throw 'The candidate must pass clipboard, restart, pagination, rollback and precise commit.'
           }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

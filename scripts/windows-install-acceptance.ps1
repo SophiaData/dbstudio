@@ -328,6 +328,86 @@ function Assert-GridPaging($App, [string[]]$Expected, [string]$MarkerPrefix) {
     Assert-GridPage $App $Expected[0..199] $MarkerPrefix
 }
 
+function Open-TransactionTable($App) {
+    $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
+    foreach ($name in @($profile, 'Schemas', 'dbstudio_ci', 'Tables')) {
+        $script:action = "expand_$name"
+        $node = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $name -ContainsName
+        $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, '展开')
+        $expand = $node.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+        if ($expand) { $expand.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
+    }
+    $script:action = 'open_transaction_table'
+    $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) 'grid_transaction' -ContainsName
+    Send-ControlKeys $table '{ENTER}'
+    $null = Find-Control $App.Window @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem) 'body-seed' -AllowOffscreen
+}
+
+function Edit-GridValue($App, [string]$Old, [string]$Value, [switch]$NullValue) {
+    $types = @([Windows.Automation.ControlType]::DataItem, [Windows.Automation.ControlType]::Text)
+    $cell = Find-Control $App.Window $types $Old -AllowOffscreen
+    while ($cell -and -not $cell.Current.IsKeyboardFocusable) {
+        $cell = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($cell)
+    }
+    if (-not $cell -or ($cell.Current.ControlType -notin $types)) { Stop-Acceptance 'GRID_CELL_NOT_FOCUSABLE' }
+    Send-ControlKeys $cell '{ENTER}'
+    $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '单元格值'
+    if ($NullValue) {
+        $checkbox = Find-Control $App.Window ([Windows.Automation.ControlType]::CheckBox) 'NULL'
+        $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+    } else {
+        Set-EditText $editor $Value
+    }
+    Invoke-Button $App.Window '保存到本地修改'
+}
+
+function Assert-TransactionObserver([string]$Expected, [string]$FailureCode) {
+    $observed = Invoke-FixtureSql 'dbstudio_observer' @'
+SELECT CONCAT_WS('|', id, big_value, amount, IFNULL(HEX(optional_text), 'NULL'), HEX(empty_text), HEX(body))
+FROM dbstudio_ci.grid_transaction ORDER BY id;
+'@ $observerSecret
+    if ($observed.ExitCode -ne 0 -or $observed.Out -cne $Expected) { Stop-Acceptance $FailureCode }
+}
+
+function Assert-GridTransaction($App) {
+    $start = '1|9007199254740993|12.123456789012345678|6F7074696F6E616C2D73656564|656D7074792D73656564|626F64792D73656564'
+    $end = '1|9007199254740995|1234567890.123456789012345678|NULL||E68F90E4BAA4'
+    $types = @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem)
+    Open-TransactionTable $App
+    $script:action = 'stage_rollback_edit'
+    Edit-GridValue $App 'body-seed' 'rollback-pending'
+    $script:action = 'apply_rollback_edit'
+    Invoke-Button $App.Window '应用修改 (1)'
+    $null = Find-Control $App.Window $types '未提交 · 1 行'
+    Assert-TransactionObserver $start 'UNCOMMITTED_EDIT_VISIBLE'
+    $script:action = 'rollback_edit'
+    Invoke-Button $App.Window '回滚'
+    Invoke-Button $App.Window '确认'
+    $null = Find-Control $App.Window $types 'body-seed'
+    Assert-TransactionObserver $start 'ROLLBACK_OBSERVER_MISMATCH'
+    $report.checks.rollbackRestored = $true
+
+    $script:action = 'stage_bigint_edit'
+    Edit-GridValue $App '9007199254740993' '9007199254740995'
+    $script:action = 'stage_decimal_edit'
+    Edit-GridValue $App '12.123456789012345678' '1234567890.123456789012345678'
+    $script:action = 'stage_null_edit'
+    Edit-GridValue $App 'optional-seed' -NullValue
+    $script:action = 'stage_empty_text_edit'
+    Edit-GridValue $App 'empty-seed' ''
+    $script:action = 'stage_unicode_edit'
+    Edit-GridValue $App 'body-seed' '提交'
+    $script:action = 'apply_precise_edits'
+    Invoke-Button $App.Window '应用修改 (1)'
+    $null = Find-Control $App.Window $types '未提交 · 1 行'
+    Assert-TransactionObserver $start 'UNCOMMITTED_PRECISE_EDITS_VISIBLE'
+    $script:action = 'commit_precise_edits'
+    Invoke-Button $App.Window '提交'
+    $null = Find-Control $App.Window $types '已提交当前连接事务'
+    Assert-TransactionObserver $end 'COMMIT_OBSERVER_MISMATCH'
+    $report.checks.preciseCommit = $true
+}
+
 try {
     if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
         -not [Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) {
@@ -407,6 +487,7 @@ public static class AcceptanceDesktop {
     if ($ready.Out.Replace('/', '\').TrimEnd('\') -ne $dataDir) { Stop-Acceptance 'FIXTURE_IDENTITY_MISMATCH' }
 
     $syntheticSecret = 'Aa9' + [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
+    $observerSecret = 'Aa9' + [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
     $setup = Invoke-FixtureSql 'root' @"
 CREATE DATABASE dbstudio_ci;
 CREATE TABLE dbstudio_ci.probe (marker VARCHAR(16) NOT NULL);
@@ -420,8 +501,17 @@ CREATE TABLE dbstudio_ci.paging_rows (id INT NOT NULL PRIMARY KEY, marker VARCHA
 INSERT INTO dbstudio_ci.paging_rows (id, marker)
 WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 405)
 SELECT n, CONCAT('$pagingMarkerPrefix', LPAD(n, 4, '0')) FROM seq;
+CREATE TABLE dbstudio_ci.grid_transaction (
+    id INT NOT NULL PRIMARY KEY, big_value BIGINT NOT NULL, amount DECIMAL(38,18) NOT NULL,
+    optional_text VARCHAR(32), empty_text VARCHAR(32) NOT NULL, body VARCHAR(32) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT INTO dbstudio_ci.grid_transaction VALUES
+(1, 9007199254740993, 12.123456789012345678, 'optional-seed', 'empty-seed', 'body-seed');
 CREATE USER 'dbstudio_ci'@'127.0.0.1' IDENTIFIED BY '$syntheticSecret';
 GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
+GRANT UPDATE ON dbstudio_ci.grid_transaction TO 'dbstudio_ci'@'127.0.0.1';
+CREATE USER 'dbstudio_observer'@'127.0.0.1' IDENTIFIED BY '$observerSecret';
+GRANT SELECT ON dbstudio_ci.grid_transaction TO 'dbstudio_observer'@'127.0.0.1';
 "@
     if ($setup.ExitCode -ne 0) { Stop-Acceptance 'FIXTURE_SETUP_FAILED' }
     $probe = "SELECT CONCAT(marker, ':', CURRENT_USER()) AS proof FROM dbstudio_ci.probe;"
@@ -530,6 +620,8 @@ GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
         $script:stage = 'candidate_paging'
         Assert-GridPaging $app $expectedPaging $pagingMarkerPrefix
         $report.checks.paging = $true
+        $script:stage = 'candidate_grid_transaction'
+        Assert-GridTransaction $app
         $script:action = 'close_restarted_candidate'
         Close-App $app
         $report.status = 'passed'
