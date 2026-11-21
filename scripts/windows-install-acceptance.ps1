@@ -44,6 +44,7 @@ function New-ProcessInfo([string]$File, [string[]]$Arguments) {
 function Invoke-PrivateProcess($Info, [int]$Timeout, [string]$InputText = '') {
     $Info.CreateNoWindow = $true
     $Info.RedirectStandardInput = $true
+    $Info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
     $Info.RedirectStandardOutput = $true
     $Info.RedirectStandardError = $true
     $process = Start-OwnedProcess $Info
@@ -328,7 +329,7 @@ function Assert-GridPaging($App, [string[]]$Expected, [string]$MarkerPrefix) {
     Assert-GridPage $App $Expected[0..199] $MarkerPrefix
 }
 
-function Open-TransactionTable($App) {
+function Open-FixtureTable($App, [string]$Name) {
     $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
     foreach ($name in @($profile, 'Schemas', 'dbstudio_ci', 'Tables')) {
         $script:action = "expand_$name"
@@ -337,10 +338,9 @@ function Open-TransactionTable($App) {
         $expand = $node.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
         if ($expand) { $expand.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
     }
-    $script:action = 'open_transaction_table'
-    $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) 'grid_transaction' -ContainsName
+    $script:action = "open_$Name"
+    $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $Name -ContainsName
     Invoke-ControlDoubleClick $App $table
-    $null = Find-Control $App.Window @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem) 'body-seed' -AllowOffscreen
 }
 
 function Invoke-ControlDoubleClick($App, $Control) {
@@ -395,7 +395,7 @@ function Assert-GridTransaction($App) {
     $start = '1|9007199254740993|12.123456789012345678|6F7074696F6E616C2D73656564|656D7074792D73656564|626F64792D73656564'
     $end = '1|9007199254740995|1234567890.123456789012345678|NULL||E68F90E4BAA4'
     $types = @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem)
-    Open-TransactionTable $App
+    Open-FixtureTable $App 'grid_transaction'
     $script:action = 'stage_rollback_edit'
     Edit-GridValue $App 'body-seed' 'rollback-pending'
     $script:action = 'apply_rollback_edit'
@@ -428,6 +428,115 @@ function Assert-GridTransaction($App) {
     $null = Find-Control $App.Window $types '已提交当前连接事务'
     Assert-TransactionObserver $end 'COMMIT_OBSERVER_MISMATCH'
     $report.checks.preciseCommit = $true
+}
+
+function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save) {
+    $idCondition = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::ProcessIdProperty, $App.Process.Id)
+    $titleCondition = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::NameProperty, $Title)
+    $condition = [Windows.Automation.AndCondition]::new($idCondition, $titleCondition)
+    $desktop = [Windows.Automation.AutomationElement]::RootElement
+    $scope = [Windows.Automation.TreeScope]::Children
+    $deadline = [datetime]::UtcNow.AddSeconds(25)
+    do {
+        $dialog = $desktop.FindFirst($scope, $condition)
+        if ($dialog) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([datetime]::UtcNow -lt $deadline)
+    if (-not $dialog) { Stop-Acceptance 'TRANSFER_FILE_DIALOG_NOT_FOUND' }
+
+    $edits = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [Windows.Automation.ControlType]::Edit)
+    $descendants = [Windows.Automation.TreeScope]::Descendants
+    $fileName = @($dialog.FindAll($descendants, $edits) | Where-Object {
+        $_.Current.IsEnabled -and ($_.Current.AutomationId -eq '1001' -or $_.Current.Name -match '^(File name|文件名)[:：]?$')
+    })
+    if ($fileName.Count -ne 1) { Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND' }
+    Set-EditText $fileName[0] $CsvPath
+
+    $buttons = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [Windows.Automation.ControlType]::Button)
+    $caption = if ($Save) { '^(Save|保存)(?:\([A-Z]\))?$' } else { '^(Open|打开)(?:\([A-Z]\))?$' }
+    $chosen = @($dialog.FindAll($descendants, $buttons) | Where-Object {
+        $_.Current.IsEnabled -and $_.Current.Name -match $caption
+    })
+    if ($chosen.Count -ne 1) { Stop-Acceptance 'TRANSFER_FILE_CONFIRM_CONTROL_NOT_FOUND' }
+    $chosen[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
+function Read-TransferRows([string]$Table) {
+    if ($Table -notin @('csv_source', 'csv_target')) { Stop-Acceptance 'TRANSFER_OBSERVER_TARGET_INVALID' }
+    $observed = Invoke-FixtureSql 'dbstudio_observer' @"
+SELECT CONCAT_WS('|', id, IFNULL(HEX(optional_text), 'NULL'), HEX(empty_text), HEX(body))
+FROM dbstudio_ci.$Table ORDER BY id;
+"@ $observerSecret
+    if ($observed.ExitCode -ne 0) { Stop-Acceptance 'TRANSFER_OBSERVER_QUERY_FAILED' }
+    return $observed.Out
+}
+
+function Assert-CsvRoundTrip($App) {
+    $python = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $python) { Stop-Acceptance 'BLOCKED_CSV_OBSERVER_PYTHON' }
+    $csvPath = Join-Path $root 'roundtrip.csv'
+    if (Test-Path -LiteralPath $csvPath) { Stop-Acceptance 'TRANSFER_EXPORT_PATH_EXISTS' }
+    $expectedRows = Read-TransferRows 'csv_source'
+    if (@($expectedRows -split '\r?\n').Count -ne 2 -or (Read-TransferRows 'csv_target') -ne '') {
+        Stop-Acceptance 'TRANSFER_OBSERVER_START_MISMATCH'
+    }
+
+    $types = @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem)
+    $script:action = 'query_csv_source'
+    $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
+    Set-EditText $editor 'SELECT id, optional_text, empty_text, body FROM dbstudio_ci.csv_source ORDER BY id;'
+    Invoke-Button $App.Window '执行 SQL'
+    $null = Find-Control $App.Window $types $marker -AllowOffscreen
+    $script:action = 'choose_csv_export_path'
+    Invoke-Button $App.Window '导出完整来源…'
+    Invoke-Button $App.Window '选择…'
+    Select-TransferFile $App '保存导出文件' $csvPath $true
+    $script:action = 'export_csv'
+    Invoke-Button $App.Window '开始导出'
+    $null = Find-Control $App.Window $types '任务 completed · 2 行' -ContainsName -AllowOffscreen
+    Invoke-Button $App.Window '关闭'
+
+    $script:action = 'verify_independent_csv'
+    $fileCheck = Invoke-PrivateProcess (New-ProcessInfo $python.Source @('-I', '-', $csvPath, $marker)) 15 @'
+import csv
+import sys
+
+path, marker = sys.argv[1:]
+with open(path, encoding='utf-8-sig', newline='') as source:
+    rows = list(csv.reader(source, strict=True))
+expected = [
+    ['id', 'optional_text', 'empty_text', 'body'],
+    ['9007199254740993', '', '', '中文,"csv"\r\nline'],
+    ['9007199254740995', 'present', 'value', marker],
+]
+sys.exit(0 if rows == expected else 1)
+'@
+    if ($fileCheck.ExitCode -ne 0) { Stop-Acceptance 'TRANSFER_EXPORTED_CSV_MISMATCH' }
+    $report.checks.csvFileVerified = $true
+
+    $script:action = 'open_csv_target'
+    Open-FixtureTable $App 'csv_target'
+    $null = Find-Control $App.Window $types '结果为空' -AllowOffscreen
+    $script:action = 'choose_csv_import_path'
+    Invoke-Button $App.Window '导入 CSV…'
+    Invoke-Button $App.Window '选择…'
+    Select-TransferFile $App '选择导入文件' $csvPath $false
+    $script:action = 'preview_csv_import'
+    $nullField = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'NULL 标记' -AllowOffscreen
+    Set-EditText $nullField ''
+    Invoke-Button $App.Window '读取有界预览'
+    $null = Find-Control $App.Window $types '2 行 · 0 个解析错误' -AllowOffscreen
+    $script:action = 'import_csv'
+    Invoke-Button $App.Window '开始导入'
+    $null = Find-Control $App.Window $types '任务 completed · 2 行' -AllowOffscreen
+    $script:action = 'verify_independent_csv_import'
+    if ((Read-TransferRows 'csv_target') -cne $expectedRows) { Stop-Acceptance 'TRANSFER_IMPORTED_ROWS_MISMATCH' }
+    Invoke-Button $App.Window '关闭'
+    $report.checks.csvRoundTrip = $true
 }
 
 try {
@@ -554,11 +663,21 @@ CREATE TABLE dbstudio_ci.grid_transaction (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 INSERT INTO dbstudio_ci.grid_transaction VALUES
 (1, 9007199254740993, 12.123456789012345678, 'optional-seed', 'empty-seed', 'body-seed');
+CREATE TABLE dbstudio_ci.csv_source (
+    id BIGINT NOT NULL PRIMARY KEY, optional_text VARCHAR(32), empty_text VARCHAR(32) NOT NULL, body TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE dbstudio_ci.csv_target LIKE dbstudio_ci.csv_source;
+INSERT INTO dbstudio_ci.csv_source VALUES
+(9007199254740993, NULL, '', CONCAT(CONVERT(0xE4B8ADE69687 USING utf8mb4), CHAR(44,34), 'csv', CHAR(34,13,10), 'line')),
+(9007199254740995, 'present', 'value', '$marker');
 CREATE USER 'dbstudio_ci'@'127.0.0.1' IDENTIFIED BY '$syntheticSecret';
 GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
 GRANT UPDATE ON dbstudio_ci.grid_transaction TO 'dbstudio_ci'@'127.0.0.1';
+GRANT INSERT ON dbstudio_ci.csv_target TO 'dbstudio_ci'@'127.0.0.1';
 CREATE USER 'dbstudio_observer'@'127.0.0.1' IDENTIFIED BY '$observerSecret';
 GRANT SELECT ON dbstudio_ci.grid_transaction TO 'dbstudio_observer'@'127.0.0.1';
+GRANT SELECT ON dbstudio_ci.csv_source TO 'dbstudio_observer'@'127.0.0.1';
+GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
 "@
     if ($setup.ExitCode -ne 0) { Stop-Acceptance 'FIXTURE_SETUP_FAILED' }
     $probe = "SELECT CONCAT(marker, ':', CURRENT_USER()) AS proof FROM dbstudio_ci.probe;"
@@ -669,6 +788,8 @@ GRANT SELECT ON dbstudio_ci.grid_transaction TO 'dbstudio_observer'@'127.0.0.1';
         $report.checks.paging = $true
         $script:stage = 'candidate_grid_transaction'
         Assert-GridTransaction $app
+        $script:stage = 'candidate_csv_roundtrip'
+        Assert-CsvRoundTrip $app
         $script:action = 'close_restarted_candidate'
         Close-App $app
         $report.status = 'passed'

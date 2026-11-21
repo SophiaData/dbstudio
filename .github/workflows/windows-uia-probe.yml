@@ -52,7 +52,7 @@ jobs:
           $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
           node scripts/native-release-gate.mjs verify candidates
           exit $LASTEXITCODE
-      - name: Verify MySQL query, clipboard, reconnect, pagination and grid transactions
+      - name: Verify Windows MySQL workflows and the CSV round trip
         run: |
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
           $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
@@ -62,8 +62,9 @@ jobs:
           $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
           if ($result.status -ne 'passed' -or $result.checks.selectedRowsClipboard -ne $true -or
               $result.checks.sameVersionReconnect -ne $true -or $result.checks.paging -ne $true -or
-              $result.checks.rollbackRestored -ne $true -or $result.checks.preciseCommit -ne $true) {
-            throw 'The candidate must pass clipboard, restart, pagination, rollback and precise commit.'
+              $result.checks.rollbackRestored -ne $true -or $result.checks.preciseCommit -ne $true -or
+              $result.checks.csvFileVerified -ne $true -or $result.checks.csvRoundTrip -ne $true) {
+            throw 'The candidate must pass the Windows MySQL workflows and CSV file and database checks.'
           }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
