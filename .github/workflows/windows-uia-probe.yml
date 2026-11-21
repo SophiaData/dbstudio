@@ -1,17 +1,17 @@
-name: Windows MySQL grid clipboard acceptance
+name: Windows MySQL SQL editor acceptance
 
 on:
   push:
-    branches: [ci/windows-dbeaver-first-use]
+    branches: [ci/mysql-editor-tabs-acceptance]
 
 permissions:
   contents: read
   actions: read
 
 env:
-  CANDIDATE_BUILD_RUN: '44771568587'
-  CANDIDATE_BUILD_SHA: 'ad72a038083162cc5c3dad090e1b9c5d78190cde'
-  CANDIDATE_BUILD_BRANCH: 'feat/dbeaver-replacement'
+  CANDIDATE_BUILD_RUN: '44875846793'
+  CANDIDATE_BUILD_SHA: 'ba6379c50d0cfaf5652f55df5993a942c61fcae9'
+  CANDIDATE_BUILD_BRANCH: 'feat/mysql-sql-editor-tabs'
 
 jobs:
   installed-ui:
@@ -52,18 +52,17 @@ jobs:
           $env:GITHUB_RUN_ATTEMPT = $env:CANDIDATE_ATTEMPT
           node scripts/native-release-gate.mjs verify candidates
           exit $LASTEXITCODE
-      - name: Verify the CSV round trip on a clean Windows installation
+      - name: Verify SQL tabs against two MySQL databases
         run: |
           $candidate = Join-Path $PWD 'candidates\win-x64\dbstudio_0.8.1_x64-setup.exe'
           $env:GITHUB_SHA = $env:CANDIDATE_BUILD_SHA
           $report = Join-Path $env:RUNNER_TEMP 'dbstudio-windows-acceptance.json'
-          pwsh -NoProfile -Sta -File ./scripts/windows-install-acceptance.ps1 -FirstUse -CsvOnly -CandidateInstaller $candidate -ReportPath $report
+          pwsh -NoProfile -Sta -File ./scripts/windows-install-acceptance.ps1 -FirstUse -EditorTabsOnly -CandidateInstaller $candidate -ReportPath $report
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-          if ($result.status -ne 'passed' -or $result.scenario -ne 'clean_install_csv_roundtrip' -or
-              $result.checks.mysqlConnectedAndQueried -ne $true -or $result.checks.csvFileVerified -ne $true -or
-              $result.checks.csvRoundTrip -ne $true) {
-            throw 'The candidate must pass the CSV file and database checks.'
+          if ($result.status -ne 'passed' -or $result.scenario -ne 'mysql_editor_tabs' -or
+              $result.checks.independentEditorTargets -ne $true -or $result.checks.restoredEditorDrafts -ne $true) {
+            throw 'The candidate must pass MySQL target isolation and draft restoration.'
           }
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

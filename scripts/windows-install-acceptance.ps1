@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$ReportPath,
     [string]$BaselineInstaller,
     [switch]$FirstUse,
-    [switch]$CsvOnly
+    [switch]$CsvOnly,
+    [switch]$EditorTabsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +21,7 @@ $report = [ordered]@{
     runId = $env:GITHUB_RUN_ID
     runAttempt = $env:GITHUB_RUN_ATTEMPT
     candidateSha = $env:GITHUB_SHA
-    scenario = if ($CsvOnly) { 'clean_install_csv_roundtrip' } elseif ($FirstUse) { 'clean_install_grid_copy' } else { 'replacement' }
+    scenario = if ($EditorTabsOnly) { 'mysql_editor_tabs' } elseif ($CsvOnly) { 'clean_install_csv_roundtrip' } elseif ($FirstUse) { 'clean_install_grid_copy' } else { 'replacement' }
     checks = [ordered]@{}
 }
 
@@ -222,10 +223,10 @@ function Select-MySql($Window) {
     if ($expand.Current.ExpandCollapseState -eq [Windows.Automation.ExpandCollapseState]::Expanded) { $expand.Collapse() }
 }
 
-function Connect-Saved($App) {
+function Connect-Saved($App, [string]$ConnectionName = $profile) {
     $script:action = 'find_saved_connection'
     $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
-    $row = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $profile -ContainsName
+    $row = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $ConnectionName -ContainsName
     $invoke = $null
     if ($row.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
         $invoke.Invoke()
@@ -234,6 +235,101 @@ function Connect-Saved($App) {
     }
     $script:action = 'connect_saved_profile'
     Invoke-Button $App.Window '连接'
+}
+
+function Save-FixtureConnection($App, [string]$Name, [string]$Database, [string]$Secret) {
+    $script:action = 'open_connection_form'
+    Invoke-Button $App.Window '新建连接' -ContainsName
+    $script:action = 'select_mysql'
+    Select-MySql $App.Window
+    $fields = [ordered]@{
+        connection_name = @('连接名', $Name)
+        host = @('主机', '127.0.0.1')
+        port = @('端口', [string]$port)
+        database = @('数据库', $Database)
+        username = @('用户名', 'dbstudio_ci')
+    }
+    foreach ($field in $fields.GetEnumerator()) {
+        $script:action = 'fill_' + $field.Key
+        $types = @([Windows.Automation.ControlType]::Edit)
+        if ($field.Key -eq 'port') { $types += [Windows.Automation.ControlType]::Spinner }
+        Set-EditText (Find-Control $App.Window $types $field.Value[0] -FieldLabel) $field.Value[1]
+    }
+    $script:action = 'fill_credential'
+    $secretEdit = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '密码'
+    if (-not $secretEdit.Current.IsPassword) { Stop-Acceptance 'UI_CREDENTIAL_FIELD_NOT_PROTECTED' }
+    Set-EditText $secretEdit $Secret
+    $script:action = 'save_and_connect'
+    Invoke-Button $App.Window '保存并连接'
+    $null = Find-Control $App.Window ([Windows.Automation.ControlType]::Button) '执行 SQL'
+}
+
+function Assert-EditorDraft($App, [string]$ExpectedSql) {
+    $editor = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
+    $value = $editor.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+    if ($value.Current.Value.TrimEnd() -cne $ExpectedSql) { Stop-Acceptance 'SQL_EDITOR_DRAFT_MISMATCH' }
+}
+
+function Assert-EditorTabs($App, [string]$Binary, [string]$Secret) {
+    $draftA = 'SELECT CONCAT(DATABASE(), '':'' , marker) AS proof FROM probe;'
+    $draftA2 = 'SELECT CONCAT(DATABASE(), '':'' , marker, '':'' , ?) AS proof FROM probe;'
+    $draftB = 'SELECT CONCAT(DATABASE(), '':'' , marker, '':window'') AS proof FROM probe;'
+    $profileB = "${profile}-other"
+    $firstLabel = "SQL 1 · $profile · 默认库 dbstudio_ci"
+    $secondLabel = "SQL 2 · $profile · 默认库 dbstudio_ci"
+    $thirdLabel = "SQL 3 · $profileB · 默认库 dbstudio_other"
+    $types = @([Windows.Automation.ControlType]::Text, [Windows.Automation.ControlType]::DataItem)
+    $script:action = 'observe_two_databases'
+    $observedA = Invoke-FixtureSql 'dbstudio_observer' 'SELECT marker FROM dbstudio_ci.probe;' $observerSecret
+    $observedB = Invoke-FixtureSql 'dbstudio_observer' 'SELECT marker FROM dbstudio_other.probe;' $observerSecret
+    if ($observedA.ExitCode -ne 0 -or $observedB.ExitCode -ne 0 -or $observedA.Out -eq $observedB.Out -or
+        $observedA.Out -cne $marker -or $observedB.Out -cne $otherMarker) { Stop-Acceptance 'EDITOR_OBSERVER_MISMATCH' }
+
+    $script:action = 'first_sql_editor'
+    $probe = $draftA
+    $expected = "dbstudio_ci:$($observedA.Out)"
+    Assert-AppProbe $App
+    Invoke-Button $App.Window '新建 SQL 标签' -ContainsName
+    Invoke-Button $App.Window $secondLabel
+    $script:action = 'second_sql_editor_with_parameter'
+    $input = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
+    Set-EditText $input $draftA2
+    Invoke-Button $App.Window '执行 SQL'
+    $null = Find-Control $App.Window $types "执行目标 · $profile · 默认库 dbstudio_ci" -AllowOffscreen
+    $slot = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) '第 1 条语句参数 ?1'
+    Set-EditText $slot 'parameter-ok'
+    Invoke-Button $App.Window '执行'
+    $null = Find-Control $App.Window $types "dbstudio_ci:$($observedA.Out):parameter-ok" -AllowOffscreen
+
+    Save-FixtureConnection $App $profileB 'dbstudio_other' $Secret
+    $script:action = 'third_sql_editor_other_database'
+    Invoke-Button $App.Window $thirdLabel
+    $probe = $draftB
+    $expected = "dbstudio_other:$($observedB.Out):window"
+    Assert-AppProbe $App
+    Invoke-Button $App.Window $firstLabel
+    Assert-EditorDraft $App $draftA
+    Invoke-Button $App.Window $secondLabel
+    Assert-EditorDraft $App $draftA2
+    Invoke-Button $App.Window $thirdLabel
+    Assert-EditorDraft $App $draftB
+    $report.checks.independentEditorTargets = $true
+    Close-App $App
+
+    $script:action = 'restore_editor_tabs_after_restart'
+    $restarted = Open-App $Binary
+    Invoke-Button $restarted.Window $firstLabel
+    Assert-EditorDraft $restarted $draftA
+    Invoke-Button $restarted.Window $secondLabel
+    Assert-EditorDraft $restarted $draftA2
+    Invoke-Button $restarted.Window $thirdLabel
+    Assert-EditorDraft $restarted $draftB
+    Connect-Saved $restarted $profileB
+    $probe = 'SELECT CONCAT(DATABASE(), '':'' , marker, '':restarted'') AS proof FROM probe;'
+    $expected = "dbstudio_other:$($observedB.Out):restarted"
+    Assert-AppProbe $restarted
+    Close-App $restarted
+    $report.checks.restoredEditorDrafts = $true
 }
 
 function Assert-AppProbe($App) {
@@ -771,7 +867,7 @@ public static class AcceptanceDesktop {
     $report.checks.runnerPreflight = $true
 
     $script:stage = 'installer_integrity'
-    if ($CsvOnly -and -not $FirstUse) { Stop-Acceptance 'CSV_REQUIRES_FRESH_INSTALL' }
+    if (($CsvOnly -or $EditorTabsOnly) -and -not $FirstUse) { Stop-Acceptance 'SCENARIO_REQUIRES_FRESH_INSTALL' }
     $report.candidateInstallerSha256 = (Get-FileHash -LiteralPath $CandidateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not $FirstUse) {
         $report.baselineInstallerSha256 = (Get-FileHash -LiteralPath $BaselineInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -789,6 +885,7 @@ public static class AcceptanceDesktop {
     $installDir = Join-Path $root 'app'
     $profile = "dbstudio-ci-$run"
     $marker = $run.Substring(0, 16)
+    $otherMarker = 'b-' + $marker.Substring(0, 14)
     $pagingMarkerPrefix = "pg-$marker-"
     $initialization = Invoke-PrivateProcess (New-ProcessInfo $server @('--no-defaults', '--initialize-insecure', "--basedir=$mysqlBase", "--datadir=$dataDir", '--console')) 90
     if ($initialization.ExitCode -ne 0) { Stop-Acceptance 'FIXTURE_INIT_FAILED' }
@@ -813,8 +910,11 @@ public static class AcceptanceDesktop {
     $observerSecret = 'Aa9' + [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24)).ToLowerInvariant()
     $setup = Invoke-FixtureSql 'root' @"
 CREATE DATABASE dbstudio_ci;
+CREATE DATABASE dbstudio_other;
 CREATE TABLE dbstudio_ci.probe (marker VARCHAR(16) NOT NULL);
+CREATE TABLE dbstudio_other.probe LIKE dbstudio_ci.probe;
 INSERT INTO dbstudio_ci.probe VALUES ('$marker');
+INSERT INTO dbstudio_other.probe VALUES ('$otherMarker');
 CREATE TABLE dbstudio_ci.copy_rows (id BIGINT NOT NULL PRIMARY KEY, body TEXT NOT NULL);
 INSERT INTO dbstudio_ci.copy_rows VALUES
 (9007199254740993, CONCAT('$marker', CHAR(9), CHAR(34), 'quoted', CHAR(34), CHAR(13,10), REPEAT('x', 1400))),
@@ -839,10 +939,13 @@ INSERT INTO dbstudio_ci.csv_source VALUES
 (9007199254740995, 'present', 'value', '$marker');
 CREATE USER 'dbstudio_ci'@'127.0.0.1' IDENTIFIED BY '$syntheticSecret';
 GRANT SELECT ON dbstudio_ci.* TO 'dbstudio_ci'@'127.0.0.1';
+GRANT SELECT ON dbstudio_other.probe TO 'dbstudio_ci'@'127.0.0.1';
 GRANT UPDATE ON dbstudio_ci.grid_transaction TO 'dbstudio_ci'@'127.0.0.1';
 GRANT INSERT ON dbstudio_ci.csv_target TO 'dbstudio_ci'@'127.0.0.1';
 CREATE USER 'dbstudio_observer'@'127.0.0.1' IDENTIFIED BY '$observerSecret';
 GRANT SELECT ON dbstudio_ci.grid_transaction TO 'dbstudio_observer'@'127.0.0.1';
+GRANT SELECT ON dbstudio_ci.probe TO 'dbstudio_observer'@'127.0.0.1';
+GRANT SELECT ON dbstudio_other.probe TO 'dbstudio_observer'@'127.0.0.1';
 GRANT SELECT ON dbstudio_ci.csv_source TO 'dbstudio_observer'@'127.0.0.1';
 GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
 "@
@@ -905,34 +1008,15 @@ GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
     }
     $script:action = 'launch_application'
     $app = Open-App $binary
-    $script:action = 'open_connection_form'
-    Invoke-Button $app.Window '新建连接' -ContainsName
-    $script:action = 'select_mysql'
-    Select-MySql $app.Window
-    $fields = [ordered]@{
-        connection_name = @('连接名', $profile)
-        host = @('主机', '127.0.0.1')
-        port = @('端口', [string]$port)
-        database = @('数据库', 'dbstudio_ci')
-        username = @('用户名', 'dbstudio_ci')
+    Save-FixtureConnection $app $profile 'dbstudio_ci' $syntheticSecret
+    if ($EditorTabsOnly) {
+        $script:stage = 'candidate_editor_tabs'
+        Assert-EditorTabs $app $binary $syntheticSecret
+        $syntheticSecret = $null
+        $report.status = 'passed'
+        return
     }
-    foreach ($field in $fields.GetEnumerator()) {
-        $script:action = 'fill_' + $field.Key
-        $types = @([Windows.Automation.ControlType]::Edit)
-        if ($field.Key -eq 'port') { $types += [Windows.Automation.ControlType]::Spinner }
-        Set-EditText (Find-Control $app.Window $types $field.Value[0] -FieldLabel) $field.Value[1]
-    }
-    $script:action = 'fill_credential'
-    $secretEdit = Find-Control $app.Window ([Windows.Automation.ControlType]::Edit) '密码'
-    if (-not $secretEdit.Current.IsPassword) { Stop-Acceptance 'UI_CREDENTIAL_FIELD_NOT_PROTECTED' }
-    $valuePattern = $null
-    if (-not $secretEdit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$valuePattern)) {
-        Stop-Acceptance 'UI_CREDENTIAL_FIELD_NOT_WRITABLE'
-    }
-    $valuePattern.SetValue($syntheticSecret)
     $syntheticSecret = $null
-    $script:action = 'save_and_connect'
-    Invoke-Button $app.Window '保存并连接'
     Assert-AppProbe $app
     if ($FirstUse) {
         $report.checks.mysqlConnectedAndQueried = $true
