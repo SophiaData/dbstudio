@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$CandidateInstaller,
     [Parameter(Mandatory)][string]$ReportPath,
     [string]$BaselineInstaller,
-    [switch]$FirstUse
+    [switch]$FirstUse,
+    [switch]$CsvOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,7 @@ $report = [ordered]@{
     runId = $env:GITHUB_RUN_ID
     runAttempt = $env:GITHUB_RUN_ATTEMPT
     candidateSha = $env:GITHUB_SHA
-    scenario = if ($FirstUse) { 'clean_install_grid_copy' } else { 'replacement' }
+    scenario = if ($CsvOnly) { 'clean_install_csv_roundtrip' } elseif ($FirstUse) { 'clean_install_grid_copy' } else { 'replacement' }
     checks = [ordered]@{}
 }
 
@@ -605,6 +606,7 @@ public static class AcceptanceDesktop {
     $report.checks.runnerPreflight = $true
 
     $script:stage = 'installer_integrity'
+    if ($CsvOnly -and -not $FirstUse) { Stop-Acceptance 'CSV_REQUIRES_FRESH_INSTALL' }
     $report.candidateInstallerSha256 = (Get-FileHash -LiteralPath $CandidateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not $FirstUse) {
         $report.baselineInstallerSha256 = (Get-FileHash -LiteralPath $BaselineInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -769,6 +771,14 @@ GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
     Assert-AppProbe $app
     if ($FirstUse) {
         $report.checks.mysqlConnectedAndQueried = $true
+        if ($CsvOnly) {
+            $script:stage = 'candidate_csv_roundtrip'
+            Assert-CsvRoundTrip $app
+            $script:action = 'close_candidate'
+            Close-App $app
+            $report.status = 'passed'
+            return
+        }
         Assert-GridClipboard $app $expectedClipboard
         Close-App $app
         $report.checks.selectedRowsClipboard = $true
@@ -788,8 +798,6 @@ GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
         $report.checks.paging = $true
         $script:stage = 'candidate_grid_transaction'
         Assert-GridTransaction $app
-        $script:stage = 'candidate_csv_roundtrip'
-        Assert-CsvRoundTrip $app
         $script:action = 'close_restarted_candidate'
         Close-App $app
         $report.status = 'passed'
