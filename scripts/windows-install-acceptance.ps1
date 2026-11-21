@@ -289,7 +289,10 @@ function Assert-EditorTabs($App, [string]$Binary, [string]$Secret) {
     $probe = $draftA
     $expected = "dbstudio_ci:$($observedA.Out)"
     Assert-AppProbe $App
+    $report.checks.firstEditorQueried = $true
+    $script:action = 'create_second_editor'
     Invoke-Button $App.Window '新建 SQL 标签' -ContainsName
+    $script:action = 'activate_second_editor'
     Invoke-Button $App.Window $secondLabel
     $script:action = 'second_sql_editor_with_parameter'
     $input = Find-Control $App.Window ([Windows.Automation.ControlType]::Edit) 'SQL 编辑器'
@@ -1082,6 +1085,10 @@ GRANT SELECT ON dbstudio_ci.csv_target TO 'dbstudio_observer'@'127.0.0.1';
     $report.stage = $script:stage
     if ($script:action) { $report.action = $script:action }
     $report.code = $script:failure
+    if ($script:failure -eq 'CHECK_FAILED') {
+        $cause = $_.Exception.GetBaseException()
+        $report.diagnostic = @{ exception = $cause.GetType().Name; hresult = $cause.HResult; line = $_.InvocationInfo.ScriptLineNumber }
+    }
 } finally {
     foreach ($process in $script:children) {
         try {
