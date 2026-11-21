@@ -71,6 +71,46 @@ async function copyCell(wholeRow = false) {
   } catch (cause) { error.value = `复制失败：${errorText(cause)}` }
   finally { reading.value = false; props.tab.busy = false }
 }
+function tsvField(text: string): string {
+  return /["\t\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+async function copyMarkedRows() {
+  const tab = props.tab
+  const page = tab.page
+  if (!page || locked.value || reading.value || tab.invalidated) return
+  const rows = page.rows.filter((row) => tab.selectedRows.has(row.index))
+  if (!rows.length) return
+  const result = tab.result
+  const cursorId = result?.cursorId
+  const generation = tab.generation
+  const dirty = new Map(tab.dirty)
+  const ownsCopy = () => !disposed && props.tab === tab && props.workbench.activeTab.value === tab &&
+    tab.generation === generation && tab.page === page && tab.result === result &&
+    tab.result?.cursorId === cursorId && !tab.invalidated
+
+  reading.value = true
+  error.value = ''
+  try {
+    const lines = [page.columns.map(({ name }) => tsvField(name)).join('\t')]
+    for (const row of rows) {
+      const fields: string[] = []
+      for (const [index, { name }] of page.columns.entries()) {
+        if (!ownsCopy()) return
+        const cell = dirty.get(row.index)?.changes[name] ?? row.cells[index]!
+        const value = await fullCell(tab, row.index, index, cell)
+        fields.push(tsvField(textValue(value) ?? ''))
+      }
+      lines.push(fields.join('\t'))
+    }
+    if (!ownsCopy()) return
+    await writeClipboardText(lines.join('\r\n'))
+    if (ownsCopy()) props.workbench.setStatus(`已复制 ${rows.length} 行（含表头，NULL 为空字段）`)
+  } catch (cause) {
+    if (ownsCopy()) error.value = `复制失败：${errorText(cause)}`
+  } finally {
+    reading.value = false
+  }
+}
 async function countRows() {
   if (!props.tab.table || locked.value) return
   props.tab.busy = true; error.value = ''
@@ -178,7 +218,7 @@ async function submitInsert() {
     if (inserted === true) insertOpen.value = false
   } catch (cause) { error.value = errorText(cause) }
 }
-defineExpose({ readCell, buildCopyText, copyCell, countRows, openCell, selectCell, openLoadedExport, closeLoadedExport, beginInsert, submitInsert, saveCell, editing, viewer, loadedExport, rowCount, selectedCell, error })
+defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, openCell, selectCell, openLoadedExport, closeLoadedExport, beginInsert, submitInsert, saveCell, editing, viewer, loadedExport, rowCount, selectedCell, error })
 </script>
 
 <template>
@@ -191,6 +231,7 @@ defineExpose({ readCell, buildCopyText, copyCell, countRows, openCell, selectCel
       <button :disabled="locked || reading || !selectedCell" @click="readSelected">查看完整值</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(false)">复制单元格</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(true)">复制整行</button>
+      <button :disabled="locked || reading || tab.invalidated || !tab.page || !tab.selectedRows.size" @click="copyMarkedRows">复制选中行</button>
       <button :disabled="locked || tab.invalidated || !tab.page" @click="openLoadedExport">导出当前页…</button>
       <button v-if="tab.table?.kind === 'table'" :disabled="locked || tab.invalidated" @click="countRows">COUNT{{ rowCount !== null ? `: ${rowCount}` : '' }}</button>
       <span class="spacer" /><span class="transaction-state">{{ workbench.transactions[tab.connectionId]?.active ? `未提交 · ${workbench.transactions[tab.connectionId]?.pendingAffected ?? 0} 行` : '无活动事务' }}</span>
