@@ -7,7 +7,7 @@ import { parseParameterValue, type ScopedSqlParameter, type StatementParameterSl
 import type { ObjectRef } from '../../../src/core/model'
 import { backend, confirmExit, errorText } from './backend'
 import { decision } from './dialogs'
-import { connectionOf, useWorkbench } from './workbench'
+import { connectionOf, useWorkbench, type EditorExecution } from './workbench'
 import ConnectionDialog from './components/ConnectionDialog.vue'
 import MetadataTree from './components/MetadataTree.vue'
 import ResultGrid from './components/ResultGrid.vue'
@@ -30,7 +30,7 @@ const parameterValues = reactive<Record<string, string>>({})
 const parameterKinds = reactive<Record<string, string>>({})
 const parameterOpen = ref(false)
 const parameterError = ref('')
-const pendingSql = ref('')
+const pendingExecution = ref<EditorExecution | null>(null)
 const sqlController = ref<InstanceType<typeof SqlEditor> | null>(null)
 const exitBusy = ref(false)
 const toolPanel = ref<'er' | 'compare' | 'schema' | 'library' | 'explain' | null>(null)
@@ -57,11 +57,19 @@ const selectedConnection = computed(() => {
   return wb.connections.value.find((c) => c.id === id) ?? null
 })
 const operationLocked = computed(() => wb.executing.value || exitBusy.value || Boolean(selectedConnection.value && wb.locks.has(selectedConnection.value.id)))
+const editorLocked = computed(() => wb.executing.value || exitBusy.value || wb.locks.has(wb.currentConnectionId.value))
+function editorConnectionLabel(id: string, includeDatabase = true) {
+  const connection = wb.connections.value.find((item) => item.id === id)
+  if (!connection) return id ? '原连接不可用' : '未选择连接'
+  const database = includeDatabase && connection.dialectId === 'mysql' ? connection.options?.database : null
+  return typeof database === 'string' && database ? `${connection.name} · 默认库 ${database}` : connection.name
+}
 const tableForDetails = computed(() => {
   const selected = wb.selected.value
   return selected && ['table', 'view'].includes(selected.kind) ? selected : wb.activeTab.value?.table ?? null
 })
 const activeResultLocked = computed(() => !wb.activeTab.value || wb.activeTab.value.invalidated || wb.activeTab.value.busy || wb.locks.has(wb.activeTab.value.connectionId) || wb.executing.value)
+const canCreateObject = computed(() => !editorLocked.value && wb.currentConnection.value?.connected && relational(wb.currentConnectionId.value))
 function openEr() { toolConnectionId.value = selectedConnection.value?.id ?? ''; toolPanel.value = 'er' }
 function openSchema() { schemaNode.value = tableForDetails.value; toolPanel.value = 'schema' }
 async function openSchemaData(node: ObjectRef) {
@@ -69,16 +77,24 @@ async function openSchemaData(node: ObjectRef) {
   toolPanel.value = null
 }
 function loadPlan(connectionId: string, script: string) {
-  wb.selectConnection(connectionId); wb.sql.value = script; toolPanel.value = null
+  wb.openEditorTab(connectionId, script)
+  toolPanel.value = null
   wb.setStatus('同步 SQL 已载入编辑器，请审阅后明确执行')
 }
 function relational(id: string) { return ['sqlite', 'postgresql', 'mysql'].includes(wb.connections.value.find((connection) => connection.id === id)?.dialectId ?? '') }
 function openDdl(mode: 'create-table' | 'create-view' | 'rename' | 'drop', node?: ObjectRef) {
   const id = node ? connectionOf(node.id) : wb.currentConnectionId.value
-  if (!relational(id)) { wb.setStatus('当前驱动不支持关系型结构 DDL', true); return }
+  if (!relational(id) || (!node && !canCreateObject.value)) {
+    wb.setStatus('请先选择可操作的关系型数据库连接', true)
+    return
+  }
   ddl.value = { mode, node, connectionId: id }
 }
-function loadLibrarySql(script: string) { wb.sql.value = script; toolPanel.value = null; wb.setStatus('SQL 已载入当前连接编辑器，尚未执行') }
+function loadLibrarySql(script: string) {
+  wb.openEditorTab(wb.currentConnectionId.value, script)
+  toolPanel.value = null
+  wb.setStatus('SQL 已载入新标签，等待执行')
+}
 function requestExplain(script = sqlController.value?.currentStatement() ?? wb.sql.value) {
   try {
     if (!wb.currentConnection.value?.connected) throw new Error('请选择一个已连接的数据源')
@@ -96,10 +112,11 @@ function requestExplain(script = sqlController.value?.currentStatement() ?? wb.s
  * 因此文件执行与手输脚本的行为完全一致。
  */
 async function openSqlFile() {
+  const connectionId = wb.currentConnectionId.value
   try {
     const picked = await backend.chooseSqlFile()
     if (!picked) return
-    wb.sql.value = picked.content
+    wb.openEditorTab(connectionId, picked.content)
     wb.setStatus(`已打开 ${picked.path}（${picked.content.split(/\r?\n/).length} 行）`)
   } catch (cause) {
     wb.setStatus(errorText(cause), true)
@@ -107,27 +124,35 @@ async function openSqlFile() {
 }
 
 function requestExecute(script = wb.sql.value) {
+  if (parameterOpen.value) return
   toolPanel.value = null
-  pendingSql.value = script
   try {
-    parameterSlots.value = wb.parameterSlots(script)
+    const execution = wb.captureEditorExecution(script)
+    parameterSlots.value = wb.parameterSlots(execution.sql, execution.connectionId)
     if (parameterSlots.value.length) {
       for (const key of Object.keys(parameterValues)) delete parameterValues[key]
       for (const key of Object.keys(parameterKinds)) delete parameterKinds[key]
       for (const slot of parameterSlots.value) { parameterValues[slot.key] = ''; parameterKinds[slot.key] = 'text' }
+      pendingExecution.value = execution
       parameterError.value = ''; parameterOpen.value = true
-    } else void wb.attempt(() => wb.executeScript(script))
+    } else void wb.attempt(() => wb.executeEditorRequest(execution))
   } catch (cause) { wb.setStatus(errorText(cause), true) }
 }
+function closeParameters() {
+  parameterOpen.value = false
+  pendingExecution.value = null
+}
 async function executeParameters() {
+  const execution = pendingExecution.value
+  if (!execution) return
   try {
     const parameters: ScopedSqlParameter[] = parameterSlots.value.map((slot) => {
       const raw = parameterValues[slot.key] ?? ''
       const kind = parameterKinds[slot.key]
       return { statementIndex: slot.statementIndex, name: slot.name, value: parseParameterValue(raw, kind ?? 'text') }
     })
-    parameterOpen.value = false
-    await wb.executeScript(pendingSql.value, parameters)
+    closeParameters()
+    await wb.executeEditorRequest(execution, parameters)
   } catch (cause) { parameterError.value = errorText(cause); wb.setStatus(parameterError.value, true) }
 }
 async function requestExit() {
@@ -189,10 +214,29 @@ onBeforeUnmount(() => unlisten?.())
         <div v-if="selectedConnection" class="connection-summary"><strong>{{ selectedConnection.name }}</strong><span class="muted">{{ selectedConnection.dialectId }} · {{ selectedConnection.connected ? '已连接' : '未连接' }}</span><p v-if="selectedConnection.secretStored === false" class="warning">密码未保存，请编辑连接重新录入。</p><div class="connection-actions"><button :disabled="operationLocked" @click="connectionEditor = selectedConnection">编辑</button><button v-if="selectedConnection.connected" :disabled="operationLocked" @click="wb.attempt(() => wb.disconnect(selectedConnection!.id))">断开</button><button v-else :disabled="operationLocked" @click="wb.attempt(() => wb.connect(selectedConnection!.id))">连接</button><button :disabled="operationLocked" @click="wb.attempt(() => wb.remove(selectedConnection!.id))">删除</button></div></div>
       </aside>
       <section class="editor-pane">
-        <div class="pane-toolbar"><label for="current-connection" class="muted">连接</label><select id="current-connection" :value="wb.currentConnectionId.value" :disabled="operationLocked" @change="wb.selectConnection(($event.target as HTMLSelectElement).value)"><option value="" disabled>请选择连接</option><option v-for="connection in wb.connections.value" :key="connection.id" :value="connection.id">{{ connection.name }}{{ connection.connected ? '' : '（未连接）' }}</option></select><span class="spacer" /><button v-if="wb.executing.value" :disabled="!wb.executionConnection.value?.capabilities?.supportsCancel" @click="wb.attempt(wb.cancelExecution)">取消执行</button><button :disabled="operationLocked || !wb.currentConnection.value?.connected || !wb.sql.value.trim()" @click="requestExplain()">EXPLAIN</button><button id="btn-run-sql" class="primary" :disabled="operationLocked || !wb.currentConnection.value?.connected" @click="requestExecute()">{{ wb.executing.value ? '执行中…' : '执行 SQL' }}</button></div>
-        <SqlEditor ref="sqlController" :workbench="wb" :disabled="operationLocked || !wb.currentConnection.value?.connected" @execute="requestExecute" @explain="requestExplain" @library="toolPanel = 'library'" />
-        <nav class="result-tabs" aria-label="结果标签"><div v-for="tab in wb.tabs.value" :key="tab.id" class="result-tab" :class="{ 'is-active': wb.activeTabId.value === tab.id }"><button class="tab-label" :aria-selected="wb.activeTabId.value === tab.id" @click="wb.activateTab(tab); toolPanel = null">{{ tab.title }}{{ tab.dirty.size ? ' ●' : '' }}</button><button class="tab-close" :aria-label="`关闭 ${tab.title}`" :disabled="tab.busy || operationLocked" @click="wb.attempt(() => wb.closeTab(tab))">×</button></div></nav>
-        <div class="actions result-tools"><button :disabled="operationLocked || !wb.currentConnection.value?.connected || !relational(wb.currentConnectionId.value)" @click="openDdl('create-table')">新建表…</button><button :disabled="operationLocked || !wb.currentConnection.value?.connected || !relational(wb.currentConnectionId.value)" @click="openDdl('create-view')">新建视图…</button></div>
+        <nav class="sql-editor-tabs" aria-label="SQL 编辑标签">
+          <div v-for="(tab, index) in wb.editorTabs.value" :key="tab.id" class="sql-editor-tab" :class="{ 'is-active': wb.activeEditorTabId.value === tab.id }">
+            <button class="tab-label" :aria-pressed="wb.activeEditorTabId.value === tab.id" @click="wb.activateEditorTab(tab.id)">SQL {{ index + 1 }} · {{ editorConnectionLabel(tab.connectionId) }}</button>
+            <button class="tab-close" :aria-label="`关闭 SQL ${index + 1}`" @click="wb.attempt(() => wb.closeEditorTab(tab.id))">×</button>
+          </div>
+        </nav>
+        <div class="pane-toolbar">
+          <label for="current-connection" class="muted">SQL 连接</label>
+          <select id="current-connection" :value="wb.currentConnectionId.value" @change="wb.selectConnection(($event.target as HTMLSelectElement).value)">
+            <option value="" disabled>请选择连接</option>
+            <option v-if="wb.currentConnectionId.value && !wb.currentConnection.value" :value="wb.currentConnectionId.value" disabled>原连接不可用</option>
+            <option v-for="connection in wb.connections.value" :key="connection.id" :value="connection.id">{{ connection.name }}{{ connection.connected ? '' : '（未连接）' }}</option>
+          </select>
+          <button @click="wb.openEditorTab()">＋ 新建 SQL 标签</button>
+          <span class="spacer" />
+          <button v-if="wb.executing.value" :disabled="!wb.executionConnection.value?.capabilities?.supportsCancel" @click="wb.attempt(wb.cancelExecution)">取消执行</button>
+          <button :disabled="editorLocked || !wb.currentConnection.value?.connected || !wb.sql.value.trim()" @click="requestExplain()">EXPLAIN</button>
+          <button id="btn-run-sql" class="primary" :disabled="editorLocked || !wb.currentConnection.value?.connected" @click="requestExecute()">{{ wb.executing.value ? '执行中…' : '执行 SQL' }}</button>
+        </div>
+        <div v-if="wb.editorStorageWarning.value" class="warning" role="status">{{ wb.editorStorageWarning.value }}</div>
+        <SqlEditor v-if="wb.activeEditorTabId.value" :key="wb.activeEditorTabId.value" ref="sqlController" :workbench="wb" :disabled="editorLocked" @execute="requestExecute" @explain="requestExplain" @library="toolPanel = 'library'" />
+        <nav class="result-tabs" aria-label="结果标签"><div v-for="tab in wb.tabs.value" :key="tab.id" class="result-tab" :class="{ 'is-active': wb.activeTabId.value === tab.id }"><button class="tab-label" :aria-selected="wb.activeTabId.value === tab.id" @click="wb.activateTab(tab); toolPanel = null">{{ tab.title }}{{ tab.editorTabId ? ` · ${editorConnectionLabel(tab.connectionId, false)}` : '' }}{{ tab.executionFailed ? ' · 失败' : '' }}{{ tab.dirty.size ? ' ●' : '' }}</button><button class="tab-close" :aria-label="`关闭 ${tab.title}`" :disabled="tab.busy || operationLocked" @click="wb.attempt(() => wb.closeTab(tab))">×</button></div></nav>
+        <div class="actions result-tools"><button :disabled="!canCreateObject" :title="editorConnectionLabel(wb.currentConnectionId.value)" @click="openDdl('create-table')">新建表…</button><button :disabled="!canCreateObject" :title="editorConnectionLabel(wb.currentConnectionId.value)" @click="openDdl('create-view')">新建视图…</button></div>
         <div v-if="wb.activeTab.value || tableForDetails" class="actions result-tools"><button :disabled="operationLocked || !tableForDetails" @click="openSchema">结构详情</button><button :disabled="activeResultLocked || wb.activeTab.value?.table?.kind !== 'table'" @click="transfer = { mode: 'import', tab: wb.activeTab.value! }">导入 CSV…</button><button :disabled="activeResultLocked || !wb.activeTab.value?.result" title="选择完整表或当前查询导出；绑定参数会安全内联" @click="transfer = { mode: 'export', tab: wb.activeTab.value! }">导出完整来源…</button><span class="muted">结构与数据按需读取</span></div>
         <ErPanel ref="erController" v-if="toolPanel === 'er' && toolConnectionId" :key="toolConnectionId" :workbench="wb" :connection-id="toolConnectionId" @close="toolPanel = null" />
         <ComparePanel ref="compareController" v-else-if="toolPanel === 'compare'" :workbench="wb" @close="toolPanel = null" @sql="loadPlan" />
@@ -208,7 +252,7 @@ onBeforeUnmount(() => unlisten?.())
     <TransferDialog ref="transferController" v-if="transfer" :workbench="wb" :tab="transfer.tab" :mode="transfer.mode" @close="transfer = null" />
     <MysqlAdminDialog v-if="mysqlAdmin" :workbench="wb" :connection-id="mysqlAdmin.connectionId" :node="mysqlAdmin.node" @close="mysqlAdmin = null" />
     <DdlDialog v-if="ddl" ref="ddlController" :workbench="wb" :mode="ddl.mode" :connection-id="ddl.connectionId" :node="ddl.node" @close="ddl = null; toolPanel = null" />
-    <div v-if="parameterOpen" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="SQL 参数"><h2>绑定 SQL 参数</h2><p class="muted">参数按语句独立绑定；同名占位符出现在不同语句时也需要分别填写。</p><form @submit.prevent="executeParameters"><label v-for="slot in parameterSlots" :key="slot.key" class="parameter-field"><span>第 {{ slot.statementIndex + 1 }} 条语句（第 {{ slot.startLine }} 行）· {{ slot.name }}</span><select v-model="parameterKinds[slot.key]" :aria-label="`第 ${slot.statementIndex + 1} 条语句 ${slot.name} 类型`"><option value="text">文本</option><option value="number">数字</option><option value="boolean">布尔</option><option value="binary">二进制 Hex</option><option value="null">NULL</option></select><input v-model="parameterValues[slot.key]" :disabled="parameterKinds[slot.key] === 'null'" :aria-label="`第 ${slot.statementIndex + 1} 条语句参数 ${slot.name}`" /></label><p v-if="parameterError" class="is-error">{{ parameterError }}</p><div class="modal-actions"><button type="button" @click="parameterOpen = false">取消</button><button type="submit" class="primary">执行</button></div></form></section></div>
+    <div v-if="parameterOpen" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="SQL 参数"><h2>绑定 SQL 参数</h2><p v-if="pendingExecution">执行目标 · {{ editorConnectionLabel(pendingExecution.connectionId) }}</p><p class="muted">参数按语句独立绑定；同名占位符出现在不同语句时也需要分别填写。</p><form @submit.prevent="executeParameters"><label v-for="slot in parameterSlots" :key="slot.key" class="parameter-field"><span>第 {{ slot.statementIndex + 1 }} 条语句（第 {{ slot.startLine }} 行）· {{ slot.name }}</span><select v-model="parameterKinds[slot.key]" :aria-label="`第 ${slot.statementIndex + 1} 条语句 ${slot.name} 类型`"><option value="text">文本</option><option value="number">数字</option><option value="boolean">布尔</option><option value="binary">二进制 Hex</option><option value="null">NULL</option></select><input v-model="parameterValues[slot.key]" :disabled="parameterKinds[slot.key] === 'null'" :aria-label="`第 ${slot.statementIndex + 1} 条语句参数 ${slot.name}`" /></label><p v-if="parameterError" class="is-error">{{ parameterError }}</p><div class="modal-actions"><button type="button" @click="closeParameters">取消</button><button type="submit" class="primary">执行</button></div></form></section></div>
     <div v-if="decision" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title"><h2 id="decision-title">{{ decision.title }}</h2><p>{{ decision.message }}</p><div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div></section></div>
   </div>
 </template>

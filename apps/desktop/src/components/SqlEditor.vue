@@ -94,7 +94,11 @@ async function acceptCompletion(index = completionIndex.value) {
   props.workbench.sql.value = props.workbench.sql.value.slice(0, start) + word + props.workbench.sql.value.slice(caret.value)
   const next = start + word.length
   completionOpen.value = false
-  await nextTick(); editor.value.focus(); editor.value.setSelectionRange(next, next); caret.value = next
+  await nextTick()
+  if (!editor.value) return
+  editor.value.focus()
+  editor.value.setSelectionRange(next, next)
+  caret.value = next
 }
 function keydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
@@ -130,7 +134,7 @@ defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, ed
 <template>
   <section class="vue-sql-editor">
     <div class="sql-actions"><button :disabled="disabled" @click="executeCurrent">执行当前</button><button :disabled="disabled" @click="executeAll">执行全部</button><button :disabled="disabled" @click="format">格式化</button><button :disabled="disabled" @click="completionOpen = !completionOpen; updateCaret()">补全</button><button :disabled="disabled" @click="emit('explain', currentStatement())">执行计划</button><button @click="emit('library')">历史 / 收藏</button><span class="spacer" /><small>⌘/Ctrl Enter 当前 · ⇧ Enter 全部 · ⇧⌥F 格式化</small></div>
-    <div class="sql-code"><pre ref="highlighter" class="sql-highlight" aria-hidden="true"><template v-for="(token, index) in tokens" :key="index"><span :class="`sql-${token.kind}`">{{ token.text }}</span></template>{{ '\n' }}</pre><textarea id="sql-input" ref="editor" v-model="workbench.sql.value" spellcheck="false" aria-label="SQL 编辑器" :disabled="disabled" placeholder="输入 SQL；按连接保存草稿" @keydown="keydown" @click="updateCaret" @keyup="updateCaret" @input="onInput" @scroll="scroll" /></div>
+    <div class="sql-code"><pre ref="highlighter" class="sql-highlight" aria-hidden="true"><template v-for="(token, index) in tokens" :key="index"><span :class="`sql-${token.kind}`">{{ token.text }}</span></template>{{ '\n' }}</pre><textarea id="sql-input" ref="editor" v-model="workbench.sql.value" spellcheck="false" aria-label="SQL 编辑器" :disabled="disabled" placeholder="输入 SQL；按标签自动保存草稿" @keydown="keydown" @click="updateCaret" @keyup="updateCaret" @input="onInput" @scroll="scroll" /></div>
     <div v-if="completionOpen" class="sql-completions" role="listbox" aria-label="SQL 补全"><button v-for="(candidate, index) in candidates" :key="candidate" :class="{ selected: index === completionIndex }" role="option" :aria-selected="index === completionIndex" @mousedown.prevent="acceptCompletion(index)">{{ candidate }}</button><span v-if="!candidates.length" class="muted">没有匹配项；展开元数据树以获得表列候选</span></div>
     <p v-if="error" class="is-error">{{ error }}</p>
   </section>

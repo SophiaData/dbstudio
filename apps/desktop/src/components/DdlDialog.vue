@@ -17,6 +17,12 @@ const columns = reactive([
   { name: 'value', typeName: 'TEXT', nullable: true, pk: 0, defaultValue: '' }
 ])
 const title = computed(() => props.mode === 'create-table' ? '新建表' : props.mode === 'create-view' ? '新建视图' : props.mode === 'rename' ? '重命名表' : props.node?.kind === 'view' ? '删除视图' : '删除表')
+const target = computed(() => props.workbench.connections.value.find((connection) => connection.id === props.connectionId))
+const targetLabel = computed(() => {
+  if (!target.value) return '原连接不可用'
+  const database = target.value.dialectId === 'mysql' ? target.value.options?.database : undefined
+  return typeof database === 'string' && database ? `${target.value.name} · 默认库 ${database}` : target.value.name
+})
 async function submit() {
   if (busy.value) return
   busy.value = true; error.value = ''
@@ -49,6 +55,7 @@ defineExpose({ submit, name, selectSql, columns, confirmation, busy, error })
 
 <template>
   <div class="modal-backdrop"><section class="modal ddl-dialog" role="dialog" aria-modal="true" :aria-label="title"><h2>{{ title }}</h2><form @submit.prevent="submit">
+    <p class="muted">操作目标 · {{ targetLabel }}</p>
     <p v-if="mode === 'drop'">即将删除 {{ node?.name }}。请输入完整对象名称确认；删除结构不能通过结果表格回滚。</p>
     <label v-if="mode === 'drop'" class="field"><span>确认对象名称</span><input v-model="confirmation" :disabled="busy" autocomplete="off" aria-label="确认对象名称" /></label>
     <label v-else class="field"><span>对象名称</span><input v-model="name" :disabled="busy" required aria-label="对象名称" /></label>

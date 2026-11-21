@@ -66,6 +66,62 @@ export function createDraftStore(storage: Pick<Storage, 'getItem' | 'setItem'> |
   }
 }
 
+export interface SqlEditorTab {
+  id: string
+  connectionId: string
+  sql: string
+}
+
+interface StoredEditorTabs {
+  version: 2
+  activeTabId: string
+  legacyDraftsRestored?: boolean
+  tabs: SqlEditorTab[]
+}
+
+const EDITOR_TABS_KEY = ['dbstudio.vue', 'editor-tabs.v2'].join('.')
+
+function validEditorTabs(value: unknown): value is StoredEditorTabs {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Partial<StoredEditorTabs>
+  if (record.version !== 2 || typeof record.activeTabId !== 'string' || !Array.isArray(record.tabs) ||
+      (record.legacyDraftsRestored !== undefined && typeof record.legacyDraftsRestored !== 'boolean')) return false
+  const ids = new Set<string>()
+  for (const tab of record.tabs) {
+    if (!tab || typeof tab.id !== 'string' || !tab.id || ids.has(tab.id) ||
+        typeof tab.connectionId !== 'string' || typeof tab.sql !== 'string') return false
+    ids.add(tab.id)
+  }
+  return true
+}
+
+export function createEditorTabStore(storage: Pick<Storage, 'getItem' | 'setItem'> | null) {
+  let restored: StoredEditorTabs | null = null
+  let warning = ''
+  try {
+    if (!storage) throw new Error('storage unavailable')
+    const stored = storage.getItem(EDITOR_TABS_KEY)
+    if (stored !== null) {
+      const parsed: unknown = JSON.parse(stored)
+      if (validEditorTabs(parsed)) restored = parsed
+      else warning = 'SQL 标签存储格式不受支持，当前会话的草稿将暂存于内存'
+    }
+  } catch { warning = 'SQL 标签存储无法读取，当前会话的草稿将暂存于内存' }
+  const legacy = createDraftStore(storage)
+  return {
+    restored,
+    warning,
+    legacyDraft: legacy.read,
+    write(activeTabId: string, tabs: SqlEditorTab[], legacyDraftsRestored: boolean): string {
+      if (warning) return warning
+      try {
+        storage?.setItem(EDITOR_TABS_KEY, JSON.stringify({ version: 2, activeTabId, tabs, legacyDraftsRestored }))
+        return ''
+      } catch { return 'SQL 标签未能保存，当前草稿仍保留在内存中' }
+    }
+  }
+}
+
 export interface StatementParameterSlot {
   readonly statementIndex: number
   readonly startLine: number
