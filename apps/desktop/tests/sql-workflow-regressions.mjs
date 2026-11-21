@@ -32,8 +32,9 @@ await build({
   }
 })
 if (!globalThis.crypto) Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
+const storage = new Map()
 Object.defineProperty(globalThis, 'localStorage', {
-  configurable: true, value: { getItem: () => null, setItem: () => {} }
+  configurable: true, value: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) }
 })
 const { useWorkbench, decision } = await import(pathToFileURL(join(output, 'bundle/workbench.cjs')).href)
 const text = (value) => ({ kind: 'text', text: value })
@@ -44,7 +45,8 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-function fixture(offset = 0) {
+function fixture(offset = 0, { preserveStorage = false } = {}) {
+  if (!preserveStorage) storage.clear()
   const wb = useWorkbench()
   wb.connections.value = ['a', 'b'].map((id) => ({
     id, name: `synthetic-${id}`, dialectId: 'postgresql', connected: true,
@@ -114,6 +116,108 @@ async function check(name, action) {
     if (decision.value) decision.value.settle('cancel')
   }
 }
+
+await check('sql_editor_tabs_restore_independent_drafts_on_the_same_connection', () => {
+  const { wb } = fixture()
+  const first = wb.activeEditorTabId.value
+  wb.sql.value = 'SELECT 1 AS first_draft'
+  const second = wb.openEditorTab('a', 'SELECT 2 AS second_draft')
+  const third = wb.openEditorTab('b', 'SELECT 3 AS third_draft')
+  const restored = useWorkbench()
+  assert.deepEqual(restored.editorTabs.value.map((tab) => [tab.id, tab.connectionId, tab.sql]), [
+    [first, 'a', 'SELECT 1 AS first_draft'], [second, 'a', 'SELECT 2 AS second_draft'], [third, 'b', 'SELECT 3 AS third_draft']
+  ])
+  assert.equal(restored.activeEditorTabId.value, third)
+  restored.activateEditorTab(first)
+  assert.equal(restored.sql.value, 'SELECT 1 AS first_draft')
+})
+
+await check('sql_editor_keeps_a_draft_when_close_is_cancelled', async () => {
+  const { wb } = fixture()
+  const editor = wb.openEditorTab('a', 'SELECT 1 AS retained_draft')
+  const closing = wb.closeEditorTab(editor)
+  finishDecision('cancel')
+  await closing
+  assert.equal(wb.activeEditorTabId.value, editor)
+  assert.equal(wb.sql.value, 'SELECT 1 AS retained_draft')
+  assert.equal(useWorkbench().sql.value, 'SELECT 1 AS retained_draft')
+})
+
+await check('sql_editor_migrates_legacy_drafts_without_overwriting_the_old_keys', () => {
+  storage.clear()
+  const oldKey = 'dbstudio.vue.sql-draft.v1.a'
+  storage.set(oldKey, 'SELECT 10 AS legacy_a')
+  storage.set('dbstudio.vue.sql-draft.v1.b', 'SELECT 20 AS legacy_b')
+  const { wb } = fixture(0, { preserveStorage: true })
+  assert.equal(wb.sql.value, 'SELECT 10 AS legacy_a')
+  assert.equal(wb.editorTabs.value.find((tab) => tab.connectionId === 'b').sql, 'SELECT 20 AS legacy_b')
+  wb.sql.value = 'SELECT 30 AS current_a'
+  assert.equal(storage.get(oldKey), 'SELECT 10 AS legacy_a')
+  assert.equal(useWorkbench().sql.value, 'SELECT 30 AS current_a')
+})
+
+await check('sql_editor_retries_legacy_migration_after_an_offline_draft_was_saved', () => {
+  storage.clear()
+  storage.set('dbstudio.vue.sql-draft.v1.a', 'SELECT 10 AS legacy_a')
+  const offline = useWorkbench()
+  offline.openEditorTab('', 'SELECT 20 AS offline_draft')
+  const { wb } = fixture(0, { preserveStorage: true })
+  assert.equal(wb.sql.value, 'SELECT 20 AS offline_draft')
+  assert.ok(wb.editorTabs.value.some((tab) => tab.connectionId === 'a' && tab.sql === 'SELECT 10 AS legacy_a'))
+})
+
+await check('sql_editor_preserves_an_unknown_storage_version', () => {
+  storage.clear()
+  const key = ['dbstudio.vue', 'editor-tabs.v2'].join('.')
+  const original = JSON.stringify({ version: 3, tabs: [{ sql: 'future draft' }] })
+  storage.set(key, original)
+  const { wb } = fixture(0, { preserveStorage: true })
+  wb.sql.value = 'SELECT 1 AS session_only'
+  assert.equal(wb.sql.value, 'SELECT 1 AS session_only')
+  assert.equal(storage.get(key), original)
+  assert.ok(wb.editorStorageWarning.value)
+})
+
+await check('sql_parameter_execution_uses_its_origin_after_switching_editor_and_tree', async () => {
+  const { wb, backend } = fixture()
+  wb.connections.value[0].dialectId = 'mysql'
+  wb.dialects.value.push({ id: 'mysql', quoting: { open: '`', close: '`', escape: 'double' } })
+  const editorA = wb.activeEditorTabId.value
+  wb.sql.value = 'SELECT ? AS from_a'
+  const pending = wb.captureEditorExecution(wb.sql.value)
+  assert.equal(wb.parameterSlots(pending.sql, pending.connectionId).length, 1)
+  const editorB = wb.openEditorTab('b', 'SELECT 2 AS from_b')
+  wb.selectNode({ id: 'connection:a', kind: 'connection', name: 'a' })
+  wb.activateTab(wb.tabs.value[0])
+  assert.equal(wb.activeEditorTabId.value, editorB)
+  const calls = []
+  const result = deferred()
+  backend.executeStatement = (node, sql, options) => { calls.push([node, sql, options.parameters]); return result.promise }
+  const execution = wb.executeEditorRequest(pending, [{ statementIndex: 0, name: '?1', value: 'sample' }])
+  result.resolve({ kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } })
+  await execution
+  assert.equal(calls[0][0], 'connection:a')
+  assert.equal(calls[0][1], 'SELECT ? AS from_a')
+  assert.deepEqual(calls[0][2], [{ name: '?1', value: 'sample' }])
+  assert.equal(wb.activeTabId.value, 'synthetic-tab-a')
+  assert.equal(wb.tabs.value.at(-1).editorTabId, editorA)
+  assert.equal(wb.activeEditorTabId.value, editorB)
+  assert.equal(wb.sql.value, 'SELECT 2 AS from_b')
+})
+
+await check('sql_parameters_refuse_a_closed_editor_or_changed_connection', async () => {
+  const { wb, backend } = fixture()
+  const open = wb.openEditorTab('b', '')
+  const closed = wb.captureEditorExecution('SELECT 1')
+  await wb.closeEditorTab(open)
+  await assert.rejects(wb.executeEditorRequest(closed), /已关闭或连接已变化/)
+  const changed = wb.captureEditorExecution('SELECT 1')
+  backend.disconnectConnection = async () => null
+  backend.listConnections = async () => wb.connections.value
+  backend.listChildren = async () => []
+  await wb.disconnect('a')
+  await assert.rejects(wb.executeEditorRequest(changed), /已关闭或连接已变化/)
+})
 
 await check('sql_failure_refreshes_original_connection_transaction', async () => {
   const { wb, backend, calls } = fixture()

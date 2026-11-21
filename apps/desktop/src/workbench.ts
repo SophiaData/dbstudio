@@ -1,4 +1,4 @@
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import type { ConnectionSummary } from '../../../src/core/api'
 import type { ConnectionConfig } from '../../../src/core/dialect'
 import type { DialectInfo, SecretMap } from '../../../src/core/driver'
@@ -13,8 +13,9 @@ import { parseFilter, buildFilteredSql } from '../../../src/core/filter-sql'
 import { backend, errorText, migrationStatus } from './backend'
 import { askDecision, confirmAction } from './dialogs'
 import {
-  createDraftStore,
+  createEditorTabStore,
   parseNumericCell,
+  type SqlEditorTab,
   scopedParametersForStatement,
   statementParameterSlots,
   validateScopedSqlParameters,
@@ -29,9 +30,17 @@ export interface TreeNode {
   loading: boolean
   error: string
 }
+export interface EditorExecution {
+  readonly editorTabId: string
+  readonly connectionId: string
+  readonly connectionRevision: number
+  readonly sql: string
+}
 export interface ResultTab {
   id: string
   connectionId: string
+  editorTabId?: string
+  executionFailed?: boolean
   title: string
   table: ObjectRef | null
   description: TableDescription | null
@@ -85,10 +94,26 @@ export function useWorkbench() {
   const dialects = ref<DialectInfo[]>([])
   const roots = ref<TreeNode[]>([])
   const selected = ref<ObjectRef | null>(null)
-  const currentConnectionId = ref('')
-  const sql = ref('')
-  const sqlDrafts = createDraftStore(typeof localStorage === 'undefined' ? null : localStorage)
-  watch(sql, (text) => sqlDrafts.write(currentConnectionId.value, text), { flush: 'sync' })
+  const editorStore = createEditorTabStore(typeof localStorage === 'undefined' ? null : localStorage)
+  const editorTabs = ref<SqlEditorTab[]>(editorStore.restored?.tabs ?? [])
+  const restoredActive = editorStore.restored?.activeTabId
+  const activeEditorTabId = ref(editorTabs.value.some((tab) => tab.id === restoredActive) ? restoredActive! : editorTabs.value[0]?.id ?? '')
+  const activeEditorTab = computed(() => editorTabs.value.find((tab) => tab.id === activeEditorTabId.value) ?? null)
+  const currentConnectionId = computed(() => activeEditorTab.value?.connectionId ?? '')
+  const editorStorageWarning = ref(editorStore.warning)
+  const connectionRevisions = new Map<string, number>()
+  let legacyDraftsRestored = editorStore.restored?.legacyDraftsRestored === true
+  const persistEditorTabs = () => {
+    editorStorageWarning.value = editorStore.write(activeEditorTabId.value, editorTabs.value, legacyDraftsRestored)
+  }
+  const sql = computed({
+    get: () => activeEditorTab.value?.sql ?? '',
+    set: (text: string) => {
+      const tab = activeEditorTab.value
+      if (tab) { tab.sql = text; persistEditorTabs() }
+      else { openEditorTab('', text) }
+    }
+  })
   const tabs = ref<ResultTab[]>([])
   const activeTabId = ref('')
   const transactions = reactive<Record<string, TransactionState>>({})
@@ -127,7 +152,8 @@ export function useWorkbench() {
     roots.value = nodes.map(makeNode)
     metadataReady.value = true
     if (selected.value?.kind === 'connection') selected.value = nodes.find((node) => node.id === selected.value?.id) ?? null
-    if (!list.some((c) => c.id === currentConnectionId.value)) selectConnection(list[0]?.id ?? '')
+    restoreLegacyEditorDrafts()
+    if (!activeEditorTab.value && list.length) selectConnection(list[0]!.id)
     setStatus(list.length ? `共 ${list.length} 个连接 · ${list.filter((c) => c.connected).length} 个已连接` : '还没有连接，点击「新建连接」开始')
   }
   async function boot() {
@@ -139,21 +165,61 @@ export function useWorkbench() {
     } catch (cause) { setStatus(errorText(cause), true) }
     finally { booting.value = false }
   }
+  function restoreLegacyEditorDrafts() {
+    if (legacyDraftsRestored || !connections.value.length) return
+    legacyDraftsRestored = true
+    for (const connection of connections.value) {
+      const draft = editorStore.legacyDraft(connection.id)
+      if (draft && !editorTabs.value.some((tab) => tab.connectionId === connection.id)) {
+        editorTabs.value.push({ id: crypto.randomUUID(), connectionId: connection.id, sql: draft })
+      }
+    }
+    if (!activeEditorTab.value && editorTabs.value.length) activateEditorTab(editorTabs.value[0]!.id)
+    else if (editorTabs.value.length) persistEditorTabs()
+  }
+  function activateEditorTab(id: string) {
+    if (!editorTabs.value.some((tab) => tab.id === id)) return
+    activeEditorTabId.value = id
+    persistEditorTabs()
+  }
+  function openEditorTab(connectionId = currentConnectionId.value, text = '') {
+    restoreLegacyEditorDrafts()
+    const id = crypto.randomUUID()
+    editorTabs.value.push({ id, connectionId, sql: text })
+    activateEditorTab(id)
+    return id
+  }
+  async function closeEditorTab(id: string) {
+    const tab = editorTabs.value.find((item) => item.id === id)
+    if (!tab) return
+    const draft = tab.sql
+    if (draft && !(await confirmAction('关闭 SQL 标签', '关闭后将放弃此标签的 SQL 草稿。'))) return
+    const index = editorTabs.value.indexOf(tab)
+    if (index === -1 || tab.sql !== draft) return
+    editorTabs.value.splice(index, 1)
+    if (activeEditorTabId.value === id) {
+      activeEditorTabId.value = editorTabs.value[Math.min(index, editorTabs.value.length - 1)]?.id ?? ''
+    }
+    persistEditorTabs()
+  }
   function selectConnection(id: string) {
-    sqlDrafts.write(currentConnectionId.value, sql.value)
-    currentConnectionId.value = id
-    sql.value = sqlDrafts.read(id)
+    restoreLegacyEditorDrafts()
+    const active = activeEditorTab.value
+    if (active?.connectionId === id) return
+    if (active && !active.connectionId && id) {
+      active.connectionId = id
+      persistEditorTabs()
+      return
+    }
+    const existing = editorTabs.value.find((tab) => tab.connectionId === id)
+    if (existing) activateEditorTab(existing.id)
+    else openEditorTab(id)
   }
   function activateTab(tab: ResultTab | string) {
     const target = typeof tab === 'string' ? tabs.value.find((candidate) => candidate.id === tab) : tab
-    if (!target) return
-    activeTabId.value = target.id
-    selectConnection(target.connectionId)
+    if (target) activeTabId.value = target.id
   }
-  function selectNode(node: ObjectRef) {
-    selected.value = node
-    selectConnection(connectionOf(node.id))
-  }
+  function selectNode(node: ObjectRef) { selected.value = node }
   async function toggleNode(node: TreeNode) {
     if (!node.ref.hasChildren) return
     node.expanded = !node.expanded
@@ -183,14 +249,14 @@ export function useWorkbench() {
     const id = tab.result?.cursorId
     if (id) await backend.closeCursor(id)
   }
-  function newTab(connectionId: string, title: string, sqlText: string, table: ObjectRef | null = null, description: TableDescription | null = null): ResultTab {
+  function newTab(connectionId: string, title: string, sqlText: string, table: ObjectRef | null = null, description: TableDescription | null = null, editorTabId?: string): ResultTab {
     const tab: ResultTab = reactive({
-      id: crypto.randomUUID(), connectionId, title, table, description, sql: sqlText, querySql: sqlText,
+      id: crypto.randomUUID(), connectionId, editorTabId, title, table, description, sql: sqlText, querySql: sqlText,
       parameters: [], result: null, page: null, message: '', busy: false, invalidated: false,
       dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
     })
     tabs.value.push(tab)
-    activateTab(tab)
+    if (!editorTabId || activeEditorTabId.value === editorTabId) activateTab(tab)
     return tab
   }
   async function setResult(tab: ResultTab, result: QueryResult) {
@@ -218,14 +284,21 @@ export function useWorkbench() {
   function placeholders(script: string) {
     return extractSqlParameters(script, parameterDialect(currentConnectionId.value))
   }
-  function parameterSlots(script: string) {
-    const connection = currentConnection.value
-    if (!connection) return []
-    return statementParameterSlots(
-      script,
-      dialectFor(connection.id)?.scriptRules ?? SQLITE_SCRIPT_RULES,
-      parameterDialect(connection.id)
-    )
+  function parameterSlots(script: string, connectionId = currentConnectionId.value) {
+    if (!connectionId) return []
+    return statementParameterSlots(script, dialectFor(connectionId)?.scriptRules ?? SQLITE_SCRIPT_RULES, parameterDialect(connectionId))
+  }
+  function captureEditorExecution(script: string): EditorExecution {
+    const tab = activeEditorTab.value
+    if (!tab || !currentConnection.value?.connected) throw new Error('请先选择一个已连接的数据源')
+    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script }
+  }
+  async function executeEditorRequest(request: EditorExecution, parameters: ScopedSqlParameter[] = []) {
+    const tab = editorTabs.value.find((item) => item.id === request.editorTabId)
+    if (!tab || tab.connectionId !== request.connectionId || (connectionRevisions.get(request.connectionId) ?? 0) !== request.connectionRevision) {
+      throw new Error('原 SQL 标签已关闭或连接已变化，请重新发起执行')
+    }
+    return executeTarget(request, parameters)
   }
   async function recordHistory(input: RecordSqlHistoryInput) {
     try { await backend.recordSqlHistory(input) }
@@ -233,10 +306,13 @@ export function useWorkbench() {
     return ''
   }
   async function executeScript(script = sql.value, parameters: ScopedSqlParameter[] = []) {
-    const connection = currentConnection.value
-    if (!connection?.connected) throw new Error('请先选择一个已连接的数据源')
+    return executeEditorRequest(captureEditorExecution(script), parameters)
+  }
+  async function executeTarget(request: EditorExecution, parameters: ScopedSqlParameter[]) {
+    const connection = connections.value.find((item) => item.id === request.connectionId)
+    if (!connection?.connected) throw new Error('原 SQL 标签的连接未连接，请重新连接后执行')
     if (executing.value || locks.has(connection.id)) throw new Error('当前连接正在处理操作，请稍候')
-    const statements = splitStatements(script, dialectFor(connection.id)?.scriptRules ?? SQLITE_SCRIPT_RULES)
+    const statements = splitStatements(request.sql, dialectFor(connection.id)?.scriptRules ?? SQLITE_SCRIPT_RULES)
     if (!statements.length) throw new Error('没有可执行的 SQL')
     validateScopedSqlParameters(parameters, statements.length)
     for (const statement of statements) {
@@ -253,7 +329,7 @@ export function useWorkbench() {
     try {
       for (const statement of statements) {
         const supplied = scopedParametersForStatement(parameters, statement.index)
-        const tab = newTab(connection.id, `SQL ${statement.index + 1}`, statement.sql)
+        const tab = newTab(connection.id, `SQL ${statement.index + 1}`, statement.sql, null, null, request.editorTabId)
         tab.parameters = supplied
         tab.busy = true
         const startedAt = performance.now()
@@ -270,7 +346,9 @@ export function useWorkbench() {
           try { await readTransaction(connection.id) }
           catch { /* Keep the original execution error if transaction state is unavailable. */ }
           if (!executed) await recordHistory({ sql: statement.sql, connectionId: connection.id, dialectId: connection.dialectId, elapsedMs: performance.now() - startedAt, status: 'error', error: errorText(cause) })
-          tab.message = `第 ${statement.startLine} 行：${errorText(cause)}`; throw new Error(tab.message)
+          tab.executionFailed = true
+          tab.message = `${connection.name} · 第 ${statement.startLine} 行：${errorText(cause)}`
+          throw new Error(tab.message)
         }
         finally { tab.busy = false }
       }
@@ -424,6 +502,7 @@ export function useWorkbench() {
     return true
   }
   async function invalidateConnection(id: string) {
+    connectionRevisions.set(id, (connectionRevisions.get(id) ?? 0) + 1)
     for (const tab of tabs.value.filter((t) => t.connectionId === id)) {
       tab.invalidated = true; tab.generation++; tab.dirty.clear(); tab.selectedRows.clear()
       await releaseCursor(tab)
@@ -454,8 +533,11 @@ export function useWorkbench() {
   async function connect(id: string) {
     if (locks.has(id)) throw new Error('当前连接正在处理操作，请稍候')
     locks.add(id)
-    try { await backend.connectConnection(id); await refreshConnections() }
-    finally { locks.delete(id) }
+    try {
+      await backend.connectConnection(id)
+      connectionRevisions.set(id, (connectionRevisions.get(id) ?? 0) + 1)
+      await refreshConnections()
+    } finally { locks.delete(id) }
   }
   async function disconnect(id: string) { await mutateConnection(id, '断开连接', () => backend.disconnectConnection(id)) }
   async function remove(id: string) {
@@ -617,7 +699,8 @@ export function useWorkbench() {
     connections, dialects, roots, selected, currentConnectionId, currentConnection, sql, tabs, activeTabId, activeTab, activeContext,
     transactions, locks, backgroundTasks, pendingEditors, status, statusError, booting, metadataReady, executing, executionConnectionId, executionConnection, migrationWarning,
     setStatus, attempt, boot, refreshConnections, selectConnection, activateTab, selectNode, toggleNode, placeholders, parameterSlots,
-    executeScript, cancelExecution, stageCell, canEdit, rowKeys,
+    editorTabs, activeEditorTabId, editorStorageWarning, openEditorTab, activateEditorTab, closeEditorTab,
+    executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, canEdit, rowKeys,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),

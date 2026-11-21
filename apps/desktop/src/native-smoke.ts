@@ -1,5 +1,5 @@
 import { backend, smokeFixture } from './backend'
-import { cellText, connectionNode, inputCell, type TreeNode, type Workbench } from './workbench'
+import { cellText, connectionNode, inputCell, useWorkbench, type TreeNode, type Workbench } from './workbench'
 import { runNativeToolSmoke, type NativeToolHost } from './native-tool-smoke'
 import { decision } from './dialogs'
 
@@ -30,8 +30,15 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       const second = wb.connections.value.find((item) => item.name === secondName)!
       wb.sql.value = 'SELECT 22 AS draft_b;'
       wb.selectConnection(connection.id)
-      checks.ui_sql_draft_persisted = localStorage.getItem(`dbstudio.vue.sql-draft.v1.${connection.id}`) === 'SELECT 11 AS draft_a;'
-        && localStorage.getItem(`dbstudio.vue.sql-draft.v1.${second.id}`) === 'SELECT 22 AS draft_b;'
+      const recovered = useWorkbench()
+      checks.ui_sql_draft_persisted = recovered.editorTabs.value.some((editor) => editor.connectionId === connection.id && editor.sql === 'SELECT 11 AS draft_a;')
+        && recovered.editorTabs.value.some((editor) => editor.connectionId === second.id && editor.sql === 'SELECT 22 AS draft_b;')
+        && recovered.currentConnectionId.value === connection.id
+      const originalEditor = wb.activeEditorTabId.value
+      const sameConnectionEditor = wb.openEditorTab(connection.id, 'SELECT 33 AS second_draft_a;')
+      wb.activateEditorTab(originalEditor)
+      checks.ui_sql_draft_persisted &&= wb.sql.value === 'SELECT 11 AS draft_a;'
+        && wb.editorTabs.value.find((editor) => editor.id === sameConnectionEditor)?.sql === 'SELECT 33 AS second_draft_a;'
       const actualExecution = wb.executeScript('SELECT 1 AS execution_owner;')
       wb.selectConnection(second.id)
       checks.ui_execution_owner_stays_with_query = wb.executionConnectionId.value === connection.id && wb.executionConnection.value?.id === connection.id
@@ -39,7 +46,9 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       checks.ui_execution_owner_cleared = wb.executionConnectionId.value === '' && !wb.executing.value
       await backend.removeConnection(second.id)
       await wb.refreshConnections()
-      checks.ui_removed_connection_restores_draft = wb.currentConnectionId.value === connection.id && wb.sql.value === 'SELECT 11 AS draft_a;'
+      const removedDraftKept = wb.currentConnectionId.value === second.id && wb.currentConnection.value === null && wb.sql.value === 'SELECT 22 AS draft_b;'
+      wb.selectConnection(connection.id)
+      checks.ui_removed_connection_restores_draft = removedDraftKept && wb.sql.value === 'SELECT 11 AS draft_a;'
       const tableName = `native_vue_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
       const values = Array.from({ length: 205 }, (_, i) => `(${i + 1}, 'row-${i + 1}')`).join(',')
       await wb.executeScript(`CREATE TABLE ${tableName} (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ${tableName} (id,value) VALUES ${values};`)
@@ -145,14 +154,16 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       await wb.openTable(table.ref)
       const primaryTab = wb.activeTab.value!
       wb.activateTab(otherConnectionTab)
-      const tabDraftRestored = wb.currentConnectionId.value === tabConnection.id && wb.sql.value === 'SELECT 444 AS draft_tab_connection;'
+      const tabDraftRestored = wb.currentConnectionId.value === connection.id && wb.sql.value === 'SELECT 333 AS draft_primary_connection;'
+        && wb.editorTabs.value.some((editor) => editor.connectionId === tabConnection.id && editor.sql === 'SELECT 444 AS draft_tab_connection;')
       await wb.closeTab(otherConnectionTab)
       const closeActivatedTargetContext = wb.activeTabId.value === primaryTab.id && wb.currentConnectionId.value === connection.id && wb.sql.value === 'SELECT 333 AS draft_primary_connection;'
       const asyncOpen = wb.openTable(tabTableRef)
       wb.selectConnection(connection.id)
       wb.sql.value = 'SELECT 555 AS async_primary_draft;'
       await asyncOpen
-      const asyncOpenKeptResultContext = wb.currentConnectionId.value === tabConnection.id && wb.activeTab.value?.connectionId === tabConnection.id && wb.activeTab.value?.table?.id === tabTableRef.id
+      const asyncOpenKeptResultContext = wb.currentConnectionId.value === connection.id && wb.sql.value === 'SELECT 555 AS async_primary_draft;'
+        && wb.activeTab.value?.connectionId === tabConnection.id && wb.activeTab.value?.table?.id === tabTableRef.id
       const asyncTab = wb.activeTab.value!
       await wb.closeTab(asyncTab)
       wb.activateTab(tab)
