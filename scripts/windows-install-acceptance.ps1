@@ -483,8 +483,22 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $deadline)
     if (-not $fileName) {
-        $report.fileDialogProbe = @{ controlsSeen = $highestControlCount; hasNativeHandle = ($handle -ne [IntPtr]::Zero) }
-        Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND'
+        if (-not [AcceptanceDesktop]::FocusDialog($handle)) {
+            $report.fileDialogProbe = @{ controlsSeen = $highestControlCount; hasNativeHandle = ($handle -ne [IntPtr]::Zero) }
+            Stop-Acceptance 'TRANSFER_FILE_DIALOG_NOT_FOCUSED'
+        }
+        [Windows.Forms.SendKeys]::SendWait('%n')
+        $deadline = [datetime]::UtcNow.AddSeconds(3)
+        do {
+            $focusedEdit = [AcceptanceDesktop]::GetFocusedDialogEdit($handle)
+            if ($focusedEdit -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([datetime]::UtcNow -lt $deadline)
+        if ($focusedEdit -eq [IntPtr]::Zero) {
+            $report.fileDialogProbe = @{ controlsSeen = $highestControlCount; hasNativeHandle = $true }
+            Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND'
+        }
+        $fileName = [Windows.Automation.AutomationElement]::FromHandle($focusedEdit)
     }
     Set-EditText $fileName $CsvPath
 
@@ -641,6 +655,39 @@ public static class AcceptanceDesktop {
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetParent(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsChild(IntPtr parent, IntPtr child);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadInfo {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public int Left, Top, Right, Bottom;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+    public static bool FocusDialog(IntPtr dialog) {
+        if (dialog == IntPtr.Zero) return false;
+        if (GetForegroundWindow() == dialog) return true;
+        return SetForegroundWindow(dialog) && GetForegroundWindow() == dialog;
+    }
+
+    public static IntPtr GetFocusedDialogEdit(IntPtr dialog) {
+        var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        if (GetForegroundWindow() != dialog || !GetGUIThreadInfo(0, ref info) || !IsChild(dialog, info.Focus)) return IntPtr.Zero;
+        var className = new StringBuilder(24);
+        GetClassName(info.Focus, className, className.Capacity);
+        return className.ToString() == "Edit" ? info.Focus : IntPtr.Zero;
+    }
 
     public static IntPtr FindFileNameEdit(IntPtr dialog) {
         if (dialog == IntPtr.Zero) return IntPtr.Zero;
