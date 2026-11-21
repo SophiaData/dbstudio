@@ -202,13 +202,6 @@ function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
     Stop-Acceptance 'EDITOR_TAB_NOT_SELECTED'
 }
 
-function Send-ControlKeys($Control, [string]$Keys) {
-    $Control.SetFocus()
-    $focused = [Windows.Automation.AutomationElement]::FocusedElement
-    if (-not $focused -or -not $focused.Equals($Control)) { Stop-Acceptance 'UI_CONTROL_NOT_FOCUSED' }
-    [Windows.Forms.SendKeys]::SendWait($Keys)
-}
-
 function Set-EditText($Edit, [string]$Value) {
     $pattern = $null
     if ($Edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {
@@ -247,7 +240,7 @@ function Connect-Saved($App, [string]$ConnectionName = $profile) {
     if ($row.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
         $invoke.Invoke()
     } else {
-        Send-ControlKeys $row ' '
+        Invoke-ControlDoubleClick $App $row
     }
     $script:action = 'connect_saved_profile'
     Invoke-Button $App.Window '连接'
