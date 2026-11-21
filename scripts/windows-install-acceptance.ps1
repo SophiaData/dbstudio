@@ -442,6 +442,11 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
     $deadline = [datetime]::UtcNow.AddSeconds(25)
     do {
         $dialog = $desktop.FindFirst($scope, $condition)
+        if (-not $dialog) {
+            $App.Process.Refresh()
+            $handle = [AcceptanceDesktop]::FindOwnedDialog($App.Process.MainWindowHandle, $App.Process.Id)
+            if ($handle -ne [IntPtr]::Zero) { $dialog = [Windows.Automation.AutomationElement]::FromHandle($handle) }
+        }
         if ($dialog) { break }
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $deadline)
@@ -554,6 +559,7 @@ try {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class AcceptanceDesktop {
     [DllImport("user32.dll")]
@@ -570,6 +576,35 @@ public static class AcceptanceDesktop {
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out int processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
+
+    public static IntPtr FindOwnedDialog(IntPtr owner, int processId) {
+        IntPtr found = IntPtr.Zero;
+        int count = 0;
+        EnumWindows((window, _) => {
+            if (window == owner || !IsWindowVisible(window)) return true;
+            GetWindowThreadProcessId(window, out int candidateProcess);
+            if (candidateProcess != processId && (owner == IntPtr.Zero || GetAncestor(window, 3) != owner)) return true;
+            var className = new StringBuilder(24);
+            GetClassName(window, className, className.Capacity);
+            if (className.ToString() == "#32770") { found = window; count++; }
+            return true;
+        }, IntPtr.Zero);
+        return count == 1 ? found : IntPtr.Zero;
+    }
 
     [DllImport("user32.dll")]
     private static extern bool SetCursorPos(int x, int y);
