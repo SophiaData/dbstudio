@@ -456,10 +456,17 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
         [Windows.Automation.ControlType]::Edit)
     $descendants = [Windows.Automation.TreeScope]::Descendants
     $fileName = @($dialog.FindAll($descendants, $edits) | Where-Object {
-        $_.Current.IsEnabled -and ($_.Current.AutomationId -eq '1001' -or $_.Current.Name -match '^(File name|文件名)[:：]?$')
+        $_.Current.IsEnabled -and $_.Current.Name -match '^(File name|文件名)\s*[:：]?$'
     })
-    if ($fileName.Count -ne 1) { Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND' }
-    Set-EditText $fileName[0] $CsvPath
+    if ($fileName.Count -eq 1) {
+        Set-EditText $fileName[0] $CsvPath
+    } else {
+        $handle = [IntPtr]$dialog.Current.NativeWindowHandle
+        $editHandle = [AcceptanceDesktop]::FindFileNameEdit($handle)
+        if ($editHandle -eq [IntPtr]::Zero) { Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND' }
+        $edit = [Windows.Automation.AutomationElement]::FromHandle($editHandle)
+        Set-EditText $edit $CsvPath
+    }
 
     $buttons = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,
         [Windows.Automation.ControlType]::Button)
@@ -601,6 +608,34 @@ public static class AcceptanceDesktop {
             var className = new StringBuilder(24);
             GetClassName(window, className, className.Capacity);
             if (className.ToString() == "#32770") { found = window; count++; }
+            return true;
+        }, IntPtr.Zero);
+        return count == 1 ? found : IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr parent, EnumWindowCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern int GetDlgCtrlID(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetParent(IntPtr window);
+
+    public static IntPtr FindFileNameEdit(IntPtr dialog) {
+        if (dialog == IntPtr.Zero) return IntPtr.Zero;
+        IntPtr found = IntPtr.Zero;
+        int count = 0;
+        EnumChildWindows(dialog, (window, _) => {
+            if (!IsWindowVisible(window)) return true;
+            var className = new StringBuilder(24);
+            GetClassName(window, className, className.Capacity);
+            if (className.ToString() != "Edit") return true;
+            bool isFileName = GetDlgCtrlID(window) == 1152; // edt1
+            for (var parent = GetParent(window); !isFileName && parent != IntPtr.Zero && parent != dialog; parent = GetParent(parent)) {
+                isFileName = GetDlgCtrlID(parent) == 1148; // cmb13, the file-name combo box
+            }
+            if (isFileName) { found = window; count++; }
             return true;
         }, IntPtr.Zero);
         return count == 1 ? found : IntPtr.Zero;
