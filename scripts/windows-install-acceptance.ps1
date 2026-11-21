@@ -443,8 +443,8 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
     do {
         $dialog = $desktop.FindFirst($scope, $condition)
         if (-not $dialog) {
-            $App.Process.Refresh()
-            $handle = [AcceptanceDesktop]::FindOwnedDialog($App.Process.MainWindowHandle, $App.Process.Id)
+            $owner = [IntPtr]$App.Window.Current.NativeWindowHandle
+            $handle = [AcceptanceDesktop]::FindOwnedDialog($owner, $App.Process.Id)
             if ($handle -ne [IntPtr]::Zero) { $dialog = [Windows.Automation.AutomationElement]::FromHandle($handle) }
         }
         if ($dialog) { break }
@@ -452,21 +452,41 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
     } while ([datetime]::UtcNow -lt $deadline)
     if (-not $dialog) { Stop-Acceptance 'TRANSFER_FILE_DIALOG_NOT_FOUND' }
 
-    $edits = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [Windows.Automation.ControlType]::Edit)
+    $fileControls = [Windows.Automation.OrCondition]::new([Windows.Automation.Condition[]]@(
+        foreach ($type in @([Windows.Automation.ControlType]::Edit, [Windows.Automation.ControlType]::ComboBox)) {
+            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $type)
+        }
+    ))
     $descendants = [Windows.Automation.TreeScope]::Descendants
-    $fileName = @($dialog.FindAll($descendants, $edits) | Where-Object {
-        $_.Current.IsEnabled -and $_.Current.Name -match '^(File name|文件名)\s*[:：]?$'
-    })
-    if ($fileName.Count -eq 1) {
-        Set-EditText $fileName[0] $CsvPath
-    } else {
-        $handle = [IntPtr]$dialog.Current.NativeWindowHandle
-        $editHandle = [AcceptanceDesktop]::FindFileNameEdit($handle)
-        if ($editHandle -eq [IntPtr]::Zero) { Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND' }
-        $edit = [Windows.Automation.AutomationElement]::FromHandle($editHandle)
-        Set-EditText $edit $CsvPath
+    $handle = [IntPtr]$dialog.Current.NativeWindowHandle
+    $deadline = [datetime]::UtcNow.AddSeconds(15)
+    $highestControlCount = 0
+    $fileName = $null
+    do {
+        $controls = $dialog.FindAll($descendants, $fileControls)
+        $highestControlCount = [Math]::Max($highestControlCount, $controls.Count)
+        foreach ($control in $controls) {
+            if (-not $control.Current.IsEnabled -or
+                ($control.Current.AutomationId -notin @('1148','1152') -and
+                 $control.Current.Name -notmatch '^(File\s*&?name|文件名)(?:\s*\([A-Z]\))?\s*[:：]?\s*$')) { continue }
+            $value = $null
+            if ($control.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$value) -and -not $value.Current.IsReadOnly) {
+                $fileName = $control
+                break
+            }
+        }
+        if (-not $fileName) {
+            $editHandle = [AcceptanceDesktop]::FindFileNameEdit($handle)
+            if ($editHandle -ne [IntPtr]::Zero) { $fileName = [Windows.Automation.AutomationElement]::FromHandle($editHandle) }
+        }
+        if ($fileName) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([datetime]::UtcNow -lt $deadline)
+    if (-not $fileName) {
+        $report.fileDialogProbe = @{ controlsSeen = $highestControlCount; hasNativeHandle = ($handle -ne [IntPtr]::Zero) }
+        Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND'
     }
+    Set-EditText $fileName $CsvPath
 
     $buttons = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,
         [Windows.Automation.ControlType]::Button)
