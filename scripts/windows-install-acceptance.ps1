@@ -183,7 +183,23 @@ function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
     if ($button.Current.IsOffscreen -and $button.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
         $scroll.ScrollIntoView()
     }
-    $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $invoke = $null
+    if ($button.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+        $invoke.Invoke()
+        return
+    }
+    $toggle = $null
+    if ($Name -notmatch '^SQL [0-9]+ · ' -or
+        -not $button.TryGetCurrentPattern([Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
+        Stop-Acceptance 'UI_BUTTON_ACTION_UNAVAILABLE'
+    }
+    if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::On) { $toggle.Toggle() }
+    $deadline = [datetime]::UtcNow.AddSeconds(5)
+    do {
+        if ($toggle.Current.ToggleState -eq [Windows.Automation.ToggleState]::On) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    Stop-Acceptance 'EDITOR_TAB_NOT_SELECTED'
 }
 
 function Send-ControlKeys($Control, [string]$Keys) {
