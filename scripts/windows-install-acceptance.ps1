@@ -330,17 +330,17 @@ function Assert-GridPaging($App, [string[]]$Expected, [string]$MarkerPrefix) {
     Assert-GridPage $App $Expected[0..199] $MarkerPrefix
 }
 
-function Open-FixtureTable($App, [string]$Name) {
+function Open-FixtureTable($App, [string]$TableName) {
     $tree = Find-Control $App.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
-    foreach ($name in @($profile, 'Schemas', 'dbstudio_ci', 'Tables')) {
-        $script:action = "expand_$name"
-        $node = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $name -ContainsName
+    foreach ($groupName in @($profile, 'Schemas', 'dbstudio_ci', 'Tables')) {
+        $script:action = "expand_$groupName"
+        $node = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $groupName -ContainsName
         $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, '展开')
         $expand = $node.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
         if ($expand) { $expand.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
     }
-    $script:action = "open_$Name"
-    $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $Name -ContainsName
+    $script:action = "open_$TableName"
+    $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) $TableName -ContainsName
     Invoke-ControlDoubleClick $App $table
 }
 
