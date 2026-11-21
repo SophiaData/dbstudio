@@ -477,7 +477,13 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
         }
         if (-not $fileName) {
             $editHandle = [AcceptanceDesktop]::FindFileNameEdit($handle)
-            if ($editHandle -ne [IntPtr]::Zero) { $fileName = [Windows.Automation.AutomationElement]::FromHandle($editHandle) }
+            if ($editHandle -ne [IntPtr]::Zero) {
+                $edit = [Windows.Automation.AutomationElement]::FromHandle($editHandle)
+                $value = $null
+                if ($edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$value) -and -not $value.Current.IsReadOnly) {
+                    $fileName = $edit
+                }
+            }
         }
         if ($fileName) { break }
         Start-Sleep -Milliseconds 200
@@ -498,7 +504,16 @@ function Select-TransferFile($App, [string]$Title, [string]$CsvPath, [bool]$Save
             $report.fileDialogProbe = @{ controlsSeen = $highestControlCount; hasNativeHandle = $true }
             Stop-Acceptance 'TRANSFER_FILE_NAME_CONTROL_NOT_FOUND'
         }
-        $fileName = [Windows.Automation.AutomationElement]::FromHandle($focusedEdit)
+        if ([AcceptanceDesktop]::GetFocusedDialogEdit($handle) -ne $focusedEdit) {
+            Stop-Acceptance 'TRANSFER_FILE_NAME_FOCUS_LOST'
+        }
+        $keys = [regex]::Replace($CsvPath, '[+^%~(){}\[\]]', { param($match) '{' + $match.Value + '}' })
+        [Windows.Forms.SendKeys]::SendWait('^a' + $keys)
+        if (-not [AcceptanceDesktop]::FocusedEditHasText($handle, $focusedEdit, $CsvPath)) {
+            Stop-Acceptance 'TRANSFER_FILE_NAME_VALUE_MISMATCH'
+        }
+        [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        return
     }
     Set-EditText $fileName $CsvPath
 
@@ -687,6 +702,19 @@ public static class AcceptanceDesktop {
         var className = new StringBuilder(24);
         GetClassName(info.Focus, className, className.Capacity);
         return className.ToString() == "Edit" ? info.Focus : IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam,
+        StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+
+    public static bool FocusedEditHasText(IntPtr dialog, IntPtr edit, string expected) {
+        if (edit == IntPtr.Zero || GetFocusedDialogEdit(dialog) != edit) return false;
+        var text = new StringBuilder(expected.Length + 2);
+        const uint WM_GETTEXT = 0x000D;
+        const uint SMTO_ABORTIFHUNG = 0x0002;
+        var sent = SendMessageTimeout(edit, WM_GETTEXT, (UIntPtr)text.Capacity, text, SMTO_ABORTIFHUNG, 1000, out _);
+        return sent != IntPtr.Zero && text.ToString() == expected && GetFocusedDialogEdit(dialog) == edit;
     }
 
     public static IntPtr FindFileNameEdit(IntPtr dialog) {
