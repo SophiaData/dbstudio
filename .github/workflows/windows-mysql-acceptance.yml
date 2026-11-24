@@ -1,0 +1,44 @@
+name: Windows desktop and MySQL acceptance
+
+on:
+  push:
+    branches: [ci/windows-mysql-acceptance]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+jobs:
+  acceptance:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the Windows acceptance frontend
+        env:
+          VITE_DBSTUDIO_TEST_HOOKS: '1'
+          VITE_DBSTUDIO_WINDOWS_MYSQL: '1'
+        run: pnpm build:desktop
+      - name: Build the actual Windows Tauri host
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'dbstudio-acceptance-config.json'
+          '{"identifier":"io.dbstudio.windows-mysql-smoke"}' | Set-Content -LiteralPath $config -Encoding utf8NoBOM
+          pnpm exec tauri build --debug --features test-hooks --no-bundle --ci --config $config
+      - name: Verify Windows WebView against isolated MySQL and replay exported SQL
+        shell: pwsh
+        run: ./scripts/windows-mysql-acceptance.ps1

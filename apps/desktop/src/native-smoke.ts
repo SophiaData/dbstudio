@@ -18,6 +18,10 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       const fixture = await smokeFixture()
       checks.isolated_fixture = fixture.isolated
       if (!fixture.isolated) return { ok: false, checks }
+      if (import.meta.env.VITE_DBSTUDIO_WINDOWS_MYSQL === '1') {
+        const { runWindowsMysqlSmoke } = await import('./windows-mysql-smoke')
+        return await runWindowsMysqlSmoke(wb, tools, fixture)
+      }
       const name = `Vue Native ${crypto.randomUUID().slice(0, 8)}`
       await wb.saveConnection({ dialectId: 'sqlite', name, options: { file: fixture.databasePath, native_unlisted_option: 'preserve-test-option' } }, {})
       const connection = wb.connections.value.find((c) => c.name === name)
