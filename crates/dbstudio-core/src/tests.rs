@@ -81,6 +81,66 @@ fn application_is_send_sync_and_cancel_does_not_wait_for_query_mutex() {
 }
 
 #[test]
+fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
+    struct DelayedCancelDriver {
+        first_started: mpsc::Sender<()>,
+        finish_first: mpsc::Receiver<()>,
+        next_started: mpsc::Sender<()>,
+        cancel: CancelHandle,
+    }
+    impl Driver for DelayedCancelDriver {
+        fn dialect_id(&self) -> &str { "mysql" }
+        fn capabilities(&self) -> Value { json!({"supportsCancel":true}) }
+        fn cancel_handle(&self) -> CancelHandle { self.cancel.clone() }
+        fn call(&mut self, _: &str, args: Vec<Value>) -> DriverResult<Value> {
+            if args[0]["signalId"] == "first" {
+                self.first_started.send(()).unwrap();
+                self.finish_first.recv_timeout(Duration::from_secs(5)).unwrap();
+            } else {
+                self.next_started.send(()).unwrap();
+            }
+            Ok(Value::Null)
+        }
+    }
+
+    let (first_started, wait_for_first) = mpsc::channel();
+    let (finish_first, first_finished) = mpsc::channel();
+    let (next_started, wait_for_next) = mpsc::channel();
+    let (cancel_started, wait_for_cancel) = mpsc::channel();
+    let (finish_cancel, cancel_finished) = mpsc::channel();
+    let cancel_finished = Mutex::new(cancel_finished);
+    let session = Session::new("fixture".into(), Box::new(DelayedCancelDriver {
+        first_started,
+        finish_first: first_finished,
+        next_started,
+        cancel: Arc::new(move || {
+            cancel_started.send(()).unwrap();
+            cancel_finished.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(true)
+        }),
+    }));
+
+    thread::scope(|scope| {
+        let queries = scope.spawn(|| {
+            session.call("runQuery", vec![json!({"signalId":"first"})]).unwrap();
+            session.call("runQuery", vec![json!({"signalId":"next"})]).unwrap();
+        });
+        wait_for_first.recv_timeout(Duration::from_secs(2)).unwrap();
+        let cancellation = scope.spawn(|| session.cancel(Some("first")));
+        wait_for_cancel.recv_timeout(Duration::from_secs(2)).unwrap();
+        finish_first.send(()).unwrap();
+
+        let next_while_cancelling = wait_for_next.recv_timeout(Duration::from_secs(1));
+        finish_cancel.send(()).unwrap();
+        assert!(cancellation.join().unwrap().unwrap());
+        queries.join().unwrap();
+        assert_eq!(next_while_cancelling, Err(mpsc::RecvTimeoutError::Timeout),
+            "the next query reached the driver before the previous cancellation completed");
+        wait_for_next.try_recv().unwrap();
+    });
+}
+
+#[test]
 fn disconnect_invalidates_result_and_native_cursor_generation() {
     let (app, blocker, entered) = fixture(); let id = add(&app, "a"); let node = format!("connection:{id}");
     let query = app.call("runQuery", vec![json!(node),json!("SELECT 1")]).unwrap();

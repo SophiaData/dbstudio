@@ -57,13 +57,17 @@ impl Session {
     }
     /// No driver mutex is acquired here: a blocked query cannot block cancellation.
     pub(crate) fn cancel(&self, signal_id: Option<&str>) -> Result<bool, AppError> {
+        let running = lock(&self.running)?;
         if !self.is_active() { return Ok(false) }
-        let running = lock(&self.running)?.clone();
-        let Some(active_signal) = running else { return Ok(false) };
+        let Some(active_signal) = running.as_ref() else { return Ok(false) };
         if let Some(wanted) = signal_id {
             if active_signal.as_deref() != Some(wanted) { return Ok(false) }
         }
-        (self.cancel)()
+        // The current operation must keep the driver until this session-wide
+        // cancel call returns, even if its query finishes in the meantime.
+        let result = (self.cancel)();
+        drop(running);
+        result
     }
     pub(crate) fn mark_inactive(&self) { self.active.store(false, Ordering::Release); }
     pub(crate) fn invalidate(&self) {
