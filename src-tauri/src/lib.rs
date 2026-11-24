@@ -275,6 +275,9 @@ async fn backend_call(
     }
     #[cfg(feature = "test-hooks")]
     if method == "smokeFixture" || method == "smokeReport" {
+        if app.config().identifier == "io.dbstudio.windows-mysql-smoke" {
+            eprintln!("[windows-acceptance] {method}");
+        }
         let fixture = state.smoke.as_ref().ok_or_else(|| AppError::unsupported("未启用原生测试会话"))?;
         if method == "smokeFixture" {
             if !args.is_empty() { return Err(AppError::invalid("smokeFixture 不接受参数")); }
@@ -351,6 +354,10 @@ pub fn run() {
         std::process::exit(2);
     }
     let context = tauri::generate_context!();
+    #[cfg(feature = "test-hooks")]
+    if context.config().identifier == "io.dbstudio.windows-mysql-smoke" {
+        eprintln!("[windows-acceptance] host-start");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let mysql = {
         if context.config().identifier != "io.dbstudio.mysql-acceptance" || !context.config().app.windows.is_empty() {
@@ -430,6 +437,12 @@ pub fn run() {
         });
     #[cfg(feature = "test-hooks")]
     let builder = builder.on_page_load(|webview, payload| {
+        if webview.app_handle().config().identifier == "io.dbstudio.windows-mysql-smoke" {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                eprintln!("[windows-acceptance] page-finished");
+            }
+            return;
+        }
         #[cfg(feature = "mysql-acceptance")]
         if matches!(payload.event(),tauri::webview::PageLoadEvent::Finished) {
             if let Some(state)=webview.try_state::<DesktopState>() {

@@ -52,6 +52,7 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $ready) { throw 'Isolated MySQL did not become reachable.' }
+    'Isolated MySQL is ready.'
     $values = (1..405 | ForEach-Object { '({0},{1},''row-{0}'')' -f $_, ($_ % 3) }) -join ','
     $null = Invoke-FixtureSql @"
 CREATE DATABASE dbstudio_acceptance;
@@ -67,18 +68,33 @@ CREATE USER 'acceptance'@'127.0.0.1';
 GRANT SELECT, UPDATE ON dbstudio_acceptance.* TO 'acceptance'@'127.0.0.1';
 INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
 "@
-    $app = Start-Process -FilePath $binary -PassThru -WindowStyle Hidden
-    if (-not $app.WaitForExit(150000)) {
+    $launch = [Diagnostics.ProcessStartInfo]::new($binary)
+    $launch.UseShellExecute = $false
+    $launch.CreateNoWindow = $true
+    $launch.RedirectStandardOutput = $true
+    $launch.RedirectStandardError = $true
+    $app = [Diagnostics.Process]::Start($launch)
+    $stdout = $app.StandardOutput.ReadToEndAsync()
+    $stderr = $app.StandardError.ReadToEndAsync()
+    $exited = $app.WaitForExit(150000)
+    if (-not $exited) {
         $app.Kill()
-        throw 'The native WebView did not finish its acceptance checks.'
+        $app.WaitForExit()
     }
-    $report = Get-Content -LiteralPath (Join-Path $env:DBSTUDIO_NATIVE_SMOKE_ROOT 'report.json') -Raw | ConvertFrom-Json
+    ($stdout.Result + [char]10 + $stderr.Result) -split '\r?\n' | Where-Object {
+        $_ -match '^\[windows-acceptance\] (host-start|page-finished|smokeFixture|smokeReport)$'
+    } | Write-Output
+    $reportPath = Join-Path $env:DBSTUDIO_NATIVE_SMOKE_ROOT 'report.json'
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        throw "The native WebView produced no acceptance report (exited=$exited, exitCode=$($app.ExitCode))."
+    }
+    $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
     $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_generated_column_export')
     foreach ($name in $required) {
         $passed = $report.checks.$name -eq $true
         Write-Output "$name=$passed"
     }
-    if ($app.ExitCode -ne 0 -or $report.ok -ne $true -or @($required | Where-Object { $report.checks.$_ -ne $true }).Count) {
+    if (-not $exited -or $app.ExitCode -ne 0 -or $report.ok -ne $true -or @($required | Where-Object { $report.checks.$_ -ne $true }).Count) {
         throw 'Windows native MySQL acceptance failed.'
     }
     $export = Get-Content -LiteralPath (Join-Path $env:DBSTUDIO_NATIVE_SMOKE_ROOT 'acceptance.sql') -Encoding utf8

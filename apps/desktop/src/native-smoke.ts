@@ -1,4 +1,5 @@
 import { backend, smokeFixture } from './backend'
+import { invoke } from '@tauri-apps/api/core'
 import { cellText, connectionNode, inputCell, useWorkbench, type TreeNode, type Workbench } from './workbench'
 import { runNativeToolSmoke, type NativeToolHost } from './native-tool-smoke'
 import { decision } from './dialogs'
@@ -10,6 +11,10 @@ declare global { interface Window { __DBSTUDIO_NATIVE_SMOKE__?: () => Promise<Sm
 export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
   if (import.meta.env.VITE_DBSTUDIO_TEST_HOOKS !== '1') return
   let pending: Promise<SmokeResult> | undefined
+  if (import.meta.env.VITE_DBSTUDIO_WINDOWS_MYSQL === '1') {
+    void run().then((report) => invoke('backend_call', { method: 'smokeReport', args: [report] }))
+    return
+  }
   window.__DBSTUDIO_NATIVE_SMOKE__ = () => pending ??= run()
   async function run(): Promise<SmokeResult> {
     const checks: Record<string, boolean> = {}
