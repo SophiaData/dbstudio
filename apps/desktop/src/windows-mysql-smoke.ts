@@ -117,10 +117,39 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     if (tab.page!.offset === 0) await wb.pageTab(tab, 1)
     const restored = tab.page!.rows.find((item) => cellText(item.cells[0]!) === String(rowId))
     if (!restored) throw new Error('Missing restored fixture row')
-    wb.stageCell(tab, restored, 'payload', { kind: 'text', text: 'committed-fixture' })
-    await wb.applyTab(tab)
+    check = 'mysql_update_preview'
+    const committedValue = "fixture O'Brien"
+    wb.stageCell(tab, restored, 'payload', { kind: 'text', text: committedValue })
+    const updates = [...tab.dirty.values()]
+    const unchanged = async () => await readPayload() === 'row-' + rowId && !(await wb.readTransaction(id)).active
+    const preview = await backend.previewRowUpdates(table.id, updates)
+    const staleRejected = await backend.applyEdits(table.id,
+      [{ ...updates[0]!, changes: { payload: { kind: 'text', text: 'unexpected draft' } } }],
+      preview.fingerprint
+    ).then(() => false, (cause: unknown) => (cause as { code?: string })?.code === 'conflict')
+    const cleanBefore = staleRejected && await unchanged()
+    const mountedGrid = await tools.grid(tab)
+    const applyButton = Array.from(mountedGrid.$el.querySelectorAll('button') as NodeListOf<HTMLButtonElement>)
+      .find((button) => button.textContent?.trim() === '应用修改 (1)')
+    if (!applyButton) throw new Error('Apply button was not found')
+    const review = async (choice: 'apply' | 'cancel') => {
+      applyButton.click()
+      await waitFor(() => decision.value?.title === '更新 SQL 预览' && !!document.querySelector('.decision-detail'))
+      const detail = document.querySelector('.decision-detail')?.textContent
+      const sqlMatches = detail?.includes(preview.statements[0]!.sql) &&
+        detail.includes(JSON.stringify([committedValue, rowId])) &&
+        preview.statements[0]!.sql.includes('WHERE ' + String.fromCharCode(96) + 'id' + String.fromCharCode(96) + '=?')
+      const untouched = await unchanged()
+      decision.value!.settle(choice)
+      await waitFor(() => !wb.locks.has(id) && !tab.busy)
+      return Boolean(sqlMatches) && untouched
+    }
+    const cancelledReview = await review('cancel') && tab.dirty.size === 1 && await unchanged()
+    const confirmedReview = await review('apply') && tab.dirty.size === 0
+    const stagedInTransaction = (await wb.readTransaction(id)).active && await readPayload() === 'row-' + rowId
     await wb.settleTransaction(id, true)
-    checks[check] = rolledBack && await readPayload() === 'committed-fixture'
+    checks[check] = cleanBefore && cancelledReview && confirmedReview && stagedInTransaction
+    checks.mysql_transaction = rolledBack && await readPayload() === committedValue
 
     check = 'mysql_generated_column_export'
     const destinationPath = fixture.exportPath.replace(/export\.csv$/, 'acceptance.sql')

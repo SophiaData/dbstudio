@@ -46,7 +46,7 @@ const CORE_METHODS: &[&str] = &[
     "disconnectConnection", "removeConnection", "testConnection", "listChildren",
     "describeTable", "captureSchemaSnapshot", "compareTableData", "runQuery",
     "executeStatement", "explain", "fetchResultPage", "closeCursor", "previewTable",
-    "tableSelectSql", "applyEdits", "commitTransaction", "rollbackTransaction",
+    "tableSelectSql", "previewRowUpdates", "applyEdits", "commitTransaction", "rollbackTransaction",
     "transactionState", "insertRow", "deleteRows", "countRows", "fetchCellValue",
     "createTable", "dropTable", "createView", "dropView", "renameTable", "cancelQuery",
     "updateConnection", "listSqlLibrary", "recordSqlHistory", "saveSql", "removeSavedSql",

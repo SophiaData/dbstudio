@@ -255,7 +255,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || tab.invalidated || !tab.result" @click="workbench.attempt(() => workbench.reloadTab(tab))">刷新</button>
       <button :disabled="locked || !writable" @click="beginInsert">新增行</button>
       <button :disabled="locked || !writable || !tab.selectedRows.size" @click="workbench.attempt(() => workbench.deleteSelected(tab))">删除选中行</button>
-      <button :disabled="locked || !tab.dirty.size" @click="workbench.attempt(() => workbench.applyTab(tab))">应用修改{{ tab.dirty.size ? ` (${tab.dirty.size})` : '' }}</button>
+      <button :disabled="locked || !tab.dirty.size" @click="workbench.attempt(() => workbench.reviewAndApplyTab(tab))">应用修改{{ tab.dirty.size ? ` (${tab.dirty.size})` : '' }}</button>
       <button :disabled="locked || reading || !selectedCell" @click="readSelected">查看完整值</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(false)">复制单元格</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(true)">复制整行</button>

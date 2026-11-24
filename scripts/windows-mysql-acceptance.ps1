@@ -89,7 +89,7 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
         throw "The native WebView produced no acceptance report (exited=$exited, exitCode=$($app.ExitCode))."
     }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_generated_column_export')
+    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_generated_column_export')
     foreach ($name in $required) {
         $passed = $report.checks.$name -eq $true
         Write-Output "$name=$passed"

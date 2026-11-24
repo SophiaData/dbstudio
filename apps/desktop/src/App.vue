@@ -253,10 +253,18 @@ onBeforeUnmount(() => unlisten?.())
     <MysqlAdminDialog v-if="mysqlAdmin" :workbench="wb" :connection-id="mysqlAdmin.connectionId" :node="mysqlAdmin.node" @close="mysqlAdmin = null" />
     <DdlDialog v-if="ddl" ref="ddlController" :workbench="wb" :mode="ddl.mode" :connection-id="ddl.connectionId" :node="ddl.node" @close="ddl = null; toolPanel = null" />
     <div v-if="parameterOpen" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="SQL 参数"><h2>绑定 SQL 参数</h2><p v-if="pendingExecution">执行目标 · {{ editorConnectionLabel(pendingExecution.connectionId) }}</p><p class="muted">参数按语句独立绑定；同名占位符出现在不同语句时也需要分别填写。</p><form @submit.prevent="executeParameters"><label v-for="slot in parameterSlots" :key="slot.key" class="parameter-field"><span>第 {{ slot.statementIndex + 1 }} 条语句（第 {{ slot.startLine }} 行）· {{ slot.name }}</span><select v-model="parameterKinds[slot.key]" :aria-label="`第 ${slot.statementIndex + 1} 条语句 ${slot.name} 类型`"><option value="text">文本</option><option value="number">数字</option><option value="boolean">布尔</option><option value="binary">二进制 Hex</option><option value="null">NULL</option></select><input v-model="parameterValues[slot.key]" :disabled="parameterKinds[slot.key] === 'null'" :aria-label="`第 ${slot.statementIndex + 1} 条语句参数 ${slot.name}`" /></label><p v-if="parameterError" class="is-error">{{ parameterError }}</p><div class="modal-actions"><button type="button" @click="closeParameters">取消</button><button type="submit" class="primary">执行</button></div></form></section></div>
-    <div v-if="decision" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title"><h2 id="decision-title">{{ decision.title }}</h2><p>{{ decision.message }}</p><div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div></section></div>
+    <div v-if="decision" class="modal-backdrop">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
+        <h2 id="decision-title">{{ decision.title }}</h2>
+        <p>{{ decision.message }}</p>
+        <pre v-if="decision.detail" class="decision-detail">{{ decision.detail }}</pre>
+        <div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .metadata-tree-host { overflow:hidden; }
+.decision-detail { max-height: 45vh; overflow: auto; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-alt); font-family: var(--mono); }
 </style>

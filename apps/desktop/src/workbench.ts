@@ -435,15 +435,47 @@ export function useWorkbench() {
     }
     await reloadTab(tab, false, 0, { querySql, order })
   }
-  async function applyTab(tab: ResultTab) {
+  async function reviewAndApplyTab(tab: ResultTab) {
+    if (!tab.table || !tab.dirty.size) return
+    if (tab.busy || tab.invalidated || pendingEditors.has(tab.id)) throw new Error('请先结束当前单元格编辑')
+    const connection = connections.value.find((item) => item.id === tab.connectionId)
+    if (connection?.dialectId !== 'mysql') return applyTab(tab)
+
+    const table = tab.table
+    const generation = tab.generation
+    const snapshot = JSON.stringify([...tab.dirty.values()])
+    const updates: RowUpdate[] = JSON.parse(snapshot)
+    const plan = await backend.previewRowUpdates(table.id, updates)
+    const detail = plan.statements.map(({ sql, parameters }) =>
+      `${sql}\n参数（按占位符顺序） ${JSON.stringify(parameters)}`
+    ).join('\n\n')
+    const choice = await askDecision('更新 SQL 预览',
+      `连接「${connection.name}」，目标表「${table.name}」。计划更新 ${updates.length} 行，应用后仍需提交事务。`,
+      [{ value: 'apply', label: '应用修改' }, { value: 'cancel', label: '取消' }],
+      detail)
+    if (choice !== 'apply') return
+    if (tab.invalidated || tab.generation !== generation || tab.table?.id !== table.id ||
+        JSON.stringify([...tab.dirty.values()]) !== snapshot) {
+      throw new Error('结果或草稿已变化，请重新预览')
+    }
+    await applyTab(tab, { updates, fingerprint: plan.fingerprint })
+  }
+  async function applyTab(tab: ResultTab, reviewed?: { updates: RowUpdate[]; fingerprint: string }) {
     if (!tab.table || !tab.dirty.size) return
     if (tab.busy || tab.invalidated) throw new Error('当前结果不可应用修改')
     tab.busy = true
     try {
       const offset = tab.page?.offset ?? 0
-      const updates = [...tab.dirty.values()]
+      const updates = reviewed?.updates ?? [...tab.dirty.values()]
       const wasActive = transactions[tab.connectionId]?.active === true
-      const result = await backend.applyEdits(tab.table.id, updates).catch(async (cause: unknown) => {
+      const request = reviewed
+        ? backend.applyEdits(tab.table.id, updates, reviewed.fingerprint)
+        : backend.applyEdits(tab.table.id, updates)
+      const result = await request.catch(async (cause: unknown) => {
+        if (reviewed && cause !== null && typeof cause === 'object' &&
+            'code' in cause && cause.code === 'conflict') {
+          throw new Error('更新计划已变化，请重新预览')
+        }
         let state: TransactionState | null = null
         try { state = await readTransaction(tab.connectionId) } catch { /* Preserve the original apply error when state cannot be confirmed. */ }
         const mysqlDeadlock = cause !== null && typeof cause === 'object' &&
@@ -712,6 +744,7 @@ export function useWorkbench() {
     executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, canEdit, rowKeys,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
+    reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),
     reloadTab: (tab: ResultTab, guard = true) => withConnectionOperation(tab.connectionId, () => reloadTab(tab, guard)),
     transformTab: (tab: ResultTab, order = tab.order) => withConnectionOperation(tab.connectionId, () => transformTab(tab, order)),
