@@ -53,7 +53,7 @@ try {
     }
     if (-not $ready) { throw 'Isolated MySQL did not become reachable.' }
     'Isolated MySQL is ready.'
-    $values = (1..405 | ForEach-Object { '({0},{1},''row-{0}'')' -f $_, ($_ % 3) }) -join ','
+    $values = (1..405 | ForEach-Object { '({0},{1},''row-{0}'',''note-{0}'')' -f $_, ($_ % 3) }) -join ','
     $null = Invoke-FixtureSql @"
 CREATE DATABASE dbstudio_acceptance;
 CREATE DATABASE dbstudio_restore;
@@ -61,12 +61,13 @@ CREATE TABLE dbstudio_acceptance.items (
     id INT PRIMARY KEY,
     group_id INT NOT NULL,
     payload VARCHAR(64) NOT NULL,
+    note VARCHAR(64) NULL,
     generated_value VARCHAR(64) GENERATED ALWAYS AS (upper(payload)) STORED
 );
 CREATE TABLE dbstudio_restore.items LIKE dbstudio_acceptance.items;
 CREATE USER 'acceptance'@'127.0.0.1';
 GRANT SELECT, UPDATE ON dbstudio_acceptance.* TO 'acceptance'@'127.0.0.1';
-INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
+INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $values;
 "@
     $launch = [Diagnostics.ProcessStartInfo]::new($binary)
     $launch.UseShellExecute = $false
@@ -89,7 +90,7 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
         throw "The native WebView produced no acceptance report (exited=$exited, exitCode=$($app.ExitCode))."
     }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_generated_column_export')
+    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_grid_batch_paste', 'mysql_generated_column_export')
     foreach ($name in $required) {
         $passed = $report.checks.$name -eq $true
         Write-Output "$name=$passed"
@@ -109,6 +110,7 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
 SELECT COUNT(*) = 405 AND SUM(
     BINARY a.payload = BINARY b.payload
     AND a.group_id = b.group_id
+    AND BINARY a.note <=> BINARY b.note
     AND BINARY a.generated_value = BINARY b.generated_value
 ) = 405
 AND (SELECT COUNT(*) FROM dbstudio_restore.items) = 405

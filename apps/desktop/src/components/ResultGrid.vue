@@ -6,6 +6,7 @@ import CellViewer from './CellViewer.vue'
 import LoadedExportDialog from './LoadedExportDialog.vue'
 import { fullCell, textValue } from '../result-export'
 import { writeClipboardText } from '../clipboard'
+import { parseGridPaste, pastedMysqlCell } from '../grid-paste'
 import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
@@ -152,6 +153,50 @@ async function openLoadedExport() {
 function closeLoadedExport() { loadedExport.value = false }
 const writable = computed(() => props.workbench.canEdit(props.tab))
 const locked = computed(() => props.tab.busy || props.workbench.executing.value || props.workbench.locks.has(props.tab.connectionId))
+const canPaste = computed(() => writable.value && props.workbench.connections.value.some((connection) =>
+  connection.id === props.tab.connectionId && connection.dialectId === 'mysql'))
+
+function pasteCells(event: ClipboardEvent, row: ResultRow, firstColumn: number) {
+  if (!canPaste.value || editing.value || insertOpen.value || viewer.value || loadedExport.value) return
+  const clipboard = event.clipboardData
+  const page = props.tab.page
+  if (!clipboard?.types.includes('text/plain') || !page) return
+  event.preventDefault()
+  selectCell(row, firstColumn)
+  error.value = ''
+  try {
+    const matrix = parseGridPaste(clipboard.getData('text/plain'))
+    if (!matrix.length) return
+    const firstRow = page.rows.indexOf(row)
+    const width = matrix[0]!.length
+    if (firstRow < 0 || firstRow + matrix.length > page.rows.length || firstColumn + width > page.columns.length) {
+      throw new Error('粘贴范围超出当前页，请选择足够的行和列')
+    }
+    const metadata = props.tab.description?.columns ?? []
+    const columns = page.columns.slice(firstColumn, firstColumn + width).map(({ name }) => {
+      const description = metadata.find((column) => column.name === name)
+      if (!description || page.columns.filter((column) => column.name === name).length !== 1) {
+        throw new Error('无法确定目标列「' + name + '」')
+      }
+      return description
+    })
+    const edits = matrix.map((fields, index) => ({
+      row: page.rows[firstRow + index]!,
+      changes: Object.fromEntries(fields.map((field, columnIndex) => {
+        const column = columns[columnIndex]!
+        try {
+          return [column.name, pastedMysqlCell(field, column)] as const
+        } catch (cause) {
+          throw new Error('粘贴区域第 ' + (index + 1) + ' 行「' + column.name + '」。' + errorText(cause))
+        }
+      }))
+    }))
+    props.workbench.stageCells(props.tab, edits)
+    props.workbench.setStatus('已暂存 ' + String(matrix.length) + ' 行粘贴内容。点击「应用修改」查看 SQL 预览')
+  } catch (cause) {
+    error.value = errorText(cause)
+  }
+}
 const insertColumns = computed(() => props.tab.description?.columns.filter((c) => !c.hidden && !c.generated && c.identity !== 'always') ?? [])
 function displayed(row: ResultRow, column: number): CellValue {
   const name = props.tab.page!.columns[column]!.name
@@ -285,13 +330,13 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="(column, index) in tab.page.columns" :key="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @click="selectCell(row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+          <td v-for="(column, index) in tab.page.columns" :key="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
       <p v-if="!tab.page.rows.length" class="empty muted">结果为空</p>
     </div>
     <div v-else class="command-result" :class="{ 'is-error': tab.invalidated }">{{ tab.message || (tab.busy ? '正在执行…' : '没有结果') }}</div>
-    <div v-if="tab.page" class="page-bar"><span>{{ tab.page.offset + (tab.page.returned ? 1 : 0) }}–{{ tab.page.offset + tab.page.returned }} 行 · {{ Math.round(tab.result?.elapsedMs ?? 0) }} ms{{ writable ? ' · 双击单元格编辑' : ' · 只读' }}</span><span class="spacer" /><button :disabled="locked || !tab.page.offset || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, -1))">上一页</button><button :disabled="locked || !tab.page.hasMore || !tab.result?.cursorId || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, 1))">下一页</button></div>
+    <div v-if="tab.page" class="page-bar"><span>{{ tab.page.offset + (tab.page.returned ? 1 : 0) }}–{{ tab.page.offset + tab.page.returned }} 行 · {{ Math.round(tab.result?.elapsedMs ?? 0) }} ms{{ writable ? ' · 双击单元格编辑' : ' · 只读' }}<template v-if="canPaste"> · 选中单元格后可粘贴</template></span><span class="spacer" /><button :disabled="locked || !tab.page.offset || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, -1))">上一页</button><button :disabled="locked || !tab.page.hasMore || !tab.result?.cursorId || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, 1))">下一页</button></div>
     <div v-if="editing" class="modal-backdrop" @keydown.esc="editing = null"><section class="modal" role="dialog" aria-modal="true" aria-label="编辑单元格"><h2>编辑 {{ tab.page?.columns[editing.column]?.name }}</h2><form @submit.prevent="saveCell"><textarea v-model="editing.raw" :disabled="editing.isNull" rows="5" aria-label="单元格值" autofocus /><label class="checkbox"><input v-model="editing.isNull" type="checkbox" />NULL</label><p v-if="error" class="is-error">{{ error }}</p><div class="modal-actions"><button type="button" @click="editing = null">取消</button><button type="submit" class="primary">保存到本地修改</button></div></form></section></div>
     <div v-if="insertOpen" class="modal-backdrop"><section class="modal insert-dialog" role="dialog" aria-modal="true" aria-label="新增行"><h2>新增行</h2><p class="muted">未勾选的列由数据库默认值填充；插入后需要提交事务。</p><form @submit.prevent="submitInsert"><div v-for="column in insertColumns" :key="column.name" class="insert-field"><label class="checkbox"><input type="checkbox" :checked="insertInclude.has(column.name)" @change="insertInclude.has(column.name) ? insertInclude.delete(column.name) : insertInclude.add(column.name)" />{{ column.name }}{{ column.requiredOnInsert ? ' *' : '' }}</label><input v-model="insertValues[column.name]" :disabled="!insertInclude.has(column.name) || insertNulls.has(column.name)" :aria-label="column.name" :placeholder="column.defaultValue ?? column.typeName" /><label class="checkbox"><input type="checkbox" :disabled="!insertInclude.has(column.name) || !column.nullable" :checked="insertNulls.has(column.name)" @change="insertNulls.has(column.name) ? insertNulls.delete(column.name) : insertNulls.add(column.name)" />NULL</label></div><p v-if="error" class="is-error">{{ error }}</p><div class="modal-actions"><button type="button" @click="insertOpen = false">取消</button><button class="primary" type="submit">插入</button></div></form></section></div>
     <CellViewer v-if="viewer" :value="viewer.value" :title="viewer.title" @close="viewer = null" />

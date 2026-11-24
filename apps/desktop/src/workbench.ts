@@ -390,14 +390,27 @@ export function useWorkbench() {
     return !executing.value && !tab.busy && !locks.has(tab.connectionId) && editableSource(tab)
   }
   function stageCell(tab: ResultTab, row: ResultRow, column: string, value: CellValue) {
+    stageCells(tab, [{ row, changes: { [column]: value } }])
+  }
+  function stageCells(tab: ResultTab, edits: readonly { row: ResultRow; changes: RowUpdate['changes'] }[]) {
     if (!canEdit(tab)) throw new Error('当前结果不可编辑')
-    const keyValues = rowKeys(tab, row)
-    const old = tab.dirty.get(row.index)
-    const changes = { ...old?.changes, [column]: value }
-    const index = tab.page!.columns.findIndex((c) => c.name === column)
-    if (JSON.stringify(row.cells[index]) === JSON.stringify(value)) delete changes[column]
-    if (Object.keys(changes).length) tab.dirty.set(row.index, { keyValues, changes })
-    else tab.dirty.delete(row.index)
+    const pending = new Map<number, RowUpdate>()
+    for (const { row, changes: values } of edits) {
+      const keyValues = rowKeys(tab, row)
+      const original = pending.get(row.index) ?? tab.dirty.get(row.index)
+      const changes = new Map(Object.entries(original?.changes ?? {}))
+      for (const [column, value] of Object.entries(values)) {
+        const index = tab.page!.columns.findIndex((candidate) => candidate.name === column)
+        if (index < 0) throw new Error('目标列已变化，请重新编辑')
+        if (JSON.stringify(row.cells[index]) === JSON.stringify(value)) changes.delete(column)
+        else changes.set(column, value)
+      }
+      pending.set(row.index, { keyValues, changes: Object.fromEntries(changes) })
+    }
+    for (const [index, update] of pending) {
+      if (Object.keys(update.changes).length) tab.dirty.set(index, update)
+      else tab.dirty.delete(index)
+    }
   }
   async function reloadTab(tab: ResultTab, guard = true, offset = 0, transform?: Pick<ResultTab, 'querySql' | 'order'>) {
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
@@ -741,7 +754,7 @@ export function useWorkbench() {
     transactions, locks, backgroundTasks, pendingEditors, status, statusError, booting, metadataReady, executing, executionConnectionId, executionConnection, migrationWarning,
     setStatus, attempt, boot, refreshConnections, selectConnection, activateTab, selectNode, toggleNode, placeholders, parameterSlots,
     editorTabs, activeEditorTabId, editorStorageWarning, openEditorTab, activateEditorTab, closeEditorTab,
-    executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, canEdit, rowKeys,
+    executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, stageCells, canEdit, rowKeys,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
     reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),

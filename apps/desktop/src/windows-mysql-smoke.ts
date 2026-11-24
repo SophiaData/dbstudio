@@ -151,6 +151,70 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     checks[check] = cleanBefore && cancelledReview && confirmedReview && stagedInTransaction
     checks.mysql_transaction = rolledBack && await readPayload() === committedValue
 
+    check = 'mysql_grid_batch_paste'
+    const ids = tab.page!.rows.slice(0, 2).map((item) => Number(cellText(item.cells[0]!)))
+    if (ids.length !== 2 || ids.some((value) => !Number.isSafeInteger(value) || value < 1 || value > 405)) {
+      throw new Error('Invalid bulk paste fixture row IDs')
+    }
+    const readPastedRows = async () => {
+      const result = await backend.runQuery(connectionNode(observer.id),
+        'SELECT id, group_id, payload, note FROM ' + database + '.items WHERE id IN (' + ids.join(',') + ') ORDER BY id',
+        { keepCursor: false })
+      return result.rows.map(({ cells }) => cells.map((cell) => cell.kind === 'null' ? null : cellText(cell)))
+    }
+    const beforePaste = JSON.stringify(await readPastedRows())
+    const paste = async (text: string, row = 0) => {
+      const grid = await tools.grid(tab)
+      const targetRow = grid.$el.querySelectorAll('tbody tr')[row]
+      const column = tab.page!.columns.findIndex((item) => item.name === 'group_id')
+      const target = targetRow?.querySelectorAll('td')[column + 1] as HTMLTableCellElement | undefined
+      if (!target || column < 0) throw new Error('Missing paste target')
+      const clipboard = new DataTransfer()
+      clipboard.setData('text/plain', text)
+      target.focus()
+      target.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true, cancelable: true }))
+      return grid.error
+    }
+    const invalid = await paste('2\tvalid\tvalue\r\nnot-a-number\trejected\tvalue')
+    const pastPage = await paste('2\tvalid\tvalue\r\n1\tsecond\tvalue', tab.page!.rows.length - 1)
+    const rejectedCleanly = invalid.includes('第 2 行') && invalid.includes('group_id') && pastPage.includes('超出当前页')
+      && tab.dirty.size === 0 && JSON.stringify(await readPastedRows()) === beforePaste
+    const batch = '2\t"from\ttable"\t\\N\r\n1\t"two\r\nlines"\t\r\n'
+    const staged = async () => {
+      if (await paste(batch)) return false
+      const drafts = [...tab.dirty.values()]
+      return drafts.length === 2 && drafts[0]?.changes.note?.kind === 'null'
+        && drafts[1]?.changes.note?.kind === 'text' && drafts[1].changes.note.text === ''
+        && !(await wb.readTransaction(id)).active && JSON.stringify(await readPastedRows()) === beforePaste
+    }
+    const applyPastedRows = async () => {
+      const grid = await tools.grid(tab)
+      const button = Array.from(grid.$el.querySelectorAll('button') as NodeListOf<HTMLButtonElement>)
+        .find((candidate) => candidate.textContent?.trim() === '应用修改 (2)')
+      if (!button) throw new Error('Missing apply action for bulk paste')
+      button.click()
+      await waitFor(() => decision.value?.title === '更新 SQL 预览')
+      decision.value!.settle('apply')
+      await waitFor(() => !wb.locks.has(id) && !tab.busy)
+      return tab.dirty.size === 0 && (await wb.readTransaction(id)).active
+        && JSON.stringify(await readPastedRows()) === beforePaste
+    }
+    const firstPaste = await staged()
+    const firstApply = firstPaste && await applyPastedRows()
+    if (!firstApply) throw new Error('Bulk paste did not become a pending transaction')
+    const revertPaste = wb.settleTransaction(id, false)
+    await waitFor(() => decision.value?.title === '回滚当前连接')
+    decision.value!.settle('confirm')
+    const reverted = await revertPaste && JSON.stringify(await readPastedRows()) === beforePaste
+    const secondApply = await staged() && await applyPastedRows()
+    if (!secondApply) throw new Error('Bulk paste could not be repeated after rollback')
+    await wb.settleTransaction(id, true)
+    const expectedRows = [
+      [String(ids[0]), '2', 'from\ttable', null],
+      [String(ids[1]), '1', 'two\r\nlines', '']
+    ].sort((left, right) => Number(left[0]) - Number(right[0]))
+    checks[check] = rejectedCleanly && reverted && JSON.stringify(await readPastedRows()) === JSON.stringify(expectedRows)
+
     check = 'mysql_generated_column_export'
     const destinationPath = fixture.exportPath.replace(/export\.csv$/, 'acceptance.sql')
     if (destinationPath === fixture.exportPath) throw new Error('Unexpected export fixture path')
