@@ -315,7 +315,9 @@ await test('UI-06_completion_tracks_current_connection_for_tree_and_result_colum
     node(`connection:${id}|table:synthetic`, 'synthetic', 'table', [node(`connection:${id}|column:tree_${id}`, `tree_${id}`, 'column')])
   ]))
   tab.description.columns.push({ name: 'result_A' })
-  wb.tabs.value.push({ ...tab, id: 'tab-B', connectionId: 'B', description: { columns: [{ name: 'result_B' }] }, page: { columns: [{ name: 'page_B' }] } })
+  wb.tabs.value.push({ ...tab, id: 'tab-B', connectionId: 'B',
+    table: { ...tab.table, id: 'connection:B|table:synthetic', parentId: 'connection:B' },
+    description: { columns: [{ name: 'result_B' }] }, page: { columns: [{ name: 'page_B' }] } })
   const { exposed: editor } = mount(Editor, { workbench: wb })
   for (const id of ['A', 'B', 'A']) {
     wb.selectConnection(id); wb.sql.value = 'synthetic.'; editor.setSelection(10)
@@ -325,6 +327,43 @@ await test('UI-06_completion_tracks_current_connection_for_tree_and_result_colum
   }
   assert.deepEqual(calls, [])
 })
+await test('completion_resolves_aliases_in_the_current_statement_and_schema', ({ wb }) => {
+  const node = (id, name, kind, children = []) => ({ ref: { id, name, kind }, children, loaded: true })
+  const table = (connection, schema, name, column) => {
+    const id = `connection:${connection}|table:${schema}.${name}`
+    return node(id, name, 'table', [node(`${id}:column`, column, 'column')])
+  }
+  const mysql = wb.connections.value.find((connection) => connection.id === 'A')
+  mysql.dialectId = 'mysql'
+  wb.dialects.value.push({ id: 'mysql', quoting: { open: '\x60', close: '\x60', escape: 'double' } })
+  wb.roots.value = [
+    node('connection:A', 'A', 'connection', [
+      table('A', 'sales', 'users', 'sales_name'),
+      table('A', 'audit', 'users', 'audit_name'),
+      table('A', 'sales', 'orders', 'order_id')
+    ]),
+    node('connection:B', 'B', 'connection', [table('B', 'sales', 'users', 'other_connection')])
+  ]
+  const { exposed: editor } = mount(Editor, { workbench: wb })
+  const complete = (draft) => {
+    const caret = draft.indexOf('|')
+    assert.ok(caret >= 0)
+    wb.sql.value = draft.replace('|', '')
+    editor.setSelection(caret)
+    return [...editor.candidates]
+  }
+
+  assert.deepEqual(complete('SELECT u.| FROM sales.users u JOIN sales.orders AS o ON u.id = o.user_id'), ['sales_name'])
+  assert.deepEqual(complete('SELECT o.or| FROM sales.users u JOIN sales.orders AS o ON u.id = o.user_id'), ['order_id'])
+  assert.deepEqual(complete('SELECT u.id FROM audit.users u; SELECT u.| FROM sales.users u'), ['sales_name'])
+  assert.deepEqual(complete('SELECT \x60user alias\x60.| FROM \x60audit\x60.\x60users\x60 AS \x60user alias\x60'), ['audit_name'])
+  assert.deepEqual(complete('SELECT u.| FROM users u'), [], 'an ambiguous unqualified source must not mix schemas')
+  assert.deepEqual(complete("SELECT 'u.|' FROM sales.users u"), [], 'literal text is not a column reference')
+  assert.deepEqual(complete('SELECT u.| FROM sales.users u /* JOIN audit.users u */'), ['sales_name'])
+  assert.deepEqual(complete('SELECT (SELECT u.| FROM audit.users u) FROM sales.users u'), [], 'nested scopes must not borrow outer metadata')
+  assert.deepEqual(calls, [])
+})
+
 for (const outcome of ['cancel', 'failure', 'success', 'close-failure']) {
   await test(`UI-07_sort_${outcome}_keeps_sql_order_and_page_consistent`, async ({ wb, tab }) => {
     const { state: grid } = mount(Grid, { workbench: wb, tab })

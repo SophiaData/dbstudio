@@ -16,6 +16,99 @@ export function currentSql(sql: string, start: number, end: number, rules: SqlSc
     ?? [...statements].reverse().find((statement) => statement.endOffset <= start)?.sql
     ?? statements[0]?.sql ?? ''
 }
+
+interface CompletionTable {
+  readonly name: string
+  readonly schema?: string
+}
+
+// Keep quoted names and literals together so keywords inside them cannot
+// introduce a table reference. The script splitter handles statement boundaries.
+const completionTokens = /(?<comment>--[^\r\n]*|#[^\r\n]*|\/\*[\s\S]*?\*\/)|(?<literal>(?<tag>\$(?:[A-Za-z_][\w]*)?\$)[\s\S]*?\k<tag>|'(?:''|\\[\s\S]|[^'\\])*')|(?<quoted>"(?:""|[^"])*"|\x60(?:\x60\x60|[^\x60])*\x60|\[[^\]]*\])|(?<word>[\p{L}_][\p{L}\p{N}_$]*)|(?<punct>\S)/gu
+const nonAliasWords = new Set(['fetch', 'for', 'natural', 'window', 'qualify', 'intersect', 'except', 'partition', 'use', 'force', 'ignore'])
+
+export function completionTable(
+  sql: string,
+  qualifierOffset: number,
+  rules: SqlScriptRules,
+  dialect: string | undefined
+): CompletionTable | null {
+  let statement
+  try {
+    const completionRules = {
+      ...rules,
+      lineCommentPrefixes: dialect === 'mysql' ? [...rules.lineCommentPrefixes, '#'] : rules.lineCommentPrefixes,
+      supportsBacktickIdentifiers: dialect === 'mysql' || rules.supportsBacktickIdentifiers,
+      supportsEscapeStrings: dialect === 'postgresql' || rules.supportsEscapeStrings,
+      supportsNestedBlockComments: dialect === 'postgresql' || rules.supportsNestedBlockComments
+    }
+    statement = splitStatements(sql, completionRules).find((item) =>
+      qualifierOffset >= item.startOffset && qualifierOffset < item.endOffset)
+  } catch {
+    return null
+  }
+  if (!statement) return null
+
+  const scanned = [...statement.sql.matchAll(completionTokens)]
+  if (scanned.some((token) => token.groups?.comment?.startsWith('/*') && token[0].indexOf('/*', 2) >= 0)) return null
+  const tokens = scanned.filter((token) => !token.groups?.comment)
+  if (tokens.some((token) => token.groups?.punct && /^['"\x60\[]$/.test(token[0]))) return null
+  const identifier = (token: RegExpMatchArray | undefined) => {
+    if (token?.groups?.word) return dialect === 'postgresql' ? token[0].toLowerCase() : token[0]
+    if (!token?.groups?.quoted) return undefined
+    const opener = token[0][0]!
+    if (opener === '[') return token[0].slice(1, -1)
+    return token[0].slice(1, -1).split(opener + opener).join(opener)
+  }
+  const keyword = (token: RegExpMatchArray | undefined) => token?.groups?.word?.toLowerCase()
+  const qualifierIndex = tokens.findIndex((token) => statement.startOffset + token.index! === qualifierOffset)
+  const qualifier = identifier(tokens[qualifierIndex])
+  if (!qualifier) return null
+  if (qualifierIndex === 0 && tokens[1]?.[0] === '.' &&
+      (tokens.length === 2 || (tokens.length === 3 && tokens[2]?.groups?.word))) return { name: qualifier }
+  if (tokens[qualifierIndex - 1]?.[0] === '.') return null
+  if (keyword(tokens[0]) !== 'select') return null
+
+  const matches: CompletionTable[] = []
+  let depth = 0
+  let inFrom = false
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!
+    if (token[0] === '(') depth++
+    if (token[0] === ')') depth--
+    const word = keyword(token)
+    if (word === 'select' || word === 'union' || word === 'intersect' || word === 'except') return null
+    if (depth !== 0) continue
+    if (word && ['where', 'group', 'having', 'order', 'limit', 'offset', 'fetch', 'for', 'window', 'qualify'].includes(word)) inFrom = false
+    if (word === 'from' && keyword(tokens[index - 1]) === 'distinct') continue
+    if (word === 'from') inFrom = true
+    if (word !== 'from' && word !== 'join' && !(inFrom && token[0] === ',')) continue
+
+    let cursor = index + 1
+    let name = identifier(tokens[cursor])
+    if (!name) continue
+    cursor++
+    let schema: string | undefined
+    if (tokens[cursor]?.[0] === '.') {
+      schema = name
+      name = identifier(tokens[cursor + 1])
+      if (!name) continue
+      cursor += 2
+    }
+    if (tokens[cursor]?.[0] === '(' || tokens[cursor]?.[0] === '.') continue
+
+    if (keyword(tokens[cursor]) === 'as') cursor++
+    const aliasWord = keyword(tokens[cursor])
+    const alias = aliasWord && (isStatementKeyword(aliasWord) || nonAliasWords.has(aliasWord))
+      ? undefined : identifier(tokens[cursor])
+    const reference = alias ?? name
+    const matching = dialect === 'postgresql' ? reference === qualifier : reference.toLowerCase() === qualifier.toLowerCase()
+    if (matching) matches.push({ name, schema })
+    index = cursor - 1 + Number(alias !== undefined)
+  }
+  return matches.length === 1 ? matches[0]! : null
+}
+
 export function formattedSql(sql: string) {
   const formatted = formatSql(sql)
   if (formatted.replace(/\s/g, '').toLowerCase() !== sql.replace(/\s/g, '').toLowerCase()) throw new Error('格式化校验失败，已保留原 SQL')

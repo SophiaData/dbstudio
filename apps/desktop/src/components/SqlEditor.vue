@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
+import { inferSchemaFromObjectId } from '../../../../src/core/er-relations'
 import { SQL_COMPLETION_KEYWORDS } from '../../../../src/core/sql-keywords'
 import { SQLITE_SCRIPT_RULES } from '../../../../src/core/sql-script'
-import { currentSql, formattedSql, highlightTokens } from '../sql-editor-model'
+import { completionTable, currentSql, formattedSql, highlightTokens } from '../sql-editor-model'
 import { connectionOf, type TreeNode, type Workbench } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; disabled?: boolean }>()
@@ -14,31 +15,51 @@ const completionOpen = ref(false)
 const completionIndex = ref(0)
 const caret = ref(0)
 const beforeCaret = computed(() => props.workbench.sql.value.slice(0, caret.value))
-const prefix = computed(() => /[A-Za-z_][\w$]*$/.exec(beforeCaret.value)?.[0] ?? '')
-const qualifier = computed(() => /([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)?$/.exec(beforeCaret.value)?.[1] ?? '')
-const rules = computed(() => props.workbench.dialects.value.find((dialect) => dialect.id === props.workbench.currentConnection.value?.dialectId)?.scriptRules ?? SQLITE_SCRIPT_RULES)
+const prefix = computed(() => /[\p{L}_][\p{L}\p{N}_$]*$/u.exec(beforeCaret.value)?.[0] ?? '')
+const qualified = computed(() => /("(?:""|[^"])*"|\x60(?:\x60\x60|[^\x60])*\x60|\[[^\]]+\]|[\p{L}_][\p{L}\p{N}_$]*)\s*\.\s*([\p{L}_][\p{L}\p{N}_$]*)?$/u.exec(beforeCaret.value))
+const qualifier = computed(() => qualified.value?.[1] ?? '')
+const dialectId = computed(() => props.workbench.currentConnection.value?.dialectId)
+const dialect = computed(() => props.workbench.dialects.value.find((item) => item.id === dialectId.value))
+const rules = computed(() => dialect.value?.scriptRules ?? SQLITE_SCRIPT_RULES)
 const tokens = computed(() => highlightTokens(props.workbench.sql.value))
 function flattenNodes(nodes: TreeNode[]): TreeNode[] { return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]) }
 function loadedObjects(nodes: TreeNode[]): string[] { return nodes.flatMap((node) => [node.ref.name, ...loadedObjects(node.children)]) }
 const connectionRoots = computed(() => props.workbench.roots.value.filter((node) => connectionOf(node.ref.id) === props.workbench.currentConnectionId.value))
 const connectionTabs = computed(() => props.workbench.tabs.value.filter((tab) => tab.connectionId === props.workbench.currentConnectionId.value))
-function columnsFor(name: string): string[] {
-  const normalized = name.toLowerCase()
-  const treeColumns = flattenNodes(connectionRoots.value)
-    .filter((node) => node.ref.kind === 'table' && node.ref.name.toLowerCase() === normalized)
-    .flatMap((table) => flattenNodes(table.children).filter((node) => node.ref.kind === 'column').map((node) => node.ref.name))
-  const resultColumns = connectionTabs.value
-    .filter((tab) => tab.table?.name.toLowerCase() === normalized && tab.description)
-    .flatMap((tab) => tab.description!.columns.map((column) => column.name))
-  return [...new Set([...treeColumns, ...resultColumns])]
+function columnsFor(name: string, schema?: string): string[] {
+  const same = (actual: string, expected: string) => dialectId.value === 'postgresql'
+    ? actual === expected : actual.toLowerCase() === expected.toLowerCase()
+  const objects = new Map<string, Set<string>>()
+  const collect = (object: { id: string; kind: string; name: string }, columns: string[]) => {
+    if (connectionOf(object.id) !== props.workbench.currentConnectionId.value) return
+    if ((object.kind !== 'table' && object.kind !== 'view') || !same(object.name, name)) return
+    const objectSchema = inferSchemaFromObjectId(object.id, dialectId.value)
+    if (schema !== undefined && (objectSchema === null || !same(objectSchema, schema))) return
+    const values = objects.get(object.id) ?? new Set<string>()
+    for (const column of columns) values.add(column)
+    objects.set(object.id, values)
+  }
+  for (const node of flattenNodes(connectionRoots.value)) {
+    if (node.ref.kind === 'table' || node.ref.kind === 'view') {
+      collect(node.ref, flattenNodes(node.children).filter((child) => child.ref.kind === 'column').map((child) => child.ref.name))
+    }
+  }
+  for (const tab of connectionTabs.value) {
+    if (tab.table && tab.description && !tab.invalidated) collect(tab.table, tab.description.columns.map((column) => column.name))
+  }
+  return objects.size === 1 ? [...objects.values().next().value!] : []
 }
 const candidates = computed(() => {
-  const columns = qualifier.value ? columnsFor(qualifier.value) : []
-  const metadata = loadedObjects(connectionRoots.value)
-    .concat(connectionTabs.value.flatMap((tab) => tab.page?.columns.map((column) => column.name) ?? []))
-  const values = qualifier.value && columns.length
-    ? columns
-    : [...new Set([...SQL_COMPLETION_KEYWORDS.map((word) => word.toUpperCase()), ...metadata])]
+  const context = qualified.value
+  let values: string[]
+  if (context) {
+    const source = completionTable(props.workbench.sql.value, context.index, rules.value, dialectId.value)
+    values = source ? columnsFor(source.name, source.schema) : []
+  } else {
+    const metadata = loadedObjects(connectionRoots.value)
+      .concat(connectionTabs.value.flatMap((tab) => tab.page?.columns.map((column) => column.name) ?? []))
+    values = [...SQL_COMPLETION_KEYWORDS.map((word) => word.toUpperCase()), ...metadata]
+  }
   return [...new Set(values)]
     .filter((word) => !prefix.value || word.toLowerCase().startsWith(prefix.value.toLowerCase()))
     .sort((left, right) => left.localeCompare(right))
@@ -90,9 +111,20 @@ function scroll() {
 async function acceptCompletion(index = completionIndex.value) {
   const word = candidates.value[index]
   if (!word || !editor.value) return
+  const quoting = dialect.value?.quoting
+  const needsQuotes = !/^[\p{L}_][\p{L}\p{N}_$]*$/u.test(word)
+    || SQL_COMPLETION_KEYWORDS.includes(word.toLowerCase())
+    || (dialectId.value === 'postgresql' && word !== word.toLowerCase())
+  let inserted = word
+  if (qualified.value && quoting && needsQuotes) {
+    const escaped = quoting.escape === 'double'
+      ? word.split(quoting.close).join(quoting.close + quoting.close)
+      : word.split('\\').join('\\\\').split(quoting.close).join('\\' + quoting.close)
+    inserted = quoting.open + escaped + quoting.close
+  }
   const start = caret.value - prefix.value.length
-  props.workbench.sql.value = props.workbench.sql.value.slice(0, start) + word + props.workbench.sql.value.slice(caret.value)
-  const next = start + word.length
+  props.workbench.sql.value = props.workbench.sql.value.slice(0, start) + inserted + props.workbench.sql.value.slice(caret.value)
+  const next = start + inserted.length
   completionOpen.value = false
   await nextTick()
   if (!editor.value) return
@@ -114,8 +146,9 @@ function keydown(event: KeyboardEvent) {
     return
   }
   if (completionOpen.value) {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); completionIndex.value = (completionIndex.value + (event.key === 'ArrowDown' ? 1 : -1) + Math.max(1, candidates.value.length)) % Math.max(1, candidates.value.length); return }
-    if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); void acceptCompletion(); return }
+    const count = candidates.value.length
+    if (count && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); completionIndex.value = (completionIndex.value + (event.key === 'ArrowDown' ? 1 : -1) + count) % count; return }
+    if (count && (event.key === 'Enter' || event.key === 'Tab')) { event.preventDefault(); void acceptCompletion(); return }
     if (event.key === 'Escape') { event.preventDefault(); completionOpen.value = false; return }
   }
   if (event.shiftKey && event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); void format(); return }
