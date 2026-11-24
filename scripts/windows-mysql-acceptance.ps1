@@ -82,7 +82,7 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload) VALUES $values;
         $app.WaitForExit()
     }
     ($stdout.Result + [char]10 + $stderr.Result) -split '\r?\n' | Where-Object {
-        $_ -match '^\[windows-acceptance\] (host-start|page-finished|smokeFixture|smokeReport)$'
+        $_ -match '^\[windows-acceptance\] (host-start|page-finished|smokeFixture|smokeReport|[A-Za-z]{1,32}:(enter|ok|error))$'
     } | Write-Output
     $reportPath = Join-Path $env:DBSTUDIO_NATIVE_SMOKE_ROOT 'report.json'
     if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {

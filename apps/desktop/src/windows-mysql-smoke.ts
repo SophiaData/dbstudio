@@ -18,6 +18,19 @@ async function waitFor(check: () => boolean | Promise<boolean>) {
 export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost, fixture: SmokeFixture) {
   const checks: Record<string, boolean> = { isolated_fixture: fixture.isolated }
   let check = 'mysql_connection'
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      exercise(),
+      new Promise<{ ok: boolean; checks: Record<string, boolean> }>((resolve) => {
+        deadline = setTimeout(() => resolve({ ok: false, checks: { ...checks, [check]: false, stage_timed_out: false } }), 75000)
+      })
+    ])
+  } finally {
+    clearTimeout(deadline)
+  }
+
+  async function exercise() {
   try {
     const name = 'Windows acceptance'
     await wb.saveConnection({ dialectId: 'mysql', name, options }, {})
@@ -110,4 +123,5 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     checks[check] = false
   }
   return { ok: Object.values(checks).every(Boolean), checks }
+  }
 }

@@ -2,6 +2,7 @@ import { backend, smokeFixture } from './backend'
 import { invoke } from '@tauri-apps/api/core'
 import { cellText, connectionNode, inputCell, useWorkbench, type TreeNode, type Workbench } from './workbench'
 import { runNativeToolSmoke, type NativeToolHost } from './native-tool-smoke'
+import { runWindowsMysqlSmoke } from './windows-mysql-smoke'
 import { decision } from './dialogs'
 
 type SmokeResult = { ok: boolean; checks: Record<string, boolean> }
@@ -24,7 +25,6 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       checks.isolated_fixture = fixture.isolated
       if (!fixture.isolated) return { ok: false, checks }
       if (import.meta.env.VITE_DBSTUDIO_WINDOWS_MYSQL === '1') {
-        const { runWindowsMysqlSmoke } = await import('./windows-mysql-smoke')
         return await runWindowsMysqlSmoke(wb, tools, fixture)
       }
       const name = `Vue Native ${crypto.randomUUID().slice(0, 8)}`

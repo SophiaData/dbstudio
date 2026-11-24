@@ -297,11 +297,22 @@ async fn backend_call(
     let application = state.application.clone();
     #[cfg(feature = "test-hooks")]
     let observed_method = method.clone();
+    #[cfg(feature = "test-hooks")]
+    let windows_acceptance = app.config().identifier == "io.dbstudio.windows-mysql-smoke";
+    #[cfg(feature = "test-hooks")]
+    if windows_acceptance {
+        eprintln!("[windows-acceptance] {observed_method}:enter");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let observed_started = std::time::Instant::now();
     #[cfg(feature = "mysql-acceptance")]
     let _=state.mysql.native_startup_trace("native_enter",&method);
     let joined = tauri::async_runtime::spawn_blocking(move || application.call(&method, args)).await;
+    #[cfg(feature = "test-hooks")]
+    if windows_acceptance {
+        let outcome = if matches!(&joined, Ok(Ok(_))) { "ok" } else { "error" };
+        eprintln!("[windows-acceptance] {observed_method}:{outcome}");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let _=state.mysql.native_startup_trace(if matches!(&joined,Ok(Ok(_))) {"native_returned"}else{"native_failed"},&observed_method);
     let result=joined.map_err(|_|internal_error())?;
