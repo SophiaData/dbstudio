@@ -36,6 +36,10 @@ export interface EditorExecution {
   readonly connectionRevision: number
   readonly sql: string
 }
+export interface SortKey {
+  readonly column: string
+  readonly direction: 'ASC' | 'DESC'
+}
 export interface ResultTab {
   id: string
   connectionId: string
@@ -55,7 +59,7 @@ export interface ResultTab {
   dirty: Map<number, RowUpdate>
   selectedRows: Set<number>
   filter: string
-  order: { column: string; direction: 'ASC' | 'DESC' } | null
+  order: readonly SortKey[]
   generation: number
 }
 export interface ActiveTabContext {
@@ -253,7 +257,7 @@ export function useWorkbench() {
     const tab: ResultTab = reactive({
       id: crypto.randomUUID(), connectionId, editorTabId, title, table, description, sql: sqlText, querySql: sqlText,
       parameters: [], result: null, page: null, message: '', busy: false, invalidated: false,
-      dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
+      dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
     })
     tabs.value.push(tab)
     if (!editorTabId || activeEditorTabId.value === editorTabId) activateTab(tab)
@@ -422,8 +426,13 @@ export function useWorkbench() {
     const filter = parseFilter(tab.filter, quoteColumn)
     if (!filter.ok) throw new Error(filter.error)
     const base = tab.sql.trim().replace(/;\s*$/, '')
-    let querySql = buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
-    if (order) querySql += ` ORDER BY ${quoteColumn(order.column)} ${order.direction}`
+    let querySql = order.length || filter.conditions.length
+      ? buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
+      : base
+    if (order.length) {
+      const keys = order.map(({ column, direction }) => `${quoteColumn(column)} ${direction}`)
+      querySql += ` ORDER BY ${keys.join(', ')}`
+    }
     await reloadTab(tab, false, 0, { querySql, order })
   }
   async function applyTab(tab: ResultTab) {

@@ -103,7 +103,7 @@ function fixture() {
     id: 'tab-A', connectionId: 'A', title: 'synthetic', table: { id: 'connection:A|table:synthetic', kind: 'table', name: 'synthetic', parentId: 'connection:A', hasChildren: false },
     description: { hasUniqueKey: true, columns: [{ name: 'id', typeName: 'INTEGER', primaryKeyOrdinal: 1, nullable: false, requiredOnInsert: true }] },
     sql: 'SELECT id FROM synthetic', querySql: 'SELECT id FROM synthetic', parameters: [], result: page(), page: page(),
-    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
+    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
   })
   wb.tabs.value.push(tab); wb.activateTab(tab)
   methods = {
@@ -336,19 +336,60 @@ for (const outcome of ['cancel', 'failure', 'success', 'close-failure']) {
     if (outcome === 'cancel') { assert.ok(decision.value); decision.value.settle('cancel') }
     await pending
     if (outcome === 'cancel' || outcome === 'failure') {
-      assert.equal(tab.order, null); assert.equal(tab.querySql, sql); assert.equal(tab.page, original)
+      assert.deepEqual(tab.order, []); assert.equal(tab.querySql, sql); assert.equal(tab.page, original)
       if (outcome === 'cancel') assert.equal(calls.length, 0)
     } else {
-      assert.deepEqual(tab.order, { column: 'id', direction: 'ASC' })
+      assert.deepEqual(tab.order, [{ column: 'id', direction: 'ASC' }])
       assert.match(tab.querySql, /ORDER BY "id" ASC$/); assert.notEqual(tab.page, original)
     }
     assert.equal(tab.busy, false); assert.equal(wb.locks.size, 0)
     tab.dirty.clear(); methods.runQuery = async () => ({ ...original, cursorId: 'retry-cursor' }); methods.closeCursor = async () => null
     await grid.sort('id')
-    assert.equal(tab.order.direction, outcome === 'cancel' || outcome === 'failure' ? 'ASC' : 'DESC')
+    assert.equal(tab.order[0].direction, outcome === 'cancel' || outcome === 'failure' ? 'ASC' : 'DESC')
     assert.equal(calls.filter((call) => call.method === 'runQuery').at(-1).args[1], tab.querySql)
   })
 }
+await test('shift_sort_sends_ordered_keys_and_restores_the_original_query_on_clear', async ({ wb, tab }) => {
+  const { state: grid } = mount(Grid, { workbench: wb, tab })
+  const originalSql = 'SELECT id, category AS "a""b" FROM synthetic ORDER BY id DESC LIMIT 25'
+  tab.sql = originalSql
+  tab.querySql = originalSql
+  const page = {
+    ...tab.page,
+    columns: [...tab.page.columns, { name: 'a"b', type: 'text' }],
+    offset: 200
+  }
+  tab.page = page
+  let queryCount = 0
+  methods.runQuery = async (_, sql, options) => ({
+    ...page, cursorId: `sort-${++queryCount}`, executedSql: sql, offset: options.offset
+  })
+  const latestQuery = () => calls.filter((call) => call.method === 'runQuery').at(-1).args
+
+  await grid.sort('id')
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC, "a""b" ASC$/)
+  assert.ok(latestQuery()[1].includes(`(${originalSql})`), 'original ORDER BY and LIMIT must stay in the derived table')
+  assert.equal(latestQuery()[2].offset, 0)
+  assert.equal(tab.page.offset, 0)
+
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC, "a""b" DESC$/)
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC$/)
+
+  await grid.sort('a"b', true)
+  tab.filter = 'id >= 5'
+  await wb.transformTab(tab)
+  assert.match(latestQuery()[1], /WHERE "id" >= 5 ORDER BY "id" ASC, "a""b" ASC$/)
+  await grid.clearSort()
+  assert.match(latestQuery()[1], /WHERE "id" >= 5$/)
+  assert.deepEqual(tab.order, [])
+  tab.filter = ''
+  await wb.transformTab(tab)
+  assert.equal(latestQuery()[1], originalSql)
+})
+
 for (const failedMethod of ['transactionState', 'runQuery', 'closeCursor']) {
   await test(`UI-09_insert_success_${failedMethod}_failure_closes_form_and_blocks_resubmit`, async ({ wb, tab }) => {
     const { state: state, exposed: grid } = mount(Grid, { workbench: wb, tab })

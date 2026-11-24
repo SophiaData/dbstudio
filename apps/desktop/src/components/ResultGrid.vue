@@ -6,7 +6,7 @@ import CellViewer from './CellViewer.vue'
 import LoadedExportDialog from './LoadedExportDialog.vue'
 import { fullCell, textValue } from '../result-export'
 import { writeClipboardText } from '../clipboard'
-import { cellText, inputCell, type Workbench, type ResultTab } from '../workbench'
+import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
 const editing = ref<{ row: ResultRow; column: number; raw: string; kind: string; isNull: boolean } | null>(null)
@@ -191,10 +191,38 @@ function saveCell() {
     editing.value = null
   } catch (cause) { error.value = errorText(cause) }
 }
-async function sort(column: string) {
-  if (locked.value || props.tab.invalidated) return
-  const order: ResultTab['order'] = { column, direction: props.tab.order?.column === column && props.tab.order.direction === 'ASC' ? 'DESC' : 'ASC' }
+const ambiguousSortColumns = computed(() => {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const { name } of props.tab.page?.columns ?? []) {
+    if (seen.has(name)) duplicates.add(name)
+    seen.add(name)
+  }
+  return duplicates
+})
+const sortIndicators = computed(() => new Map(props.tab.order.map(({ column, direction }, index) => {
+  const arrow = direction === 'ASC' ? '↑' : '↓'
+  return [column, props.tab.order.length > 1 ? `${arrow}${index + 1}` : arrow] as const
+})))
+async function sort(column: string, extend = false) {
+  if (locked.value || props.tab.invalidated || ambiguousSortColumns.value.has(column)) return
+  const current = props.tab.order
+  let order: SortKey[]
+  if (!extend) {
+    const descending = current[0]?.column === column && current[0].direction === 'ASC'
+    order = [{ column, direction: descending ? 'DESC' : 'ASC' }]
+  } else {
+    order = [...current]
+    const index = order.findIndex((key) => key.column === column)
+    if (index === -1) order.push({ column, direction: 'ASC' })
+    else if (order[index]?.direction === 'ASC') order[index] = { column, direction: 'DESC' }
+    else order.splice(index, 1)
+  }
   await props.workbench.attempt(() => props.workbench.transformTab(props.tab, order))
+}
+async function clearSort() {
+  if (locked.value || props.tab.invalidated || !props.tab.order.length) return
+  await props.workbench.attempt(() => props.workbench.transformTab(props.tab, []))
 }
 function beginInsert() {
   invalidateCellEdit()
@@ -238,10 +266,24 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, true))">提交</button>
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, false))">回滚</button>
     </div>
-    <form v-if="tab.result && !tab.invalidated" class="filter-bar" @submit.prevent="workbench.attempt(() => workbench.transformTab(tab))"><label class="muted" :for="`filter-${tab.id}`">筛选</label><input :id="`filter-${tab.id}`" v-model="tab.filter" placeholder="status = 'active' AND age >= 18" :disabled="locked" /><button :disabled="locked">应用筛选</button></form>
+    <form v-if="tab.result && !tab.invalidated" class="filter-bar" @submit.prevent="workbench.attempt(() => workbench.transformTab(tab))">
+      <label class="muted" :for="`filter-${tab.id}`">筛选</label>
+      <input :id="`filter-${tab.id}`" v-model="tab.filter" placeholder="status = 'active' AND age >= 18" :disabled="locked" />
+      <button :disabled="locked">应用筛选</button>
+      <button v-if="tab.order.length" type="button" :disabled="locked" @click="clearSort">清除排序</button>
+    </form>
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
     <div v-if="tab.page" class="grid-scroll">
-      <table class="data-table"><thead><tr><th class="row-number">#</th><th v-for="(column, index) in tab.page.columns" :key="index"><button class="column-sort" :disabled="locked || tab.invalidated" @click="sort(column.name)">{{ column.name }}{{ tab.order?.column === column.name ? tab.order.direction === 'ASC' ? ' ↑' : ' ↓' : '' }}</button><small>{{ column.type }}</small></th></tr></thead>
+      <table class="data-table"><thead><tr><th class="row-number">#</th>
+        <th v-for="(column, index) in tab.page.columns" :key="index">
+          <button class="column-sort"
+            :disabled="locked || tab.invalidated || ambiguousSortColumns.has(column.name)"
+            :title="ambiguousSortColumns.has(column.name) ? '结果列名重复，请先在 SQL 中设置不同别名' : '点击切换单列排序，按住 Shift 点击添加或调整多列排序'"
+            @click="sort(column.name, $event.shiftKey)">
+            {{ column.name }} <span v-if="sortIndicators.has(column.name)">{{ sortIndicators.get(column.name) }}</span>
+          </button><small>{{ column.type }}</small>
+        </th>
+      </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
           <td v-for="(column, index) in tab.page.columns" :key="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @click="selectCell(row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>

@@ -78,7 +78,7 @@ function fixture(offset = 0, { preserveStorage = false } = {}) {
     ] },
     sql: initial.executedSql, querySql: initial.executedSql, parameters: [], result: initial, page: initial,
     message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(),
-    filter: '', order: null, generation: 0
+    filter: '', order: [], generation: 0
   }
   wb.tabs.value.push(tab)
   const active = wb.tabs.value[0]
