@@ -1,5 +1,6 @@
 import type { ObjectRef } from '../../../src/core/model'
 import { backend, type SmokeFixture } from './backend'
+import { decision } from './dialogs'
 import type { NativeToolHost } from './native-tool-smoke'
 import { cellText, connectionNode, type Workbench } from './workbench'
 
@@ -79,7 +80,10 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     const active = await backend.runQuery(node, 'SELECT CONNECTION_ID() AS id', { keepCursor: false })
     const serverId = Number(cellText(active.rows[0]!.cells[0]!))
     if (!Number.isSafeInteger(serverId) || serverId <= 0) throw new Error('Invalid fixture connection ID')
-    const pending = wb.executeScript(`SELECT id FROM ${database}.items WHERE id = 1 AND SLEEP(25) = 0`).then(() => false, () => true)
+    const pending = wb.executeScript(`SELECT id FROM ${database}.items WHERE id = 1 AND SLEEP(25) = 0`).then(
+      () => wb.activeTab.value?.page?.rows.length === 0,
+      () => true
+    )
     await waitFor(async () => {
       const state = await backend.runQuery(connectionNode(observer.id),
         `SELECT COUNT(*) AS visible FROM information_schema.PROCESSLIST WHERE ID = ${serverId} AND INFO LIKE '%SLEEP(25)%'`,
@@ -89,6 +93,8 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     await wb.cancelExecution()
     const requested = wb.status.value.includes('已请求取消执行')
     const stopped = await pending
+    const cancelledTab = wb.activeTab.value
+    if (cancelledTab && cancelledTab !== tab) await wb.closeTab(cancelledTab)
     await wb.executeScript('SELECT 271828 AS next_query')
     checks[check] = requested && stopped && cellText(wb.activeTab.value!.page!.rows[0]!.cells[0]!) === '271828'
 
@@ -103,7 +109,10 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     }
     wb.stageCell(tab, row, 'payload', { kind: 'text', text: 'uncommitted-fixture' })
     await wb.applyTab(tab)
-    await wb.settleTransaction(id, false)
+    const rollback = wb.settleTransaction(id, false)
+    await waitFor(() => decision.value?.title === '回滚当前连接')
+    decision.value!.settle('confirm')
+    if (!await rollback) throw new Error('Fixture rollback was not confirmed')
     const rolledBack = await readPayload() === `row-${rowId}`
     if (tab.page!.offset === 0) await wb.pageTab(tab, 1)
     const restored = tab.page!.rows.find((item) => cellText(item.cells[0]!) === String(rowId))
