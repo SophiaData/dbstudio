@@ -1,0 +1,49 @@
+name: Windows installed candidate acceptance
+
+on:
+  push:
+    branches: [ci/windows-installed-candidate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+jobs:
+  acceptance:
+    runs-on: windows-2025
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the production Windows candidate
+        run: pnpm build --ci --no-sign --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Create the Windows candidate manifest
+        run: node scripts/native-release-gate.mjs manifest win-x64 target/x86_64-pc-windows-msvc/release/bundle native-candidates/win-x64
+      - name: Install the candidate and verify it against isolated MySQL
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -Sta -File ./scripts/windows-mysql-acceptance.ps1 -CandidateDirectory ./native-candidates/win-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            native-candidates/win-x64/
+            candidate-acceptance.json
+          if-no-files-found: error

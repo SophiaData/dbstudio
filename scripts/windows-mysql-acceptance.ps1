@@ -1,4 +1,6 @@
 # Run only on an ephemeral GitHub-hosted runner with a synthetic loopback database.
+param([string]$CandidateDirectory)
+
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'This fixture requires a GitHub-hosted Windows runner.'
@@ -22,7 +24,7 @@ if (-not $server) { throw 'The runner image does not expose mysqld.exe.' }
 $mysql = Join-Path (Split-Path -Parent $server) 'mysql.exe'
 if (-not (Test-Path -LiteralPath $mysql -PathType Leaf)) { throw 'MySQL CLI is missing.' }
 $binary = Join-Path $PWD 'target\debug\dbstudio-desktop.exe'
-if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'The Windows test binary is missing.' }
+if (-not $CandidateDirectory -and -not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'The Windows test binary is missing.' }
 
 $runKey = [Guid]::NewGuid().ToString('N')
 $data = Join-Path $env:RUNNER_TEMP "dbstudio-mysql-$runKey"
@@ -69,6 +71,10 @@ CREATE USER 'acceptance'@'127.0.0.1';
 GRANT SELECT, UPDATE ON dbstudio_acceptance.* TO 'acceptance'@'127.0.0.1';
 INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $values;
 "@
+    if ($CandidateDirectory) {
+        & (Join-Path $PSScriptRoot 'windows-installed-candidate.ps1') -CandidateDirectory $CandidateDirectory -Port $port -ReadFixtureSql ${function:Invoke-FixtureSql}
+        return
+    }
     $launch = [Diagnostics.ProcessStartInfo]::new($binary)
     $launch.UseShellExecute = $false
     $launch.CreateNoWindow = $true
