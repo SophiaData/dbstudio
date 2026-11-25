@@ -104,3 +104,12 @@ jobs:
         # 早先这里是手抄的步骤列表，加测试只改一边就会静默漏跑——
         # 而且不报错，只是悄悄少验证了一件事。
         run: pnpm run verify:node
+
+      - name: 核心单测（单 worker）
+        run: pnpm run test:core-unit --maxWorkers=1 --no-file-parallelism
+
+  native:
+    name: Native checks after Node verification
+    if: github.event_name == 'pull_request'
+    needs: verify
+    uses: ./.github/workflows/native-verify.yml
