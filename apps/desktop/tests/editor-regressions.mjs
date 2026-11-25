@@ -120,6 +120,18 @@ await test('selection_and_current_all_shortcuts_use_existing_sql_splitter', asyn
   assert.equal(events.length, 3)
 })
 
+await test('locked_editor_rejects_a_stale_completion_action', async ({ wb, disabled, edit, getEditor }) => {
+  edit('SEL')
+  const index = getEditor().candidates.indexOf('SELECT')
+  assert.ok(index >= 0)
+  getEditor().completionOpen = true
+  disabled.value = true
+  await nextTick()
+  assert.equal(getEditor().completionOpen, false)
+  await getEditor().acceptCompletion(index)
+  assert.equal(wb.sql.value, 'SEL')
+})
+
 await test('tab_switch_preserves_independent_history_selection_and_target', async ({ wb, edit, getEditor, key, events }) => {
   const tabA = wb.activeEditorTabId.value
   edit('SELECT 11')

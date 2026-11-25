@@ -115,7 +115,7 @@ function setSelection(start: number, end = start) {
 }
 async function acceptCompletion(index = completionIndex.value) {
   const word = candidates.value[index]
-  if (!word || !editor.value) return
+  if (props.disabled || composing || !word || !editor.value) return
   const quoting = dialect.value?.quoting
   const needsQuotes = !/^[\p{L}_][\p{L}\p{N}_$]*$/u.test(word)
     || SQL_COMPLETION_KEYWORDS.includes(word.toLowerCase())
@@ -174,7 +174,10 @@ watch(() => props.workbench.sql.value, (text) => {
   // External loads and edits stay undoable, without echoing editor updates back into history.
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, userEvent: 'input.external' })
 }, { flush: 'sync' })
-watch(() => props.disabled, () => editor.value?.dispatch({ effects: editable.reconfigure(editability()) }))
+watch(() => props.disabled, () => {
+  if (props.disabled) completionOpen.value = false
+  editor.value?.dispatch({ effects: editable.reconfigure(editability()) })
+})
 watch(dialectId, () => {
   if (props.workbench.activeEditorTabId.value === editorTabId) editor.value?.dispatch({ effects: language.reconfigure(sqlLanguage()) })
 })
