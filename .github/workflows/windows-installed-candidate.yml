@@ -118,6 +118,12 @@ jobs:
         if: env.CANDIDATE_RUN_ID == ''
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Reuse compiled Rust dependencies
+        if: env.CANDIDATE_RUN_ID == ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-installed-x64
+          workspaces: '. -> target'
       - name: Install locked frontend dependencies
         if: env.CANDIDATE_RUN_ID == ''
         run: pnpm install --frozen-lockfile
