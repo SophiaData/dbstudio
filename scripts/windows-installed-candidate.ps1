@@ -144,6 +144,46 @@ function Set-EditText($Edit, [string]$Value) {
     Stop-Acceptance 'UI_EDIT_PATTERN_UNAVAILABLE'
 }
 
+function Read-SqlEditorText($Editor) {
+    $pattern = $null
+    if ($Editor.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
+        return $pattern.DocumentRange.GetText(-1).Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
+    }
+    if ($Editor.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+        return $pattern.Current.Value.Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
+    }
+    Stop-Acceptance 'SQL_EDITOR_TEXT_PATTERN_UNAVAILABLE'
+}
+
+function Wait-SqlEditorText($Editor, [string]$Expected) {
+    $deadline = [datetime]::UtcNow.AddSeconds(10)
+    do {
+        if ((Read-SqlEditorText $Editor) -ceq $Expected) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    Stop-Acceptance 'SQL_EDITOR_TEXT_MISMATCH'
+}
+
+function Set-SqlEditorText($App, [string]$Value) {
+    $types = @([Windows.Automation.ControlType]::Edit, [Windows.Automation.ControlType]::Document)
+    $editor = Find-Control $App.Window $types 'SQL 编辑器'
+    if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'SQL_EDITOR_WINDOW_NOT_FOCUSED' }
+    $editor.SetFocus()
+    if ([Windows.Automation.AutomationElement]::FocusedElement.Current.Name -cne 'SQL 编辑器') {
+        Stop-Acceptance 'SQL_EDITOR_NOT_FOCUSED'
+    }
+    # Exercise the real contenteditable input, including Unicode and native undo/redo.
+    $before = Read-SqlEditorText $editor
+    [Windows.Forms.Clipboard]::SetText($Value)
+    [Windows.Forms.SendKeys]::SendWait('^a^v')
+    Wait-SqlEditorText $editor $Value
+    [Windows.Forms.SendKeys]::SendWait('^z')
+    Wait-SqlEditorText $editor $before
+    [Windows.Forms.SendKeys]::SendWait('^y')
+    Wait-SqlEditorText $editor $Value
+    return $editor
+}
+
 function Select-MySql($Window) {
     $combo = Find-Control $Window ([Windows.Automation.ControlType]::ComboBox) '数据库类型'
     $expand = $null
@@ -504,8 +544,9 @@ public static class AcceptanceDesktop {
     }
     $script:action = 'connect_and_query'
     Invoke-Button $app.Window '保存并连接'
-    Set-EditText (Find-Control $app.Window $edit 'SQL 编辑器') 'SELECT payload FROM dbstudio_acceptance.items WHERE id = 1;'
-    Invoke-Button $app.Window '执行 SQL'
+    $sqlEditor = Set-SqlEditorText $app "-- 编辑器验收`nSELECT payload FROM dbstudio_acceptance.items WHERE id = 1;"
+    $report.checks.editorClipboardAndHistory = $true
+    [Windows.Forms.SendKeys]::SendWait('^{ENTER}')
     $null = Find-Control $app.Window $cell 'row-1' -AllowOffscreen
     $report.checks.connectedAndQueried = $true
 

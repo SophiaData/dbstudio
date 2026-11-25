@@ -110,7 +110,7 @@ export async function runNativeToolSmoke(wb: Workbench, host: NativeToolHost, fi
     wb.sql.value = `select id,value from ${quotedTarget} where id=1`
     const unformatted = wb.sql.value
     await editor.format()
-    checks.vue_sql_editor_format = !editor.error && wb.sql.value.replace(/\s/g, '').toLowerCase() === unformatted.replace(/\s/g, '').toLowerCase() && editor.tokens.some((token) => token.kind === 'keyword')
+    checks.vue_sql_editor_format = !editor.error && wb.sql.value.replace(/\s/g, '').toLowerCase() === unformatted.replace(/\s/g, '').toLowerCase() && editor.editor?.state.doc.toString() === wb.sql.value && Boolean(editor.editor.dom.querySelector('.cm-lineNumbers'))
     wb.sql.value = 'SELECT val'
     editor.setSelection(wb.sql.value.length)
     editor.completionOpen = true

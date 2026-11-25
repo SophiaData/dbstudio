@@ -52,6 +52,22 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     editor.setSelection('SELECT i.'.length)
     checks[check] = editor.candidates.includes('payload') && editor.candidates.includes('generated_value')
 
+    check = 'mysql_codemirror_execution'
+    const view = editor.editor
+    if (!view || !view.dom.querySelector('.cm-lineNumbers')) throw new Error('CodeMirror is not mounted')
+    const editorSql = "-- 中文输入验收\nSELECT 'editor-中文' AS editor_value; SELECT 17 AS following;"
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: editorSql } })
+    editor.setSelection(editorSql.indexOf('SELECT'))
+    const beforeEditorExecution = wb.tabs.value.length
+    view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, isComposing: true, bubbles: true, cancelable: true }))
+    const imeDidNotExecute = wb.tabs.value.length === beforeEditorExecution && !wb.executing.value
+    view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }))
+    await waitFor(() => !wb.executing.value && wb.tabs.value.length > beforeEditorExecution)
+    const editorResult = wb.activeTab.value!
+    checks[check] = imeDidNotExecute && wb.tabs.value.length === beforeEditorExecution + 1
+      && cellText(editorResult.page!.rows[0]!.cells[0]!) === 'editor-中文'
+    await wb.closeTab(editorResult)
+
     check = 'mysql_multi_sort_pages'
     const grid = await tools.grid(tab)
     const header = (column: string): HTMLButtonElement => {

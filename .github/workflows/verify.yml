@@ -113,3 +113,15 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: verify
     uses: ./.github/workflows/native-verify.yml
+
+  windows-mysql:
+    name: Windows WebView after native checks
+    if: github.event_name == 'pull_request'
+    needs: native
+    uses: ./.github/workflows/windows-mysql-acceptance.yml
+
+  windows-installed:
+    name: Windows installed candidate after WebView checks
+    if: github.event_name == 'pull_request'
+    needs: windows-mysql
+    uses: ./.github/workflows/windows-installed-candidate.yml

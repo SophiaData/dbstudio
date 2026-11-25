@@ -4,6 +4,14 @@
 
 ---
 
+## 编辑 SQL
+
+编辑区显示行号、语法高亮、当前行和匹配括号。Tab/Shift+Tab 可调整所选行的缩进，Ctrl/Cmd+Z 撤销，Windows 上 Ctrl+Y 或 Ctrl+Shift+Z 重做，macOS 上 Cmd+Shift+Z 重做。格式化和接受字段补全也可撤销。
+
+切换仍打开的 SQL 标签时，各自保留当前会话内的撤销记录、光标、选区和滚动位置。重启后恢复 SQL 草稿，撤销记录不跨应用重启保存。中文输入法组合输入期间，Enter 用于确认输入，不执行 SQL。
+
+Ctrl/Cmd+Enter 执行选区或当前语句，Shift+Enter 执行全部；补全列表打开时这些执行键仍然有效。普通 Enter/Tab 接受补全，Esc 关闭列表。
+
 ## 执行 SQL
 
 在工作台里写 SQL，点执行。
