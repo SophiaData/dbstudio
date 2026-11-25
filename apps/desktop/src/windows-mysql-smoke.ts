@@ -57,7 +57,9 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     if (!view || !view.dom.querySelector('.cm-lineNumbers')) throw new Error('CodeMirror is not mounted')
     const editorSql = "-- 中文输入验收\nSELECT 'editor-中文' AS editor_value; SELECT 17 AS following;"
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: editorSql } })
+    view.focus()
     editor.setSelection(editorSql.indexOf('SELECT'))
+    if (!editor.currentStatement().includes("'editor-中文'")) throw new Error('Editor selection did not reach the intended statement')
     const beforeEditorExecution = wb.tabs.value.length
     view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, isComposing: true, bubbles: true, cancelable: true }))
     const imeDidNotExecute = wb.tabs.value.length === beforeEditorExecution && !wb.executing.value
