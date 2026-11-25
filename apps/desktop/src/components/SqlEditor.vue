@@ -136,9 +136,15 @@ async function acceptCompletion(index = completionIndex.value) {
   editor.value.focus()
   caret.value = next
 }
+function isCompositionKey(event: KeyboardEvent) {
+  return composing || event.isComposing || event.keyCode === 229 || editor.value?.composing
+}
+function guardComposition(event: KeyboardEvent) {
+  // Keep the native IME default action, but do not run CodeMirror's Enter commands.
+  if (isCompositionKey(event)) event.stopImmediatePropagation()
+}
 function keydown(event: KeyboardEvent) {
-  // Enter confirms IME text as well as SQL/completions. Composition owns the key.
-  if (composing || event.isComposing || event.keyCode === 229 || editor.value?.composing) return
+  if (isCompositionKey(event)) return
   if (props.disabled) return
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
     event.preventDefault()
@@ -244,7 +250,7 @@ defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, ed
 <template>
   <section class="vue-sql-editor">
     <div class="sql-actions"><button :disabled="disabled" @click="executeCurrent">执行当前</button><button :disabled="disabled" @click="executeAll">执行全部</button><button :disabled="disabled" @click="format">格式化</button><button :disabled="disabled" @click="completionOpen = !completionOpen; updateCaret()">补全</button><button :disabled="disabled" @click="emit('explain', currentStatement())">执行计划</button><button @click="emit('library')">历史 / 收藏</button><span class="spacer" /><small>⌘/Ctrl Enter 当前 · ⇧ Enter 全部 · ⇧⌥F 格式化</small></div>
-    <div ref="editorHost" class="sql-code" />
+    <div ref="editorHost" class="sql-code" @keydown.capture="guardComposition" />
     <div v-if="completionOpen" class="sql-completions" role="listbox" aria-label="SQL 补全"><button v-for="(candidate, index) in candidates" :key="candidate" :class="{ selected: index === completionIndex }" role="option" :aria-selected="index === completionIndex" @mousedown.prevent="acceptCompletion(index)">{{ candidate }}</button><span v-if="!candidates.length" class="muted">没有匹配项；展开元数据树以获得表列候选</span></div>
     <p v-if="error" class="is-error">{{ error }}</p>
   </section>

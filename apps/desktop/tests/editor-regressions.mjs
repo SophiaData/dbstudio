@@ -92,6 +92,8 @@ await test('composition_and_disabled_editor_cannot_execute', async ({ key, event
   key({ key: 'Enter', ctrlKey: true, isComposing: true })
   key({ key: 'Enter', shiftKey: true, keyCode: 229 })
   assert.deepEqual(events, [])
+  assert.equal(getEditor().editor.state.doc.toString(), 'SELECT 1', 'IME confirmation must not reach CodeMirror newline commands')
+  assert.equal(getEditor().editor.state.selection.main.head, 'SELECT 1'.length)
   getEditor().editor.contentDOM.dispatchEvent(new window.CompositionEvent('compositionstart', { bubbles: true }))
   key({ key: 'Enter', ctrlKey: true })
   assert.deepEqual(events, [])
