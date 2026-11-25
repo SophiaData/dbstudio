@@ -566,6 +566,20 @@ public static class AcceptanceDesktop {
     Invoke-Button $app.Window '保存并连接'
     $sqlEditor = Set-SqlEditorText $app "-- 编辑器验收`nSELECT payload FROM dbstudio_acceptance.items WHERE id = 1;"
     $report.checks.editorClipboardAndHistory = $true
+    $script:action = 'search_and_replace_sql'
+    [Windows.Forms.SendKeys]::SendWait('^f')
+    Set-EditText (Find-Control $app.Window $edit '查找') '编辑器验收'
+    [Windows.Forms.SendKeys]::SendWait('{TAB}')
+    [Windows.Forms.SendKeys]::SendWait('^h')
+    Set-EditText (Find-Control $app.Window $edit '替换') '查找替换验收'
+    [Windows.Forms.SendKeys]::SendWait('{TAB}')
+    Invoke-Button $app.Window '全部替换'
+    Wait-SqlEditorText $sqlEditor "-- 查找替换验收`nSELECT payload FROM dbstudio_acceptance.items WHERE id = 1;"
+    Invoke-Button $app.Window '关闭查找'
+    $sqlEditor.SetFocus()
+    [Windows.Forms.SendKeys]::SendWait('^z')
+    Wait-SqlEditorText $sqlEditor "-- 编辑器验收`nSELECT payload FROM dbstudio_acceptance.items WHERE id = 1;"
+    $report.checks.editorSearchReplaceUndo = $true
     $script:action = 'execute_editor_shortcut'
     [Windows.Forms.SendKeys]::SendWait('^{ENTER}')
     $null = Find-Control $app.Window $cell 'row-1' -AllowOffscreen

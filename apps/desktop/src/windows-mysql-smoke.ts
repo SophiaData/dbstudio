@@ -3,6 +3,7 @@ import { backend, type SmokeFixture } from './backend'
 import { decision } from './dialogs'
 import type { NativeToolHost } from './native-tool-smoke'
 import { cellText, connectionNode, type Workbench } from './workbench'
+import { ensureSyntaxTree, foldedRanges } from '@codemirror/language'
 
 const database = 'dbstudio_acceptance'
 const options = { host: '127.0.0.1', port: 13306, database, user: 'acceptance', sslmode: 'disable' }
@@ -73,6 +74,45 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     checks.mysql_editor_text_kind = editorResult.page!.rows[0]!.cells[0]!.kind === 'text'
     checks[check] = checks.mysql_editor_ime_guard && checks.mysql_editor_single_statement && checks.mysql_editor_text_result
     await wb.closeTab(editorResult)
+
+    check = 'mysql_editor_daily_tools'
+    const dailySql = "SELECT\n  'daily-中文' AS editor_value;"
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: dailySql }, selection: { anchor: 0 } })
+    view.focus()
+    const editorKey = (key: string, extra: KeyboardEventInit = {}) => view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...extra }))
+    editorKey('h', { ctrlKey: true })
+    const searchPanel = view.dom.querySelector('.cm-search')!
+    for (const [name, value] of [['search', 'daily-中文'], ['replace', 'replaced-中文']]) {
+      const input = searchPanel.querySelector<HTMLInputElement>(`input[name="${name}"]`)!
+      input.value = value!
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    searchPanel.querySelector<HTMLButtonElement>('button[name="replaceAll"]')!.click()
+    const replaced = wb.sql.value === dailySql.replace('daily-中文', 'replaced-中文')
+    searchPanel.querySelector<HTMLButtonElement>('button[name="close"]')!.click()
+    view.focus()
+    editorKey('z', { ctrlKey: true })
+    const editorRestored = wb.sql.value === dailySql
+    editor.setSelection(0)
+    editorKey('/', { ctrlKey: true, code: 'Slash' })
+    const commented = wb.sql.value.startsWith('-- SELECT')
+    editorKey('z', { ctrlKey: true })
+    ensureSyntaxTree(view.state, view.state.doc.length, 100)
+    editorKey('{', { ctrlKey: true, shiftKey: true, code: 'BracketLeft', keyCode: 219 })
+    const folded = foldedRanges(view.state).size === 1 && wb.sql.value === dailySql
+    const wrapButton = Array.from((editor.$el as HTMLElement).querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '自动换行')!
+    wrapButton.click()
+    await waitFor(() => view.lineWrapping)
+    const beforeDailyExecution = wb.tabs.value.length
+    editorKey('Enter', { ctrlKey: true })
+    await waitFor(() => !wb.executing.value && wb.tabs.value.length > beforeDailyExecution)
+    const dailyResult = wb.activeTab.value!
+    checks[check] = replaced && editorRestored && commented && folded
+      && wb.tabs.value.length === beforeDailyExecution + 1
+      && cellText(dailyResult.page!.rows[0]!.cells[0]!) === 'daily-中文'
+    editorKey('}', { ctrlKey: true, shiftKey: true, code: 'BracketRight', keyCode: 221 })
+    wrapButton.click()
+    await wb.closeTab(dailyResult)
 
     check = 'mysql_multi_sort_pages'
     const grid = await tools.grid(tab)

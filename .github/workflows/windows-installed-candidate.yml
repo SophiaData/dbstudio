@@ -127,6 +127,12 @@ jobs:
       - name: Install locked frontend dependencies
         if: env.CANDIDATE_RUN_ID == ''
         run: pnpm install --frozen-lockfile
+      - name: Check editor types and regressions before packaging
+        if: env.CANDIDATE_RUN_ID == ''
+        run: |
+          pnpm typecheck:desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/desktop/tests/editor-regressions.mjs
       - name: Build the production Windows candidate
         if: env.CANDIDATE_RUN_ID == ''
         run: pnpm build --ci --no-sign --target x86_64-pc-windows-msvc --bundles nsis

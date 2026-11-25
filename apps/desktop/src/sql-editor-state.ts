@@ -5,6 +5,7 @@ export interface EditorSnapshot {
   state: EditorState
   scrollTop: number
   scrollLeft: number
+  lineWrapping: boolean
 }
 
 // Editor history is local to an open tab; SQL persistence remains owned by the workbench.

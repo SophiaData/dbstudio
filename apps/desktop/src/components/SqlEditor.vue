@@ -2,8 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { Compartment, EditorSelection, EditorState, Prec, StateEffect } from '@codemirror/state'
 import { EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { bracketMatching, defaultHighlightStyle, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
+import { defaultKeymap, history, historyKeymap, indentWithTab, toggleLineComment } from '@codemirror/commands'
+import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
+import { closeSearchPanel, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { MySQL, PostgreSQL, SQLite, StandardSQL, sql } from '@codemirror/lang-sql'
 import { inferSchemaFromObjectId } from '../../../../src/core/er-relations'
 import { SQL_COMPLETION_KEYWORDS } from '../../../../src/core/sql-keywords'
@@ -19,6 +20,8 @@ const editor = shallowRef<EditorView>()
 const editorTabId = props.workbench.activeEditorTabId.value
 const language = new Compartment()
 const editable = new Compartment()
+const wrapping = new Compartment()
+const lineWrapping = ref(false)
 const error = ref('')
 let composing = false
 const completionOpen = ref(false)
@@ -88,6 +91,24 @@ function execute(all = false) {
 }
 function executeCurrent() { execute(false) }
 function executeAll() { execute(true) }
+function openFind(replace = false) {
+  const view = editor.value
+  if (!view || (replace && props.disabled)) return false
+  completionOpen.value = false
+  openSearchPanel(view)
+  if (replace) view.dom.querySelector<HTMLInputElement>('.cm-search input[name="replace"]')?.focus()
+  return true
+}
+function commentLines() {
+  if (props.disabled || !editor.value) return
+  completionOpen.value = false
+  toggleLineComment(editor.value)
+  editor.value.focus()
+}
+function toggleWrapping() {
+  lineWrapping.value = !lineWrapping.value
+  editor.value?.dispatch({ effects: wrapping.reconfigure(lineWrapping.value ? EditorView.lineWrapping : []) })
+}
 async function format() {
   if (props.disabled) return
   try {
@@ -182,6 +203,8 @@ watch(() => props.workbench.sql.value, (text) => {
 }, { flush: 'sync' })
 watch(() => props.disabled, () => {
   if (props.disabled) completionOpen.value = false
+  // Recreate the built-in panel next time so its replace controls match read-only state.
+  if (editor.value) closeSearchPanel(editor.value)
   editor.value?.dispatch({ effects: editable.reconfigure(editability()) })
 })
 watch(dialectId, () => {
@@ -190,17 +213,34 @@ watch(dialectId, () => {
 onMounted(() => {
   // Controller-only tests intentionally mount no DOM; real applications always supply this host.
   if (!editorHost.value) return
+  const previous = editorSnapshots(props.workbench).get(editorTabId)
+  lineWrapping.value = previous?.lineWrapping ?? false
   const extensions = [
-    lineNumbers(), highlightActiveLineGutter(), highlightActiveLine(), drawSelection(),
+    lineNumbers(), foldGutter(), highlightActiveLineGutter(), highlightActiveLine(), drawSelection(),
     history(), indentOnInput(), indentUnit.of('  '), bracketMatching(), syntaxHighlighting(defaultHighlightStyle),
     language.of(sqlLanguage()), editable.of(editability()),
+    wrapping.of(lineWrapping.value ? EditorView.lineWrapping : []),
+    search({ top: true }),
+    EditorState.phrases.of({
+      Find: '查找', Replace: '替换', next: '下一个', previous: '上一个', all: '选中全部',
+      'match case': '区分大小写', regexp: '正则表达式', 'by word': '全词匹配',
+      replace: '替换', 'replace all': '全部替换', close: '关闭查找',
+      'Fold line': '折叠行', 'Unfold line': '展开行', 'unfold': '展开',
+      'Folded lines': '已折叠行', 'Unfolded lines': '已展开行', to: '至',
+      'Go to line': '跳转到行', go: '跳转', 'Selection matches': '选区匹配',
+      'replaced $ matches': '已替换 $ 处匹配', 'replaced match on line $': '已替换第 $ 行匹配',
+    }),
     EditorView.contentAttributes.of({ 'aria-label': 'SQL 编辑器', 'aria-multiline': 'true', spellcheck: 'false' }),
     Prec.highest(EditorView.domEventHandlers({
       keydown(event) { keydown(event); return event.defaultPrevented },
       compositionstart() { composing = true; completionOpen.value = false },
       compositionend() { composing = false },
     })),
-    keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+    keymap.of([
+      { key: 'Mod-f', run: () => openFind(), scope: 'editor search-panel' },
+      { key: 'Mod-h', mac: 'Mod-Alt-f', run: () => openFind(true), scope: 'editor search-panel', preventDefault: true },
+      ...searchKeymap, ...foldKeymap, indentWithTab, ...defaultKeymap, ...historyKeymap,
+    ]),
     EditorView.updateListener.of((update) => {
       if (props.workbench.activeEditorTabId.value !== editorTabId) return
       if (update.docChanged) props.workbench.sql.value = update.state.doc.toString()
@@ -221,9 +261,15 @@ onMounted(() => {
       '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: '#7890ab12' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: '#4f8cff55' },
       '.cm-cursor': { borderLeftColor: 'var(--fg)' },
+      '.cm-panels': { backgroundColor: 'var(--bg-alt)', color: 'var(--fg)', borderColor: 'var(--border)' },
+      '.cm-search': { padding: '6px 28px 6px 8px' },
+      '.cm-textfield': { backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' },
+      '.cm-button': { backgroundImage: 'none', backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' },
+      '.cm-searchMatch': { backgroundColor: '#d99b2538' },
+      '.cm-searchMatch-selected': { backgroundColor: '#4f8cff55', outline: '1px solid var(--accent, #4f8cff)' },
+      '.cm-foldPlaceholder': { backgroundColor: 'var(--bg-alt)', color: 'var(--fg-dim)', borderColor: 'var(--border)' },
     }),
   ]
-  const previous = editorSnapshots(props.workbench).get(editorTabId)
   const state = previous?.state.doc.toString() === props.workbench.sql.value
     ? previous.state.update({ effects: StateEffect.reconfigure.of(extensions) }).state
     : EditorState.create({ doc: props.workbench.sql.value, extensions })
@@ -239,7 +285,7 @@ onBeforeUnmount(() => {
   if (!view) return
   const snapshots = editorSnapshots(props.workbench)
   if (props.workbench.editorTabs.value.some((tab) => tab.id === editorTabId)) {
-    snapshots.set(editorTabId, { state: view.state, scrollTop: view.scrollDOM.scrollTop, scrollLeft: view.scrollDOM.scrollLeft })
+    snapshots.set(editorTabId, { state: view.state, scrollTop: view.scrollDOM.scrollTop, scrollLeft: view.scrollDOM.scrollLeft, lineWrapping: lineWrapping.value })
   }
   view.destroy()
   editor.value = undefined
@@ -250,6 +296,13 @@ defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, ed
 <template>
   <section class="vue-sql-editor">
     <div class="sql-actions"><button :disabled="disabled" @click="executeCurrent">执行当前</button><button :disabled="disabled" @click="executeAll">执行全部</button><button :disabled="disabled" @click="format">格式化</button><button :disabled="disabled" @click="completionOpen = !completionOpen; updateCaret()">补全</button><button :disabled="disabled" @click="emit('explain', currentStatement())">执行计划</button><button @click="emit('library')">历史 / 收藏</button><span class="spacer" /><small>⌘/Ctrl Enter 当前 · ⇧ Enter 全部 · ⇧⌥F 格式化</small></div>
+    <div class="sql-actions" role="group" aria-label="SQL 编辑工具">
+      <button title="Ctrl/Cmd+F" @click="openFind()">查找</button>
+      <button :disabled="disabled" title="Ctrl+H / Cmd+Option+F" @click="openFind(true)">替换</button>
+      <button :disabled="disabled" title="Ctrl/Cmd+/" @click="commentLines">行注释</button>
+      <button :aria-pressed="lineWrapping" @click="toggleWrapping">自动换行</button>
+      <small>折叠/展开：点击行号旁箭头</small>
+    </div>
     <div ref="editorHost" class="sql-code" @keydown.capture="guardComposition" />
     <div v-if="completionOpen" class="sql-completions" role="listbox" aria-label="SQL 补全"><button v-for="(candidate, index) in candidates" :key="candidate" :class="{ selected: index === completionIndex }" role="option" :aria-selected="index === completionIndex" @mousedown.prevent="acceptCompletion(index)">{{ candidate }}</button><span v-if="!candidates.length" class="muted">没有匹配项；展开元数据树以获得表列候选</span></div>
     <p v-if="error" class="is-error">{{ error }}</p>
@@ -261,6 +314,6 @@ defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, ed
 .sql-actions { display:flex; align-items:center; flex-wrap:wrap; gap:5px; padding:4px 8px; background:var(--bg-alt); }
 .sql-actions small { color:var(--fg-dim); font-size:10px; }
 .sql-code { flex:1; min-height:0; overflow:hidden; }
-.sql-completions { position:absolute; top:55px; right:12px; width:260px; max-height:230px; overflow:auto; z-index:5; background:var(--bg-alt); border:1px solid var(--border); box-shadow:0 4px 20px #0008; }
+.sql-completions { position:absolute; top:85px; right:12px; width:260px; max-height:230px; overflow:auto; z-index:5; background:var(--bg-alt); border:1px solid var(--border); box-shadow:0 4px 20px #0008; }
 .sql-completions button { display:block; width:100%; text-align:left; border:0; border-radius:0; font-family:var(--mono); }.sql-completions button.selected { background:#263d5c; }
 </style>

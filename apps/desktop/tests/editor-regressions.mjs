@@ -24,6 +24,7 @@ const bundle = await build({
     export { useWorkbench } from './apps/desktop/src/workbench.ts';
     export { editorSnapshots } from './apps/desktop/src/sql-editor-state.ts';
     export { undo, redo } from '@codemirror/commands';
+    export { ensureSyntaxTree, foldedRanges, foldable } from '@codemirror/language';
   ` },
   write: false, bundle: true, format: 'esm', platform: 'node',
   plugins: [{ name: 'editor-regressions', setup(builder) {
@@ -37,7 +38,7 @@ const bundle = await build({
     })
   } }]
 })
-const { Editor, useWorkbench, editorSnapshots, undo, redo } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
+const { Editor, useWorkbench, editorSnapshots, undo, redo, ensureSyntaxTree, foldedRanges, foldable } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 const outcomes = []
 async function test(name, action) {
   window.localStorage.clear()
@@ -195,6 +196,156 @@ await test('tab_key_indents_selected_lines_without_replacing_selection', async (
   assert.equal(wb.sql.value, '  SELECT 1;\n  SELECT 2;')
   assert.ok(undo(getEditor().editor))
   assert.equal(wb.sql.value, 'SELECT 1;\nSELECT 2;')
+})
+
+function searchField(root, name, value) {
+  const field = root.querySelector(`.cm-search input[name="${name}"]`)
+  assert.ok(field, `Missing search field: ${name}`)
+  field.value = value
+  field.dispatchEvent(new window.Event('change', { bubbles: true }))
+  return field
+}
+function clickTool(root, text) {
+  const button = [...root.querySelectorAll('.sql-actions button')].find((button) => button.textContent === text)
+  assert.ok(button, `Missing editor action: ${text}`)
+  button.click()
+  return button
+}
+
+await test('search_and_replace_use_real_panel_and_one_undo_without_execution', async ({ wb, edit, key, root, events, getEditor }) => {
+  const original = "SELECT '中文' AS label;\nSELECT '中文' AS label;"
+  edit(original)
+  getEditor().completionOpen = true
+  key({ key: 'f', ctrlKey: true })
+  assert.equal(getEditor().completionOpen, false)
+  const field = searchField(root, 'search', '中文')
+  assert.equal(field.getAttribute('aria-label'), '查找')
+  field.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, shiftKey: true, bubbles: true, cancelable: true }))
+  assert.equal(getEditor().editor.state.sliceDoc(getEditor().editor.state.selection.main.from, getEditor().editor.state.selection.main.to), '中文')
+  assert.deepEqual(events, [], 'Search Enter must not execute SQL')
+  field.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'h', ctrlKey: true, bubbles: true, cancelable: true }))
+  assert.equal(document.activeElement?.getAttribute('name'), 'replace')
+  searchField(root, 'replace', '替换😀')
+  root.querySelector('.cm-search button[name="replaceAll"]').click()
+  assert.equal(wb.sql.value, original.replaceAll('中文', '替换😀'))
+  assert.ok(undo(getEditor().editor))
+  assert.equal(wb.sql.value, original)
+  assert.deepEqual(events, [])
+  field.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  assert.equal(root.querySelector('.cm-search'), null)
+})
+
+await test('search_options_and_invalid_regex_do_not_mutate_sql', async ({ wb, edit, root }) => {
+  edit('SELECT name, Name, names FROM items;')
+  clickTool(root, '替换')
+  searchField(root, 'search', 'name')
+  searchField(root, 'replace', 'title')
+  for (const name of ['case', 'word']) {
+    const option = root.querySelector(`.cm-search input[name="${name}"]`)
+    option.checked = true
+    option.dispatchEvent(new window.Event('change', { bubbles: true }))
+  }
+  root.querySelector('.cm-search button[name="replaceAll"]').click()
+  assert.equal(wb.sql.value, 'SELECT title, Name, names FROM items;')
+  const regex = root.querySelector('.cm-search input[name="re"]')
+  regex.checked = true
+  regex.dispatchEvent(new window.Event('change', { bubbles: true }))
+  searchField(root, 'search', '[')
+  root.querySelector('.cm-search button[name="replaceAll"]').click()
+  assert.equal(wb.sql.value, 'SELECT title, Name, names FROM items;')
+})
+
+await test('read_only_transition_closes_stale_replace_and_allows_find', async ({ wb, edit, root, disabled, getEditor }) => {
+  edit('SELECT 1')
+  clickTool(root, '替换')
+  searchField(root, 'search', '1')
+  searchField(root, 'replace', '2')
+  const stale = root.querySelector('.cm-search button[name="replaceAll"]')
+  disabled.value = true
+  await nextTick()
+  assert.equal(root.querySelector('.cm-search'), null)
+  stale.click()
+  clickTool(root, '行注释')
+  assert.equal(wb.sql.value, 'SELECT 1')
+  clickTool(root, '查找')
+  assert.ok(root.querySelector('.cm-search input[name="search"]'))
+  assert.equal(root.querySelector('.cm-search input[name="replace"]'), null)
+  assert.equal(getEditor().editor.state.readOnly, true)
+  disabled.value = false
+  await nextTick()
+  clickTool(root, '替换')
+  assert.ok(root.querySelector('.cm-search input[name="replace"]'))
+})
+
+await test('line_comments_and_shortcut_are_undoable', async ({ wb, edit, getEditor, root, key }) => {
+  const original = 'SELECT 1;\nSELECT 2;'
+  edit(original)
+  getEditor().setSelection(0, original.length)
+  clickTool(root, '行注释')
+  assert.equal(wb.sql.value, '-- SELECT 1;\n-- SELECT 2;')
+  assert.ok(undo(getEditor().editor))
+  assert.equal(wb.sql.value, original)
+  key({ key: '/', code: 'Slash', ctrlKey: true })
+  assert.equal(wb.sql.value, '-- SELECT 1;\n-- SELECT 2;')
+  key({ key: '/', code: 'Slash', ctrlKey: true })
+  assert.equal(wb.sql.value, original)
+})
+
+await test('replacement_history_and_search_query_stay_with_their_tab', async ({ wb, edit, root, getEditor }) => {
+  const tabA = wb.activeEditorTabId.value
+  edit('SELECT 1')
+  clickTool(root, '替换')
+  searchField(root, 'search', '1')
+  searchField(root, 'replace', '11')
+  root.querySelector('.cm-search button[name="replaceAll"]').click()
+  wb.selectConnection('B')
+  await nextTick()
+  edit('SELECT 2')
+  assert.equal(root.querySelector('.cm-search'), null)
+  wb.activateEditorTab(tabA)
+  await nextTick()
+  assert.equal(root.querySelector('.cm-search input[name="search"]').value, '1')
+  assert.equal(root.querySelector('.cm-search input[name="replace"]').value, '11')
+  assert.equal(wb.sql.value, 'SELECT 11')
+  assert.ok(undo(getEditor().editor))
+  assert.equal(wb.sql.value, 'SELECT 1')
+  wb.selectConnection('B')
+  await nextTick()
+  assert.equal(wb.sql.value, 'SELECT 2')
+})
+
+await test('fold_and_wrapping_survive_tabs_without_changing_execution', async ({ wb, edit, getEditor, key, root, events }) => {
+  const original = 'SELECT\n  id,\n  name\nFROM items;'
+  const tabA = wb.activeEditorTabId.value
+  edit(original)
+  getEditor().setSelection(0)
+  getEditor().completionOpen = false
+  assert.ok(ensureSyntaxTree(getEditor().editor.state, original.length, 100))
+  assert.ok(foldable(getEditor().editor.state, 0, 6), 'SQL language must expose a foldable statement')
+  assert.ok(root.querySelector('.cm-foldGutter'))
+  assert.ok(key({ key: '{', code: 'BracketLeft', keyCode: 219, ctrlKey: true, shiftKey: true }).defaultPrevented, 'Fold key must be handled')
+  assert.equal(foldedRanges(getEditor().editor.state).size, 1, 'Fold shortcut must collapse the SQL statement')
+  assert.equal(wb.sql.value, original)
+  key({ key: 'Enter', ctrlKey: true })
+  assert.equal(events.at(-1), original.slice(0, -1), 'Folded SQL must execute completely')
+  const wrap = clickTool(root, '自动换行')
+  await nextTick()
+  assert.equal(wrap.getAttribute('aria-pressed'), 'true')
+  assert.equal(getEditor().editor.contentDOM.classList.contains('cm-lineWrapping'), true)
+  wb.selectConnection('B')
+  await nextTick()
+  edit('SELECT 2')
+  assert.equal(getEditor().editor.contentDOM.classList.contains('cm-lineWrapping'), false)
+  assert.equal(foldedRanges(getEditor().editor.state).size, 0)
+  wb.activateEditorTab(tabA)
+  await nextTick()
+  assert.equal(getEditor().editor.contentDOM.classList.contains('cm-lineWrapping'), true)
+  assert.equal(foldedRanges(getEditor().editor.state).size, 1, 'Returning to the tab must restore its folded SQL')
+  assert.equal(wb.sql.value, original)
+  key({ key: '}', code: 'BracketRight', keyCode: 221, ctrlKey: true, shiftKey: true })
+  assert.equal(foldedRanges(getEditor().editor.state).size, 0)
+  assert.ok(undo(getEditor().editor))
+  assert.equal(wb.sql.value, '')
 })
 
 console.log(JSON.stringify({ suite: 'mounted-codemirror', passed: outcomes.filter((item) => item.passed).length, failed: outcomes.filter((item) => !item.passed).length }))

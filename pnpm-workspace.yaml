@@ -16,3 +16,4 @@ allowBuilds:
   ssh2: false
 minimumReleaseAgeExclude:
   - electron@45.0.0
+  - '@codemirror/search@6.7.3'
