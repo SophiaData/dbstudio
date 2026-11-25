@@ -64,8 +64,12 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }))
     await waitFor(() => !wb.executing.value && wb.tabs.value.length > beforeEditorExecution)
     const editorResult = wb.activeTab.value!
-    checks[check] = imeDidNotExecute && wb.tabs.value.length === beforeEditorExecution + 1
-      && cellText(editorResult.page!.rows[0]!.cells[0]!) === 'editor-中文'
+    checks.mysql_editor_ime_guard = imeDidNotExecute
+    checks.mysql_editor_single_statement = wb.tabs.value.length === beforeEditorExecution + 1
+    checks.mysql_editor_text_result = cellText(editorResult.page!.rows[0]!.cells[0]!) === 'editor-中文'
+    checks.mysql_editor_sql_source = editorResult.sql.includes("'editor-中文'")
+    checks.mysql_editor_text_kind = editorResult.page!.rows[0]!.cells[0]!.kind === 'text'
+    checks[check] = checks.mysql_editor_ime_guard && checks.mysql_editor_single_statement && checks.mysql_editor_text_result
     await wb.closeTab(editorResult)
 
     check = 'mysql_multi_sort_pages'

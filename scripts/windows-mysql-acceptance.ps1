@@ -101,6 +101,9 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $valu
         $passed = $report.checks.$name -eq $true
         Write-Output "$name=$passed"
     }
+    foreach ($name in @('mysql_editor_ime_guard', 'mysql_editor_single_statement', 'mysql_editor_text_result', 'mysql_editor_sql_source', 'mysql_editor_text_kind')) {
+        Write-Output "$name=$($report.checks.$name -eq $true)"
+    }
     if (-not $exited -or $app.ExitCode -ne 0 -or $report.ok -ne $true -or @($required | Where-Object { $report.checks.$_ -ne $true }).Count) {
         throw 'Windows native MySQL acceptance failed.'
     }
