@@ -175,7 +175,8 @@ function Set-SqlEditorText($App, [string]$Value) {
     # Exercise the real contenteditable input, including Unicode and native undo/redo.
     $before = Read-SqlEditorText $editor
     [Windows.Forms.Clipboard]::SetText($Value)
-    [Windows.Forms.SendKeys]::SendWait('^a^v')
+    [Windows.Forms.SendKeys]::SendWait('^a')
+    [Windows.Forms.SendKeys]::SendWait('^v')
     Wait-SqlEditorText $editor $Value
     [Windows.Forms.SendKeys]::SendWait('^z')
     Wait-SqlEditorText $editor $before
