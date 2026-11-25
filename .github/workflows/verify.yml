@@ -124,4 +124,7 @@ jobs:
     name: Windows installed candidate after WebView checks
     if: github.event_name == 'pull_request'
     needs: windows-mysql
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/windows-installed-candidate.yml

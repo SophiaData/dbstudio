@@ -9,6 +9,11 @@ Set-StrictMode -Version Latest
 $script:children = [Collections.Generic.List[Diagnostics.Process]]::new()
 $script:action = 'preflight'
 $script:failure = 'CHECK_FAILED'
+$candidateIdentity = @{
+    sha = $(if ($env:DBSTUDIO_CANDIDATE_SHA) { $env:DBSTUDIO_CANDIDATE_SHA } else { $env:GITHUB_SHA })
+    runId = $(if ($env:DBSTUDIO_CANDIDATE_RUN_ID) { $env:DBSTUDIO_CANDIDATE_RUN_ID } else { $env:GITHUB_RUN_ID })
+    runAttempt = $(if ($env:DBSTUDIO_CANDIDATE_RUN_ATTEMPT) { $env:DBSTUDIO_CANDIDATE_RUN_ATTEMPT } else { $env:GITHUB_RUN_ATTEMPT })
+}
 $report = [ordered]@{
     schemaVersion = 1
     status = 'failed'
@@ -511,8 +516,8 @@ public static class AcceptanceDesktop {
     $script:action = 'verify_candidate'
     $manifest = Get-Content -LiteralPath (Join-Path $CandidateDirectory 'manifest.json') -Raw | ConvertFrom-Json
     if ($manifest.kind -ne 'tauri-native-candidate' -or $manifest.target -ne 'win-x64' -or
-        $manifest.sha -cne $env:GITHUB_SHA -or $manifest.runId -cne $env:GITHUB_RUN_ID -or
-        $manifest.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or @($manifest.files).Count -ne 1) {
+        $manifest.sha -cne $candidateIdentity.sha -or $manifest.runId -cne $candidateIdentity.runId -or
+        $manifest.runAttempt -cne $candidateIdentity.runAttempt -or @($manifest.files).Count -ne 1) {
         Stop-Acceptance 'CANDIDATE_IDENTITY_MISMATCH'
     }
     $file = $manifest.files[0]
@@ -523,6 +528,7 @@ public static class AcceptanceDesktop {
         Stop-Acceptance 'CANDIDATE_HASH_MISMATCH'
     }
     $report.installerSha256 = $file.sha256
+    $report.candidate = $candidateIdentity
     $report.checks.candidateIntegrity = $true
 
     $script:action = 'install_and_launch'
