@@ -168,18 +168,31 @@ function Set-SqlEditorText($App, [string]$Value) {
     $types = @([Windows.Automation.ControlType]::Edit, [Windows.Automation.ControlType]::Document)
     $editor = Find-Control $App.Window $types 'SQL 编辑器'
     if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'SQL_EDITOR_WINDOW_NOT_FOCUSED' }
+    $script:action = 'focus_sql_editor'
     $editor.SetFocus()
-    if ([Windows.Automation.AutomationElement]::FocusedElement.Current.Name -cne 'SQL 编辑器') {
-        Stop-Acceptance 'SQL_EDITOR_NOT_FOCUSED'
-    }
+    $deadline = [datetime]::UtcNow.AddSeconds(10)
+    $focused = $false
+    do {
+        $target = [Windows.Automation.AutomationElement]::FocusedElement
+        for ($depth = 0; $target -and $depth -lt 8; $depth++) {
+            if ([Windows.Automation.Automation]::Compare($target, $editor)) { $focused = $true; break }
+            $target = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($target)
+        }
+        if ($focused) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    if (-not $focused) { Stop-Acceptance 'SQL_EDITOR_NOT_FOCUSED' }
     # Exercise the real contenteditable input, including Unicode and native undo/redo.
     $before = Read-SqlEditorText $editor
+    $script:action = 'paste_sql_editor'
     [Windows.Forms.Clipboard]::SetText($Value)
     [Windows.Forms.SendKeys]::SendWait('^a')
     [Windows.Forms.SendKeys]::SendWait('^v')
     Wait-SqlEditorText $editor $Value
+    $script:action = 'undo_sql_editor'
     [Windows.Forms.SendKeys]::SendWait('^z')
     Wait-SqlEditorText $editor $before
+    $script:action = 'redo_sql_editor'
     [Windows.Forms.SendKeys]::SendWait('^y')
     Wait-SqlEditorText $editor $Value
     return $editor
@@ -547,6 +560,7 @@ public static class AcceptanceDesktop {
     Invoke-Button $app.Window '保存并连接'
     $sqlEditor = Set-SqlEditorText $app "-- 编辑器验收`nSELECT payload FROM dbstudio_acceptance.items WHERE id = 1;"
     $report.checks.editorClipboardAndHistory = $true
+    $script:action = 'execute_editor_shortcut'
     [Windows.Forms.SendKeys]::SendWait('^{ENTER}')
     $null = Find-Control $app.Window $cell 'row-1' -AllowOffscreen
     $report.checks.connectedAndQueried = $true
