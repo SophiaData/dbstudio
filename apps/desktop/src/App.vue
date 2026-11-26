@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'v
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { ConnectionSummary } from '../../../src/core/api'
 import SqlEditor from './components/SqlEditor.vue'
-import { parseParameterValue, type ScopedSqlParameter, type StatementParameterSlot } from './sql-editor-model'
+import SqlExecutionFailure from './components/SqlExecutionFailure.vue'
+import { parseParameterValue, type ScopedSqlParameter, type StatementParameterSlot, type SqlSourceRange } from './sql-editor-model'
 import type { ObjectRef } from '../../../src/core/model'
 import { backend, confirmExit, errorText } from './backend'
 import { decision } from './dialogs'
@@ -123,11 +124,18 @@ async function openSqlFile() {
   }
 }
 
-function requestExecute(script = wb.sql.value) {
+async function locateExecution(editorTabId: string, source: SqlSourceRange) {
+  const tab = wb.editorTabs.value.find((item) => item.id === editorTabId)
+  if (!tab || tab.sql !== source.document) return
+  wb.activateEditorTab(editorTabId)
+  await nextTick()
+  if (!sqlController.value?.revealSource(source)) wb.setStatus('草稿已变化，请查看执行快照。', true)
+}
+function requestExecute(script = wb.sql.value, source?: SqlSourceRange) {
   if (parameterOpen.value) return
   toolPanel.value = null
   try {
-    const execution = wb.captureEditorExecution(script)
+    const execution = wb.captureEditorExecution(script, source)
     parameterSlots.value = wb.parameterSlots(execution.sql, execution.connectionId)
     if (parameterSlots.value.length) {
       for (const key of Object.keys(parameterValues)) delete parameterValues[key]
@@ -238,6 +246,7 @@ onBeforeUnmount(() => unlisten?.())
         <nav class="result-tabs" aria-label="结果标签"><div v-for="tab in wb.tabs.value" :key="tab.id" class="result-tab" :class="{ 'is-active': wb.activeTabId.value === tab.id }"><button class="tab-label" :aria-selected="wb.activeTabId.value === tab.id" @click="wb.activateTab(tab); toolPanel = null">{{ tab.title }}{{ tab.editorTabId ? ` · ${editorConnectionLabel(tab.connectionId, false)}` : '' }}{{ tab.executionFailed ? ' · 失败' : '' }}{{ tab.dirty.size ? ' ●' : '' }}</button><button class="tab-close" :aria-label="`关闭 ${tab.title}`" :disabled="tab.busy || operationLocked" @click="wb.attempt(() => wb.closeTab(tab))">×</button></div></nav>
         <div class="actions result-tools"><button :disabled="!canCreateObject" :title="editorConnectionLabel(wb.currentConnectionId.value)" @click="openDdl('create-table')">新建表…</button><button :disabled="!canCreateObject" :title="editorConnectionLabel(wb.currentConnectionId.value)" @click="openDdl('create-view')">新建视图…</button></div>
         <div v-if="wb.activeTab.value || tableForDetails" class="actions result-tools"><button :disabled="operationLocked || !tableForDetails" @click="openSchema">结构详情</button><button :disabled="activeResultLocked || wb.activeTab.value?.table?.kind !== 'table'" @click="transfer = { mode: 'import', tab: wb.activeTab.value! }">导入 CSV…</button><button :disabled="activeResultLocked || !wb.activeTab.value?.result" title="选择完整表或当前查询导出；绑定参数会安全内联" @click="transfer = { mode: 'export', tab: wb.activeTab.value! }">导出完整来源…</button><span class="muted">结构与数据按需读取</span></div>
+        <SqlExecutionFailure v-if="!toolPanel" :workbench="wb" @locate="locateExecution" />
         <ErPanel ref="erController" v-if="toolPanel === 'er' && toolConnectionId" :key="toolConnectionId" :workbench="wb" :connection-id="toolConnectionId" @close="toolPanel = null" />
         <ComparePanel ref="compareController" v-else-if="toolPanel === 'compare'" :workbench="wb" @close="toolPanel = null" @sql="loadPlan" />
         <SchemaPanel ref="schemaController" v-else-if="toolPanel === 'schema' && schemaNode" :key="schemaNode.id" :node="schemaNode" :can-alter="relational(connectionOf(schemaNode.id)) && !operationLocked" @close="toolPanel = null" @open="openSchemaData" @ddl="openDdl" />
@@ -253,10 +262,18 @@ onBeforeUnmount(() => unlisten?.())
     <MysqlAdminDialog v-if="mysqlAdmin" :workbench="wb" :connection-id="mysqlAdmin.connectionId" :node="mysqlAdmin.node" @close="mysqlAdmin = null" />
     <DdlDialog v-if="ddl" ref="ddlController" :workbench="wb" :mode="ddl.mode" :connection-id="ddl.connectionId" :node="ddl.node" @close="ddl = null; toolPanel = null" />
     <div v-if="parameterOpen" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="SQL 参数"><h2>绑定 SQL 参数</h2><p v-if="pendingExecution">执行目标 · {{ editorConnectionLabel(pendingExecution.connectionId) }}</p><p class="muted">参数按语句独立绑定；同名占位符出现在不同语句时也需要分别填写。</p><form @submit.prevent="executeParameters"><label v-for="slot in parameterSlots" :key="slot.key" class="parameter-field"><span>第 {{ slot.statementIndex + 1 }} 条语句（第 {{ slot.startLine }} 行）· {{ slot.name }}</span><select v-model="parameterKinds[slot.key]" :aria-label="`第 ${slot.statementIndex + 1} 条语句 ${slot.name} 类型`"><option value="text">文本</option><option value="number">数字</option><option value="boolean">布尔</option><option value="binary">二进制 Hex</option><option value="null">NULL</option></select><input v-model="parameterValues[slot.key]" :disabled="parameterKinds[slot.key] === 'null'" :aria-label="`第 ${slot.statementIndex + 1} 条语句参数 ${slot.name}`" /></label><p v-if="parameterError" class="is-error">{{ parameterError }}</p><div class="modal-actions"><button type="button" @click="closeParameters">取消</button><button type="submit" class="primary">执行</button></div></form></section></div>
-    <div v-if="decision" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title"><h2 id="decision-title">{{ decision.title }}</h2><p>{{ decision.message }}</p><div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div></section></div>
+    <div v-if="decision" class="modal-backdrop">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
+        <h2 id="decision-title">{{ decision.title }}</h2>
+        <p>{{ decision.message }}</p>
+        <pre v-if="decision.detail" class="decision-detail">{{ decision.detail }}</pre>
+        <div class="modal-actions"><button v-for="option in decision.options" :key="option.value" :class="{ danger: option.danger }" @click="decision?.settle(option.value)">{{ option.label }}</button></div>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .metadata-tree-host { overflow:hidden; }
+.decision-detail { max-height: 45vh; overflow: auto; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-alt); font-family: var(--mono); }
 </style>

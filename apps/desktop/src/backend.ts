@@ -1,5 +1,16 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { DbStudioApi } from '../../../src/core/api'
+import type { EditApplyResult, RowUpdate } from '../../../src/core/resultset'
+
+interface RowUpdatePreview {
+  readonly fingerprint: string
+  readonly statements: readonly { readonly sql: string; readonly parameters: readonly unknown[] }[]
+}
+
+type DesktopApi = Omit<DbStudioApi, 'applyEdits'> & {
+  previewRowUpdates(tableNodeId: string, updates: readonly RowUpdate[]): Promise<RowUpdatePreview>
+  applyEdits(tableNodeId: string, updates: readonly RowUpdate[], fingerprint?: string): Promise<EditApplyResult>
+}
 
 export type BackendMethod = keyof DbStudioApi
 export type BackendArgs<K extends BackendMethod> = Parameters<DbStudioApi[K]>
@@ -52,7 +63,7 @@ export const backend = new Proxy(Object.create(null), {
     if (method === 'then') return undefined
     return (...args: unknown[]) => invoke('backend_call', { method, args: wireBackendArgs(args) })
   }
-}) as DbStudioApi
+}) as DesktopApi
 
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message

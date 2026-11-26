@@ -1,6 +1,8 @@
 import { backend, smokeFixture } from './backend'
+import { invoke } from '@tauri-apps/api/core'
 import { cellText, connectionNode, inputCell, useWorkbench, type TreeNode, type Workbench } from './workbench'
 import { runNativeToolSmoke, type NativeToolHost } from './native-tool-smoke'
+import { runWindowsMysqlSmoke } from './windows-mysql-smoke'
 import { decision } from './dialogs'
 
 type SmokeResult = { ok: boolean; checks: Record<string, boolean> }
@@ -10,6 +12,10 @@ declare global { interface Window { __DBSTUDIO_NATIVE_SMOKE__?: () => Promise<Sm
 export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
   if (import.meta.env.VITE_DBSTUDIO_TEST_HOOKS !== '1') return
   let pending: Promise<SmokeResult> | undefined
+  if (import.meta.env.VITE_DBSTUDIO_WINDOWS_MYSQL === '1') {
+    void run().then((report) => invoke('backend_call', { method: 'smokeReport', args: [report] }))
+    return
+  }
   window.__DBSTUDIO_NATIVE_SMOKE__ = () => pending ??= run()
   async function run(): Promise<SmokeResult> {
     const checks: Record<string, boolean> = {}
@@ -18,6 +24,9 @@ export function installNativeSmoke(wb: Workbench, tools: NativeToolHost) {
       const fixture = await smokeFixture()
       checks.isolated_fixture = fixture.isolated
       if (!fixture.isolated) return { ok: false, checks }
+      if (import.meta.env.VITE_DBSTUDIO_WINDOWS_MYSQL === '1') {
+        return await runWindowsMysqlSmoke(wb, tools, fixture)
+      }
       const name = `Vue Native ${crypto.randomUUID().slice(0, 8)}`
       await wb.saveConnection({ dialectId: 'sqlite', name, options: { file: fixture.databasePath, native_unlisted_option: 'preserve-test-option' } }, {})
       const connection = wb.connections.value.find((c) => c.name === name)

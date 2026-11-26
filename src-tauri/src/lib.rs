@@ -46,7 +46,7 @@ const CORE_METHODS: &[&str] = &[
     "disconnectConnection", "removeConnection", "testConnection", "listChildren",
     "describeTable", "captureSchemaSnapshot", "compareTableData", "runQuery",
     "executeStatement", "explain", "fetchResultPage", "closeCursor", "previewTable",
-    "tableSelectSql", "applyEdits", "commitTransaction", "rollbackTransaction",
+    "tableSelectSql", "previewRowUpdates", "applyEdits", "commitTransaction", "rollbackTransaction",
     "transactionState", "insertRow", "deleteRows", "countRows", "fetchCellValue",
     "createTable", "dropTable", "createView", "dropView", "renameTable", "cancelQuery",
     "updateConnection", "listSqlLibrary", "recordSqlHistory", "saveSql", "removeSavedSql",
@@ -275,6 +275,9 @@ async fn backend_call(
     }
     #[cfg(feature = "test-hooks")]
     if method == "smokeFixture" || method == "smokeReport" {
+        if app.config().identifier == "io.dbstudio.windows-mysql-smoke" {
+            eprintln!("[windows-acceptance] {method}");
+        }
         let fixture = state.smoke.as_ref().ok_or_else(|| AppError::unsupported("未启用原生测试会话"))?;
         if method == "smokeFixture" {
             if !args.is_empty() { return Err(AppError::invalid("smokeFixture 不接受参数")); }
@@ -294,11 +297,22 @@ async fn backend_call(
     let application = state.application.clone();
     #[cfg(feature = "test-hooks")]
     let observed_method = method.clone();
+    #[cfg(feature = "test-hooks")]
+    let windows_acceptance = app.config().identifier == "io.dbstudio.windows-mysql-smoke";
+    #[cfg(feature = "test-hooks")]
+    if windows_acceptance {
+        eprintln!("[windows-acceptance] {observed_method}:enter");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let observed_started = std::time::Instant::now();
     #[cfg(feature = "mysql-acceptance")]
     let _=state.mysql.native_startup_trace("native_enter",&method);
     let joined = tauri::async_runtime::spawn_blocking(move || application.call(&method, args)).await;
+    #[cfg(feature = "test-hooks")]
+    if windows_acceptance {
+        let outcome = if matches!(&joined, Ok(Ok(_))) { "ok" } else { "error" };
+        eprintln!("[windows-acceptance] {observed_method}:{outcome}");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let _=state.mysql.native_startup_trace(if matches!(&joined,Ok(Ok(_))) {"native_returned"}else{"native_failed"},&observed_method);
     let result=joined.map_err(|_|internal_error())?;
@@ -351,6 +365,10 @@ pub fn run() {
         std::process::exit(2);
     }
     let context = tauri::generate_context!();
+    #[cfg(feature = "test-hooks")]
+    if context.config().identifier == "io.dbstudio.windows-mysql-smoke" {
+        eprintln!("[windows-acceptance] host-start");
+    }
     #[cfg(feature = "mysql-acceptance")]
     let mysql = {
         if context.config().identifier != "io.dbstudio.mysql-acceptance" || !context.config().app.windows.is_empty() {
@@ -430,6 +448,12 @@ pub fn run() {
         });
     #[cfg(feature = "test-hooks")]
     let builder = builder.on_page_load(|webview, payload| {
+        if webview.app_handle().config().identifier == "io.dbstudio.windows-mysql-smoke" {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                eprintln!("[windows-acceptance] page-finished");
+            }
+            return;
+        }
         #[cfg(feature = "mysql-acceptance")]
         if matches!(payload.event(),tauri::webview::PageLoadEvent::Finished) {
             if let Some(state)=webview.try_state::<DesktopState>() {

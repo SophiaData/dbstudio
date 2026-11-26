@@ -103,7 +103,7 @@ function fixture() {
     id: 'tab-A', connectionId: 'A', title: 'synthetic', table: { id: 'connection:A|table:synthetic', kind: 'table', name: 'synthetic', parentId: 'connection:A', hasChildren: false },
     description: { hasUniqueKey: true, columns: [{ name: 'id', typeName: 'INTEGER', primaryKeyOrdinal: 1, nullable: false, requiredOnInsert: true }] },
     sql: 'SELECT id FROM synthetic', querySql: 'SELECT id FROM synthetic', parameters: [], result: page(), page: page(),
-    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
+    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
   })
   wb.tabs.value.push(tab); wb.activateTab(tab)
   methods = {
@@ -315,7 +315,9 @@ await test('UI-06_completion_tracks_current_connection_for_tree_and_result_colum
     node(`connection:${id}|table:synthetic`, 'synthetic', 'table', [node(`connection:${id}|column:tree_${id}`, `tree_${id}`, 'column')])
   ]))
   tab.description.columns.push({ name: 'result_A' })
-  wb.tabs.value.push({ ...tab, id: 'tab-B', connectionId: 'B', description: { columns: [{ name: 'result_B' }] }, page: { columns: [{ name: 'page_B' }] } })
+  wb.tabs.value.push({ ...tab, id: 'tab-B', connectionId: 'B',
+    table: { ...tab.table, id: 'connection:B|table:synthetic', parentId: 'connection:B' },
+    description: { columns: [{ name: 'result_B' }] }, page: { columns: [{ name: 'page_B' }] } })
   const { exposed: editor } = mount(Editor, { workbench: wb })
   for (const id of ['A', 'B', 'A']) {
     wb.selectConnection(id); wb.sql.value = 'synthetic.'; editor.setSelection(10)
@@ -325,6 +327,43 @@ await test('UI-06_completion_tracks_current_connection_for_tree_and_result_colum
   }
   assert.deepEqual(calls, [])
 })
+await test('completion_resolves_aliases_in_the_current_statement_and_schema', ({ wb }) => {
+  const node = (id, name, kind, children = []) => ({ ref: { id, name, kind }, children, loaded: true })
+  const table = (connection, schema, name, column) => {
+    const id = `connection:${connection}|table:${schema}.${name}`
+    return node(id, name, 'table', [node(`${id}:column`, column, 'column')])
+  }
+  const mysql = wb.connections.value.find((connection) => connection.id === 'A')
+  mysql.dialectId = 'mysql'
+  wb.dialects.value.push({ id: 'mysql', quoting: { open: '\x60', close: '\x60', escape: 'double' } })
+  wb.roots.value = [
+    node('connection:A', 'A', 'connection', [
+      table('A', 'sales', 'users', 'sales_name'),
+      table('A', 'audit', 'users', 'audit_name'),
+      table('A', 'sales', 'orders', 'order_id')
+    ]),
+    node('connection:B', 'B', 'connection', [table('B', 'sales', 'users', 'other_connection')])
+  ]
+  const { exposed: editor } = mount(Editor, { workbench: wb })
+  const complete = (draft) => {
+    const caret = draft.indexOf('|')
+    assert.ok(caret >= 0)
+    wb.sql.value = draft.replace('|', '')
+    editor.setSelection(caret)
+    return [...editor.candidates]
+  }
+
+  assert.deepEqual(complete('SELECT u.| FROM sales.users u JOIN sales.orders AS o ON u.id = o.user_id'), ['sales_name'])
+  assert.deepEqual(complete('SELECT o.or| FROM sales.users u JOIN sales.orders AS o ON u.id = o.user_id'), ['order_id'])
+  assert.deepEqual(complete('SELECT u.id FROM audit.users u; SELECT u.| FROM sales.users u'), ['sales_name'])
+  assert.deepEqual(complete('SELECT \x60user alias\x60.| FROM \x60audit\x60.\x60users\x60 AS \x60user alias\x60'), ['audit_name'])
+  assert.deepEqual(complete('SELECT u.| FROM users u'), [], 'an ambiguous unqualified source must not mix schemas')
+  assert.deepEqual(complete("SELECT 'u.|' FROM sales.users u"), [], 'literal text is not a column reference')
+  assert.deepEqual(complete('SELECT u.| FROM sales.users u /* JOIN audit.users u */'), ['sales_name'])
+  assert.deepEqual(complete('SELECT (SELECT u.| FROM audit.users u) FROM sales.users u'), [], 'nested scopes must not borrow outer metadata')
+  assert.deepEqual(calls, [])
+})
+
 for (const outcome of ['cancel', 'failure', 'success', 'close-failure']) {
   await test(`UI-07_sort_${outcome}_keeps_sql_order_and_page_consistent`, async ({ wb, tab }) => {
     const { state: grid } = mount(Grid, { workbench: wb, tab })
@@ -336,19 +375,60 @@ for (const outcome of ['cancel', 'failure', 'success', 'close-failure']) {
     if (outcome === 'cancel') { assert.ok(decision.value); decision.value.settle('cancel') }
     await pending
     if (outcome === 'cancel' || outcome === 'failure') {
-      assert.equal(tab.order, null); assert.equal(tab.querySql, sql); assert.equal(tab.page, original)
+      assert.deepEqual(tab.order, []); assert.equal(tab.querySql, sql); assert.equal(tab.page, original)
       if (outcome === 'cancel') assert.equal(calls.length, 0)
     } else {
-      assert.deepEqual(tab.order, { column: 'id', direction: 'ASC' })
+      assert.deepEqual(tab.order, [{ column: 'id', direction: 'ASC' }])
       assert.match(tab.querySql, /ORDER BY "id" ASC$/); assert.notEqual(tab.page, original)
     }
     assert.equal(tab.busy, false); assert.equal(wb.locks.size, 0)
     tab.dirty.clear(); methods.runQuery = async () => ({ ...original, cursorId: 'retry-cursor' }); methods.closeCursor = async () => null
     await grid.sort('id')
-    assert.equal(tab.order.direction, outcome === 'cancel' || outcome === 'failure' ? 'ASC' : 'DESC')
+    assert.equal(tab.order[0].direction, outcome === 'cancel' || outcome === 'failure' ? 'ASC' : 'DESC')
     assert.equal(calls.filter((call) => call.method === 'runQuery').at(-1).args[1], tab.querySql)
   })
 }
+await test('shift_sort_sends_ordered_keys_and_restores_the_original_query_on_clear', async ({ wb, tab }) => {
+  const { state: grid } = mount(Grid, { workbench: wb, tab })
+  const originalSql = 'SELECT id, category AS "a""b" FROM synthetic ORDER BY id DESC LIMIT 25'
+  tab.sql = originalSql
+  tab.querySql = originalSql
+  const page = {
+    ...tab.page,
+    columns: [...tab.page.columns, { name: 'a"b', type: 'text' }],
+    offset: 200
+  }
+  tab.page = page
+  let queryCount = 0
+  methods.runQuery = async (_, sql, options) => ({
+    ...page, cursorId: `sort-${++queryCount}`, executedSql: sql, offset: options.offset
+  })
+  const latestQuery = () => calls.filter((call) => call.method === 'runQuery').at(-1).args
+
+  await grid.sort('id')
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC, "a""b" ASC$/)
+  assert.ok(latestQuery()[1].includes(`(${originalSql})`), 'original ORDER BY and LIMIT must stay in the derived table')
+  assert.equal(latestQuery()[2].offset, 0)
+  assert.equal(tab.page.offset, 0)
+
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC, "a""b" DESC$/)
+  await grid.sort('a"b', true)
+  assert.match(latestQuery()[1], /ORDER BY "id" ASC$/)
+
+  await grid.sort('a"b', true)
+  tab.filter = 'id >= 5'
+  await wb.transformTab(tab)
+  assert.match(latestQuery()[1], /WHERE "id" >= 5 ORDER BY "id" ASC, "a""b" ASC$/)
+  await grid.clearSort()
+  assert.match(latestQuery()[1], /WHERE "id" >= 5$/)
+  assert.deepEqual(tab.order, [])
+  tab.filter = ''
+  await wb.transformTab(tab)
+  assert.equal(latestQuery()[1], originalSql)
+})
+
 for (const failedMethod of ['transactionState', 'runQuery', 'closeCursor']) {
   await test(`UI-09_insert_success_${failedMethod}_failure_closes_form_and_blocks_resubmit`, async ({ wb, tab }) => {
     const { state: state, exposed: grid } = mount(Grid, { workbench: wb, tab })

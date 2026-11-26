@@ -19,6 +19,7 @@ import {
   scopedParametersForStatement,
   statementParameterSlots,
   validateScopedSqlParameters,
+  type SqlSourceRange,
   type ScopedSqlParameter
 } from './sql-editor-model'
 
@@ -35,12 +36,27 @@ export interface EditorExecution {
   readonly connectionId: string
   readonly connectionRevision: number
   readonly sql: string
+  readonly source?: SqlSourceRange
+}
+export interface SqlExecutionFailure {
+  readonly message: string
+  readonly statementIndex: number
+  readonly sql: string
+  readonly startLine: number
+  readonly endLine: number
+  readonly phase: 'execution' | 'after-execution'
+  readonly source?: SqlSourceRange
+}
+export interface SortKey {
+  readonly column: string
+  readonly direction: 'ASC' | 'DESC'
 }
 export interface ResultTab {
   id: string
   connectionId: string
   editorTabId?: string
   executionFailed?: boolean
+  failure?: SqlExecutionFailure
   title: string
   table: ObjectRef | null
   description: TableDescription | null
@@ -55,7 +71,7 @@ export interface ResultTab {
   dirty: Map<number, RowUpdate>
   selectedRows: Set<number>
   filter: string
-  order: { column: string; direction: 'ASC' | 'DESC' } | null
+  order: readonly SortKey[]
   generation: number
 }
 export interface ActiveTabContext {
@@ -253,7 +269,7 @@ export function useWorkbench() {
     const tab: ResultTab = reactive({
       id: crypto.randomUUID(), connectionId, editorTabId, title, table, description, sql: sqlText, querySql: sqlText,
       parameters: [], result: null, page: null, message: '', busy: false, invalidated: false,
-      dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
+      dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
     })
     tabs.value.push(tab)
     if (!editorTabId || activeEditorTabId.value === editorTabId) activateTab(tab)
@@ -288,10 +304,15 @@ export function useWorkbench() {
     if (!connectionId) return []
     return statementParameterSlots(script, dialectFor(connectionId)?.scriptRules ?? SQLITE_SCRIPT_RULES, parameterDialect(connectionId))
   }
-  function captureEditorExecution(script: string): EditorExecution {
+  function captureEditorExecution(script: string, source?: SqlSourceRange): EditorExecution {
     const tab = activeEditorTab.value
     if (!tab || !currentConnection.value?.connected) throw new Error('请先选择一个已连接的数据源')
-    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script }
+    if (source && (source.document !== tab.sql || !Number.isInteger(source.from) || !Number.isInteger(source.to) ||
+      source.from < 0 || source.to < source.from || source.to > source.document.length || source.document.slice(source.from, source.to) !== script)) {
+      throw new Error('SQL 草稿或选区已变化，请重新发起执行')
+    }
+    const origin = source ? { ...source } : script === tab.sql ? { document: tab.sql, from: 0, to: script.length } : undefined
+    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script, source: origin }
   }
   async function executeEditorRequest(request: EditorExecution, parameters: ScopedSqlParameter[] = []) {
     const tab = editorTabs.value.find((item) => item.id === request.editorTabId)
@@ -347,7 +368,17 @@ export function useWorkbench() {
           catch { /* Keep the original execution error if transaction state is unavailable. */ }
           if (!executed) await recordHistory({ sql: statement.sql, connectionId: connection.id, dialectId: connection.dialectId, elapsedMs: performance.now() - startedAt, status: 'error', error: errorText(cause) })
           tab.executionFailed = true
-          tab.message = `${connection.name} · 第 ${statement.startLine} 行：${errorText(cause)}`
+          const source = request.source ? {
+            document: request.source.document,
+            from: request.source.from + statement.startOffset,
+            to: request.source.from + statement.endOffset,
+          } : undefined
+          const startLine = source ? source.document.slice(0, source.from).split('\n').length : statement.startLine
+          const endLine = source ? source.document.slice(0, Math.max(source.from, source.to - 1)).split('\n').length : statement.endLine
+          tab.failure = { message: errorText(cause), sql: statement.sql, statementIndex: statement.index,
+            startLine, endLine, phase: executed ? 'after-execution' : 'execution', source }
+          const location = source ? `编辑器第 ${startLine} 行` : `执行片段第 ${startLine} 行`
+          tab.message = `${connection.name} · ${location}：${executed ? '语句已执行，后续处理失败；请先核对结果。' : ''}${errorText(cause)}`
           throw new Error(tab.message)
         }
         finally { tab.busy = false }
@@ -386,14 +417,27 @@ export function useWorkbench() {
     return !executing.value && !tab.busy && !locks.has(tab.connectionId) && editableSource(tab)
   }
   function stageCell(tab: ResultTab, row: ResultRow, column: string, value: CellValue) {
+    stageCells(tab, [{ row, changes: { [column]: value } }])
+  }
+  function stageCells(tab: ResultTab, edits: readonly { row: ResultRow; changes: RowUpdate['changes'] }[]) {
     if (!canEdit(tab)) throw new Error('当前结果不可编辑')
-    const keyValues = rowKeys(tab, row)
-    const old = tab.dirty.get(row.index)
-    const changes = { ...old?.changes, [column]: value }
-    const index = tab.page!.columns.findIndex((c) => c.name === column)
-    if (JSON.stringify(row.cells[index]) === JSON.stringify(value)) delete changes[column]
-    if (Object.keys(changes).length) tab.dirty.set(row.index, { keyValues, changes })
-    else tab.dirty.delete(row.index)
+    const pending = new Map<number, RowUpdate>()
+    for (const { row, changes: values } of edits) {
+      const keyValues = rowKeys(tab, row)
+      const original = pending.get(row.index) ?? tab.dirty.get(row.index)
+      const changes = new Map(Object.entries(original?.changes ?? {}))
+      for (const [column, value] of Object.entries(values)) {
+        const index = tab.page!.columns.findIndex((candidate) => candidate.name === column)
+        if (index < 0) throw new Error('目标列已变化，请重新编辑')
+        if (JSON.stringify(row.cells[index]) === JSON.stringify(value)) changes.delete(column)
+        else changes.set(column, value)
+      }
+      pending.set(row.index, { keyValues, changes: Object.fromEntries(changes) })
+    }
+    for (const [index, update] of pending) {
+      if (Object.keys(update.changes).length) tab.dirty.set(index, update)
+      else tab.dirty.delete(index)
+    }
   }
   async function reloadTab(tab: ResultTab, guard = true, offset = 0, transform?: Pick<ResultTab, 'querySql' | 'order'>) {
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
@@ -422,19 +466,56 @@ export function useWorkbench() {
     const filter = parseFilter(tab.filter, quoteColumn)
     if (!filter.ok) throw new Error(filter.error)
     const base = tab.sql.trim().replace(/;\s*$/, '')
-    let querySql = buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
-    if (order) querySql += ` ORDER BY ${quoteColumn(order.column)} ${order.direction}`
+    let querySql = order.length || filter.conditions.length
+      ? buildFilteredSql({ sourceKind: 'sql', sql: base }, filter.conditions, quoteColumn)
+      : base
+    if (order.length) {
+      const keys = order.map(({ column, direction }) => `${quoteColumn(column)} ${direction}`)
+      querySql += ` ORDER BY ${keys.join(', ')}`
+    }
     await reloadTab(tab, false, 0, { querySql, order })
   }
-  async function applyTab(tab: ResultTab) {
+  async function reviewAndApplyTab(tab: ResultTab) {
+    if (!tab.table || !tab.dirty.size) return
+    if (tab.busy || tab.invalidated || pendingEditors.has(tab.id)) throw new Error('请先结束当前单元格编辑')
+    const connection = connections.value.find((item) => item.id === tab.connectionId)
+    if (connection?.dialectId !== 'mysql') return applyTab(tab)
+
+    const table = tab.table
+    const generation = tab.generation
+    const snapshot = JSON.stringify([...tab.dirty.values()])
+    const updates: RowUpdate[] = JSON.parse(snapshot)
+    const plan = await backend.previewRowUpdates(table.id, updates)
+    const detail = plan.statements.map(({ sql, parameters }) =>
+      `${sql}\n参数（按占位符顺序） ${JSON.stringify(parameters)}`
+    ).join('\n\n')
+    const choice = await askDecision('更新 SQL 预览',
+      `连接「${connection.name}」，目标表「${table.name}」。计划更新 ${updates.length} 行，应用后仍需提交事务。`,
+      [{ value: 'apply', label: '应用修改' }, { value: 'cancel', label: '取消' }],
+      detail)
+    if (choice !== 'apply') return
+    if (tab.invalidated || tab.generation !== generation || tab.table?.id !== table.id ||
+        JSON.stringify([...tab.dirty.values()]) !== snapshot) {
+      throw new Error('结果或草稿已变化，请重新预览')
+    }
+    await applyTab(tab, { updates, fingerprint: plan.fingerprint })
+  }
+  async function applyTab(tab: ResultTab, reviewed?: { updates: RowUpdate[]; fingerprint: string }) {
     if (!tab.table || !tab.dirty.size) return
     if (tab.busy || tab.invalidated) throw new Error('当前结果不可应用修改')
     tab.busy = true
     try {
       const offset = tab.page?.offset ?? 0
-      const updates = [...tab.dirty.values()]
+      const updates = reviewed?.updates ?? [...tab.dirty.values()]
       const wasActive = transactions[tab.connectionId]?.active === true
-      const result = await backend.applyEdits(tab.table.id, updates).catch(async (cause: unknown) => {
+      const request = reviewed
+        ? backend.applyEdits(tab.table.id, updates, reviewed.fingerprint)
+        : backend.applyEdits(tab.table.id, updates)
+      const result = await request.catch(async (cause: unknown) => {
+        if (reviewed && cause !== null && typeof cause === 'object' &&
+            'code' in cause && cause.code === 'conflict') {
+          throw new Error('更新计划已变化，请重新预览')
+        }
         let state: TransactionState | null = null
         try { state = await readTransaction(tab.connectionId) } catch { /* Preserve the original apply error when state cannot be confirmed. */ }
         const mysqlDeadlock = cause !== null && typeof cause === 'object' &&
@@ -700,9 +781,10 @@ export function useWorkbench() {
     transactions, locks, backgroundTasks, pendingEditors, status, statusError, booting, metadataReady, executing, executionConnectionId, executionConnection, migrationWarning,
     setStatus, attempt, boot, refreshConnections, selectConnection, activateTab, selectNode, toggleNode, placeholders, parameterSlots,
     editorTabs, activeEditorTabId, editorStorageWarning, openEditorTab, activateEditorTab, closeEditorTab,
-    executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, canEdit, rowKeys,
+    executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, stageCells, canEdit, rowKeys,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
+    reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),
     reloadTab: (tab: ResultTab, guard = true) => withConnectionOperation(tab.connectionId, () => reloadTab(tab, guard)),
     transformTab: (tab: ResultTab, order = tab.order) => withConnectionOperation(tab.connectionId, () => transformTab(tab, order)),

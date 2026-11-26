@@ -163,6 +163,43 @@ fn four_export_formats_stream_all_pages_and_report_real_bytes_and_live_paged() {
 }
 
 #[test]
+fn sql_export_replays_generated_columns_and_preserves_writable_values() {
+    let source = Fixture::new();
+    let target = Fixture::new();
+    let schema = "CREATE TABLE items (
+        id INTEGER PRIMARY KEY,
+        folded TEXT GENERATED ALWAYS AS (upper(label)) STORED,
+        label TEXT,
+        doubled INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL,
+        note TEXT
+    )";
+    source.sql(schema);
+    target.sql(schema);
+    source.sql("INSERT INTO items (id, label, note) VALUES (42, 'O''Brien', ''), (71, 'second', NULL)");
+    source.app.call("commitTransaction", vec![json!(source.node())]).unwrap();
+
+    let result = source.export("restore.sql", "sql-insert", json!({"nodeId":source.table("items")}), 1);
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["rowsRead"], 2);
+    assert_eq!(result["batches"], 2);
+
+    let script = fs::read_to_string(source.dir.join("restore.sql")).unwrap();
+    for statement in script.lines() {
+        target.app.call("executeStatement", vec![json!(target.node()), json!(statement)])
+            .expect("exported INSERT should replay in a separate SQLite database");
+    }
+    target.app.call("commitTransaction", vec![json!(target.node())]).unwrap();
+    let query = "SELECT id, folded, label, doubled, note FROM items ORDER BY id";
+    assert_eq!(target.query(query)["rows"], source.query(query)["rows"]);
+
+    let result = source.export("all.json", "json", json!({"nodeId":source.table("items")}), 1);
+    assert_eq!(result["status"], "completed", "{result}");
+    let exported: Value = serde_json::from_str(&fs::read_to_string(source.dir.join("all.json")).unwrap()).unwrap();
+    assert_eq!(exported[0]["folded"], "O'BRIEN");
+    assert_eq!(exported[0]["doubled"], 84);
+}
+
+#[test]
 fn export_rejects_truncated_values_instead_of_silently_writing_previews() {
     let fixture = Fixture::new();
     let result = fixture.export("truncated.json","json",json!({"connectionId":fixture.id,"sql":"SELECT printf('%.*c', 2000, 'x') AS large_text"}),10);

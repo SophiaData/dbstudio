@@ -86,7 +86,7 @@ function fixture() {
     id: 'tab-A', connectionId: 'A', title: 'synthetic', table: { id: 'connection:A|table:synthetic', name: 'synthetic', kind: 'table' },
     description: { hasUniqueKey: true, columns: columns.map((column, index) => ({ name: column.name, typeName: index ? 'TEXT' : 'INTEGER', primaryKeyOrdinal: index ? null : 1, nullable: index !== 0, requiredOnInsert: index === 0 })) },
     sql: initial.executedSql, querySql: initial.executedSql, parameters: [], result: initial, page: initial,
-    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: null, generation: 0
+    message: '', busy: false, invalidated: false, dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
   })
   wb.tabs.value.push(tab); wb.activateTab(tab)
   const inserted = []

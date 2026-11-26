@@ -2,6 +2,7 @@
 use dbstudio_protocol::{CancelHandle,ConnectionConfig,Driver,DriverError,DriverResult,SecretMap,string_argument};
 use mysql::{Conn,Opts,OptsBuilder,Params,Row,SslOpts,Value as MValue,prelude::Queryable};
 use serde_json::{json,Value};
+use sha2::{Digest, Sha256};
 use base64::{engine::general_purpose::STANDARD,Engine};
 use crate::{network as n,tls::{self,TlsMode},tunnel::{self,SshTunnel}};
 use std::{collections::HashMap,net::{IpAddr,Ipv4Addr,Ipv6Addr,SocketAddr,ToSocketAddrs},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Instant};
@@ -520,43 +521,90 @@ impl MysqlDriver {
         self.pending+=affected;Ok(json!({"affected":affected,"keyValues":key_values}))
     }
     fn keys(&mut self,id:&str,input:&Value)->DriverResult<(String,Vec<Value>)>{
-        if !id.starts_with("table:"){return Err(DriverError::unsupported("视图不能执行主键编辑"));}let desc=self.describe(id)?;let keys=desc["primaryKey"].as_array().unwrap();
+        if !id.starts_with("table:"){return Err(DriverError::unsupported("视图不能执行主键编辑"));}
+        Self::key_predicate(&self.describe(id)?, input)
+    }
+    fn key_predicate(desc: &Value, input: &Value) -> DriverResult<(String, Vec<Value>)> {
+        let keys=desc["primaryKey"].as_array().unwrap();
         if keys.is_empty(){return Err(DriverError::unsupported("表缺少主键，禁止按行编辑"));}let supplied=input.as_object().ok_or_else(||DriverError::invalid("缺少主键值"))?;
         if supplied.len()!=keys.len(){return Err(DriverError::invalid("必须提供全部且仅有主键列"));}
         let mut clauses=vec![];let mut values=vec![];
         for key in keys{let name=key.as_str().unwrap();let val=n::cell_param(supplied.get(name).ok_or_else(||DriverError::invalid("缺少主键值"))?)?;if val.is_null(){return Err(DriverError::invalid("主键不能为NULL"));}values.push(val);clauses.push(format!("{}=?",n::quote(name,true)));}
         Ok((clauses.join(" AND "),values))
     }
-    fn edit(&mut self,method:&str,id:&str,input:&Value)->DriverResult<Value>{
+    fn prepare_update(target: &str, item: &Value, description: &Value) -> DriverResult<(String, Vec<Value>)> {
+        let (predicate, key_values) = Self::key_predicate(description, &item["keyValues"])?;
+        let changes = item["changes"].as_object().filter(|changes| !changes.is_empty())
+            .ok_or_else(|| DriverError::invalid("缺少修改列"))?;
+        let columns = description["columns"].as_array().unwrap();
+        let mut assignments = Vec::new();
+        let mut values = Vec::new();
+        for (name, value) in changes {
+            let column = columns.iter().find(|column| column["name"] == name.as_str())
+                .ok_or_else(|| DriverError::invalid("未知列"))?;
+            if column["generated"].is_string() {
+                return Err(DriverError::invalid("不能写入生成列"));
+            }
+            assignments.push(format!("{}=?", n::quote(name, true)));
+            values.push(n::cell_param(value)?);
+        }
+        values.extend(key_values);
+        params(&values)?;
+        Ok((format!("UPDATE {target} SET {} WHERE {predicate}", assignments.join(",")), values))
+    }
+    fn plan_updates(&mut self, id: &str, target: &str, rows: &[Value])
+        -> DriverResult<Vec<(String, Vec<Value>)>>
+    {
+        let description = self.describe(id)?;
+        rows.iter().map(|row| Self::prepare_update(target, row, &description)).collect()
+    }
+    fn update_plan_fingerprint(plan: &[(String, Vec<Value>)]) -> DriverResult<String> {
+        let encoded = serde_json::to_vec(plan).map_err(|_| DriverError::invalid("更新计划无法序列化"))?;
+        Ok(format!("{:x}", Sha256::digest(encoded)))
+    }
+    fn preview_updates(&mut self, id: &str, input: &Value) -> DriverResult<Value> {
+        self.require_transactional_table(id)?;
+        let rows = input.as_array().filter(|rows| !rows.is_empty())
+            .ok_or_else(|| DriverError::invalid("需要至少一行更新"))?;
+        let plan = self.plan_updates(id, &n::qualified(id, true)?, rows)?;
+        let fingerprint = Self::update_plan_fingerprint(&plan)?;
+        let statements: Vec<_> = plan.into_iter().map(|(sql, values)| json!({"sql":sql,"parameters":values})).collect();
+        Ok(json!({"fingerprint":fingerprint,"statements":statements}))
+    }
+    fn edit(&mut self,method:&str,id:&str,input:&Value,expected:Option<&Value>)->DriverResult<Value>{
         self.require_transactional_table(id)?;
         let target=n::qualified(id,true)?;let mut outcomes=vec![];let mut total=0;
-        let rows=if method=="applyEdits"||method=="deleteRows"{input.as_array().ok_or_else(||DriverError::invalid("需要行数组"))?.clone()}else{vec![input.clone()]};self.begin()?;
+        let rows=input.as_array().ok_or_else(||DriverError::invalid("需要行数组"))?;
+        let mut confirmed = if let Some(expected) = expected {
+            let fingerprint = expected.as_str().filter(|_| method == "applyEdits")
+                .ok_or_else(|| DriverError::invalid("更新计划标识无效"))?;
+            let plan = self.plan_updates(id, &target, rows)?;
+            if Self::update_plan_fingerprint(&plan)? != fingerprint {
+                return Err(DriverError::new("conflict", "更新计划已变化，请重新预览"));
+            }
+            Some(plan.into_iter())
+        } else {
+            None
+        };
+        self.begin()?;
         for(index,item)in rows.iter().enumerate(){
             // Validation runs per row: earlier rows may already have executed, so a
             // late bad row must land in its own outcome instead of aborting the call
             // and leaving the reported state behind the real transaction.
-            let prepared=(||->DriverResult<(String,Vec<Value>)>{
-                if method=="insertRow"{
-                    let values=item.as_object().ok_or_else(||DriverError::invalid("插入值无效"))?;let desc=self.describe(id)?;let mut cols=vec![];let mut params=vec![];
-                    for(name,value)in values{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}cols.push(n::quote(name,true));params.push(n::cell_param(value)?);}
-                    Ok((format!("INSERT INTO {target} ({}) VALUES ({})",cols.join(","),vec!["?";params.len()].join(",")),params))
-                }else{
-                    let keys=if method=="applyEdits"{&item["keyValues"]}else{item};let(where_sql,key_values)=self.keys(id,keys)?;
-                    if method=="deleteRows"{Ok((format!("DELETE FROM {target} WHERE {where_sql}"),key_values))}else{
-                        let changes=item["changes"].as_object().ok_or_else(||DriverError::invalid("缺少修改列"))?;if changes.is_empty(){return Err(DriverError::invalid("修改列不能为空"));}
-                        let desc=self.describe(id)?;let mut set=vec![];let mut values=vec![];
-                        for(name,value)in changes{if !desc["columns"].as_array().unwrap().iter().any(|c|c["name"]==name.as_str()){return Err(DriverError::invalid("未知列"));}values.push(n::cell_param(value)?);set.push(format!("{}=?",n::quote(name,true)));}
-                        values.extend(key_values);Ok((format!("UPDATE {target} SET {} WHERE {where_sql}",set.join(",")),values))
-                    }
-                }
-            })();
+            let prepared = if let Some(confirmed) = &mut confirmed {
+                Ok(confirmed.next().expect("one confirmed update per input row"))
+            } else if method == "applyEdits" {
+                self.describe(id).and_then(|description| Self::prepare_update(&target, item, &description))
+            } else {
+                self.keys(id, item).map(|(predicate, values)| (format!("DELETE FROM {target} WHERE {predicate}"), values))
+            };
             let(sql,values)=match prepared{
                 Ok(prepared)=>prepared,
                 Err(error)=>{outcomes.push(row_outcome(index,0,Some(error.message),""));continue;}
             };
             self.execute("SAVEPOINT dbstudio_edit",&[])?;
             match self.execute(&sql,&values){
-                Ok(n)if method=="insertRow"||n<=1=>{
+                Ok(n) if n <= 1 => {
                     self.execute("RELEASE SAVEPOINT dbstudio_edit",&[])?;
                     total+=n;self.pending+=n;
                     outcomes.push(row_outcome(index,n,None,&sql));
@@ -941,7 +989,11 @@ impl Driver for MysqlDriver {
             "importBatch"=>{let result=self.import_batch(string_argument(&args,0,"tableId")?,args.get(1).ok_or_else(||DriverError::invalid("缺少导入批次"))?);if result.is_err()&&self.import_active{self.import_failed=true;}result},
             "resolveTransferSource"=>n::transfer_source(string_argument(&args,0,"nodeId")?,true),
             "insertRow"=>self.insert_row(string_argument(&args,0,"tableId")?,args.get(1).ok_or_else(||DriverError::invalid("缺少插入值"))?),
-            "applyEdits"|"deleteRows"=>self.edit(method,string_argument(&args,0,"tableId")?,args.get(1).ok_or_else(||DriverError::invalid("缺少编辑值"))?),
+            "previewRowUpdates" => self.preview_updates(
+                string_argument(&args, 0, "tableId")?,
+                args.get(1).ok_or_else(|| DriverError::invalid("缺少编辑值"))?,
+            ),
+            "applyEdits"|"deleteRows"=>self.edit(method,string_argument(&args,0,"tableId")?,args.get(1).ok_or_else(||DriverError::invalid("缺少编辑值"))?,args.get(2)),
             "countRows"=>{let sql=format!("SELECT COUNT(*) FROM {}",n::qualified(string_argument(&args,0,"tableId")?,true)?);let rows=self.query(&sql,&[])?;Ok(json!(rows[0].get::<u64,_>(0).ok_or_else(||DriverError::unsupported("计数超出范围"))?))},
             "tableSelectSql"=>Ok(json!(format!("SELECT * FROM {}",n::qualified(string_argument(&args,0,"tableId")?,true)?))),
             "createTable"|"createView"|"dropTable"|"dropView"|"renameTable"=>{

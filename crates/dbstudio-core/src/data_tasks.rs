@@ -381,6 +381,12 @@ fn spawn_task(app: &Application, kind: Kind, session: Arc<Session>, mut progress
     Ok(progress)
 }
 
+fn is_generated_column(column: &Value) -> bool {
+    column["generated"].as_bool() == Some(true)
+        || column["generated"].as_str().is_some_and(|value| !value.is_empty())
+        || column["isGenerated"].as_bool() == Some(true)
+}
+
 fn validate_mapping(description: &Value, target_columns: &[String]) -> Result<Vec<String>> {
     let columns = description["columns"].as_array().ok_or_else(|| invalid("驱动没有返回表结构"))?;
     let mut mapped = Vec::new();
@@ -388,8 +394,8 @@ fn validate_mapping(description: &Value, target_columns: &[String]) -> Result<Ve
         let column = columns.iter().find(|column| column["name"].as_str() == Some(wanted))
             .or_else(|| columns.iter().find(|column| column["name"].as_str().map(|name| name.eq_ignore_ascii_case(wanted)).unwrap_or(false)))
             .ok_or_else(|| invalid("导入映射包含未知目标列"))?;
-        if column["generated"].as_bool() == Some(true) || column["generated"].as_str().is_some_and(|s| !s.is_empty()) ||
-            column["hidden"].as_bool() == Some(true) || column["isGenerated"].as_bool() == Some(true) || column["identityGeneration"].as_str() == Some("always") {
+        if is_generated_column(column) || column["hidden"].as_bool() == Some(true)
+            || column["identityGeneration"].as_str() == Some("always") {
             return Err(invalid("导入映射不能写入生成列或 ALWAYS identity 列"));
         }
         let name = text(column, "name")?.to_owned();
@@ -398,8 +404,7 @@ fn validate_mapping(description: &Value, target_columns: &[String]) -> Result<Ve
     }
     for column in columns {
         let name = text(column, "name")?;
-        let generated = column["generated"].as_bool() == Some(true) || column["isGenerated"].as_bool() == Some(true) ||
-            column["generated"].as_str().is_some_and(|s| !s.is_empty());
+        let generated = is_generated_column(column);
         let identity = column["identity"].as_bool() == Some(true) || column["isIdentity"].as_bool() == Some(true) ||
             column["autoIncrement"].as_bool() == Some(true) || column["identityGeneration"].as_str().is_some();
         let default = column.get("defaultValue").or_else(|| column.get("defaultExpression")).is_some_and(|v| !v.is_null());
@@ -574,6 +579,46 @@ fn insert_target(target: &Value, dialect: &str) -> Result<String> {
     let table = target.get("table").or_else(|| target.get("name")).and_then(Value::as_str).ok_or_else(|| invalid("INSERT 目标没有表名"))?;
     Ok(format!("{}.{}", quote_identifier(schema, dialect)?, quote_identifier(table, dialect)?))
 }
+
+fn insert_projection(
+    target: &str,
+    dialect: &str,
+    description: &Value,
+    result_columns: &[String],
+) -> Result<(String, Vec<usize>)> {
+    let columns = description["columns"].as_array()
+        .ok_or_else(|| AppError::new("driver-contract", "SQL 导出缺少表结构"))?;
+    let mut metadata = HashMap::with_capacity(columns.len());
+    for column in columns {
+        if metadata.insert(text(column, "name")?, column).is_some() {
+            return Err(AppError::new("driver-contract", "SQL 导出的表结构包含重复列名"));
+        }
+    }
+
+    let mut names = Vec::new();
+    let mut indices = Vec::new();
+    let mut override_identity = false;
+    for (index, name) in result_columns.iter().enumerate() {
+        let column = metadata.get(name.as_str())
+            .ok_or_else(|| AppError::new("source-changed", "SQL 导出结果列与表结构不一致"))?;
+        if is_generated_column(column) || column["hidden"].as_bool() == Some(true) {
+            continue;
+        }
+        if dialect == "postgresql" && column["identityGeneration"].as_str() == Some("always") {
+            override_identity = true;
+        }
+        names.push(quote_identifier(name, dialect)?);
+        indices.push(index);
+    }
+    if indices.is_empty() {
+        return Err(invalid("SQL INSERT 导出未找到可写入的列"));
+    }
+
+    let overriding = if override_identity { " OVERRIDING SYSTEM VALUE" } else { "" };
+    let prefix = format!("INSERT INTO {target} ({}){overriding} VALUES", names.join(", "));
+    Ok((prefix, indices))
+}
+
 fn cell_json(cell: &Value) -> Result<Value> {
     if cell["truncated"].as_bool() == Some(true) { return Err(AppError::new("truncated-cell", "导出遇到截断值，已拒绝写入不完整数据")) }
     match cell["kind"].as_str() {
@@ -668,7 +713,14 @@ fn start_export(app: &Application, request: &Value) -> Result<Value> {
         let resolution = if sql.is_none() { driver_call(driver, "resolveTransferSource", vec![json!(raw)])? } else { Value::Null };
         let sql = sql.unwrap_or_else(|| resolution["sql"].as_str().unwrap_or("").to_owned());
         if sql.trim().is_empty() { return Err(AppError::new("driver-contract", "驱动未解析导出来源")) }
-        let target = if format == "sql-insert" { Some(insert_target(&resolution["target"], &dialect)?) } else { None };
+        let insert = if format == "sql-insert" {
+            let target = insert_target(&resolution["target"], &dialect)?;
+            let node = raw.as_deref().ok_or_else(|| invalid("SQL INSERT 导出必须来源于具体表"))?;
+            let description = driver_call(driver, "describeTable", vec![json!(node)])?;
+            Some((target, description))
+        } else {
+            None
+        };
         with_export_destination_shared(&state, &protected_root, &destination, || { task.check()?; Ok(()) })?;
         let partial = destination.parent().unwrap().join(format!(".dbstudio-{}-export.partial", task.id));
         let mut open = OpenOptions::new(); open.write(true).create_new(true);
@@ -688,6 +740,9 @@ fn start_export(app: &Application, request: &Value) -> Result<Value> {
             let columns = page["columns"].as_array().ok_or_else(|| AppError::new("driver-contract", "导出缺少列元数据"))?;
             column_names = columns.iter().map(|v| text(v,"name").map(str::to_owned)).collect::<Result<_>>()?;
             if column_names.len() > MAX_COLUMNS { return Err(AppError::new("resource-limit", "导出列数过多")) }
+            let insert = insert.as_ref().map(|(target, description)| {
+                insert_projection(target, &dialect, description, &column_names)
+            }).transpose()?;
             let unique: HashSet<_> = column_names.iter().collect();
             if (format == "json" || format == "jsonl") && header && unique.len() != column_names.len() { return Err(invalid("JSON 对象导出不允许重复列名")) }
             if format == "csv" && header { emit(&mut writer, &mut written, &(column_names.iter().map(|s| csv_field(s,false)).collect::<Vec<_>>().join(",") + &newline))?; }
@@ -702,8 +757,10 @@ fn start_export(app: &Application, request: &Value) -> Result<Value> {
                     task.check()?;
                     let cells = row["cells"].as_array().ok_or_else(|| AppError::new("driver-contract", "导出行单元格无效"))?;
                     if cells.len() != column_names.len() { return Err(AppError::new("driver-contract", "导出行列数不一致")) }
-                    let line = if format == "sql-insert" {
-                        format!("INSERT INTO {} ({}) VALUES ({});{}",target.as_ref().unwrap(), column_names.iter().map(|v| quote_identifier(v,&dialect)).collect::<Result<Vec<_>>>()?.join(", "),cells.iter().map(|v| cell_sql(v,&dialect)).collect::<Result<Vec<_>>>()?.join(", "),newline)
+                    let line = if let Some((prefix, indices)) = &insert {
+                        let values = indices.iter().map(|&index| cell_sql(&cells[index], &dialect))
+                            .collect::<Result<Vec<_>>>()?;
+                        format!("{prefix} ({});{newline}", values.join(", "))
                     } else {
                         let values = cells.iter().map(cell_json).collect::<Result<Vec<_>>>()?;
                         if format == "csv" {
@@ -769,6 +826,21 @@ fn start_export(app: &Application, request: &Value) -> Result<Value> {
 #[cfg(test)]
 mod sql_export_tests {
     use super::*;
+
+    #[test]
+    fn postgres_insert_export_preserves_identity_and_omits_generated_columns() {
+        let columns = json!({"columns": [
+            {"name": "id", "generated": null, "identityGeneration": "always"},
+            {"name": "computed", "generated": "stored", "identityGeneration": null},
+            {"name": "body", "generated": null, "identityGeneration": null}
+        ]});
+        let result_columns = ["body", "computed", "id"].map(str::to_owned);
+        let (prefix, indices) = insert_projection(
+            "\"public\".\"items\"", "postgresql", &columns, &result_columns,
+        ).unwrap();
+        assert_eq!(indices, vec![0, 2]);
+        assert_eq!(prefix, "INSERT INTO \"public\".\"items\" (\"body\", \"id\") OVERRIDING SYSTEM VALUE VALUES");
+    }
 
     #[test]
     fn mysql_text_literals_preserve_bytes_without_sql_mode_escape_rules() {

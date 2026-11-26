@@ -193,7 +193,7 @@ impl Application {
             },
             "transactionState" | "commitTransaction" | "rollbackTransaction" => self.driver_call(str_arg(&args, 0)?, method, Vec::new()),
             "createTable" | "createView" => self.driver_call(str_arg(&args, 0)?, method, args[1..].to_vec()),
-            "describeTable" | "tableSelectSql" | "applyEdits" | "insertRow" | "deleteRows" | "countRows" | "dropTable" | "dropView" | "renameTable" => {
+            "describeTable" | "tableSelectSql" | "previewRowUpdates" | "applyEdits" | "insertRow" | "deleteRows" | "countRows" | "dropTable" | "dropView" | "renameTable" => {
                 let node = str_arg(&args, 0)?;
                 let (_, raw) = parse_node(node)?;
                 let raw = raw.ok_or_else(|| AppError::invalid("请选择具体数据库对象"))?;

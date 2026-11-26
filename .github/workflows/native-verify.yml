@@ -1,9 +1,7 @@
 name: native-verify
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # PRs and main pushes enter through verify.yml; releases reuse the full suite.
   workflow_dispatch:
   workflow_call:
 
@@ -16,7 +14,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: '2'
+  CARGO_BUILD_JOBS: '1'
+  RUST_TEST_THREADS: '1'
   # Native checks do not use the legacy Electron runtime.
   ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 
@@ -78,11 +77,12 @@ jobs:
 
   native-databases:
     name: Dedicated real database and TLS fixtures
+    needs: desktop-macos
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # Leave capacity for database containers while compiling native clients.
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -1,14 +1,14 @@
 import { shallowRef } from 'vue'
 
 export interface DecisionOption { value: string; label: string; danger?: boolean }
-export interface DecisionDialog { title: string; message: string; options: DecisionOption[]; settle(value: string): void }
+export interface DecisionDialog { title: string; message: string; options: DecisionOption[]; detail?: string; settle(value: string): void }
 export const decision = shallowRef<DecisionDialog | null>(null)
 
-export function askDecision(title: string, message: string, options: DecisionOption[]): Promise<string> {
+export function askDecision(title: string, message: string, options: DecisionOption[], detail?: string): Promise<string> {
   if (decision.value) return Promise.resolve('cancel')
   return new Promise((resolve) => {
     decision.value = {
-      title, message, options,
+      title, message, options, detail,
       settle(value) { decision.value = null; resolve(value) }
     }
   })
