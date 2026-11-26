@@ -13,6 +13,8 @@ import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } fro
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
 const { viewport, query: columnQuery, target: targetColumn, matches: matchingColumns, highlighted: highlightedColumn,
   resizing, tableWidth, width: columnWidth, minWidth, maxWidth, rowNumberWidth, startResize, moveResize, endResize,
+  visibleColumns, visibleOrder, isHidden, isPinned, hiddenCount, pinnedCount, stickyOffsets, columnStyle, overflowPins,
+  toggleHidden, togglePinned, showAll, unpinAll,
   cancelResize, resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll } = useResultGridLayout(() => props.tab)
 const editing = ref<{ row: ResultRow; column: number; raw: string; kind: string; isNull: boolean } | null>(null)
 const insertOpen = ref(false)
@@ -33,6 +35,9 @@ const insertInclude = reactive(new Set<string>())
 const insertNulls = reactive(new Set<string>())
 const error = ref('')
 const selectedCell = ref<{ row: ResultRow; column: number } | null>(null)
+watch(visibleOrder, (indices) => {
+  if (selectedCell.value && !indices.includes(selectedCell.value.column)) selectedCell.value = null
+}, { flush: 'sync' })
 const viewer = ref<{ value: CellValue; title: string } | null>(null)
 const loadedExport = ref(false)
 const loadedExportController = ref<InstanceType<typeof LoadedExportDialog> | null>(null)
@@ -60,7 +65,7 @@ async function readCell(row: ResultRow, column: number) {
 async function buildCopyText(wholeRow = false): Promise<string | null> {
   const selected = selectedCell.value
   if (!selected || props.tab.invalidated) return null
-  const columns = wholeRow ? props.tab.page!.columns.map((_, index) => index) : [selected.column]
+  const columns = wholeRow ? [...visibleOrder.value] : [selected.column]
   const cells: string[] = []
   for (const column of columns) cells.push(textValue(await fullCell(props.tab, selected.row.index, column, displayed(selected.row, column))) ?? '')
   return cells.join('\t')
@@ -72,7 +77,7 @@ async function copyCell(wholeRow = false) {
   try {
     const text = await buildCopyText(wholeRow)
     await writeClipboardText(text ?? '')
-    props.workbench.setStatus(wholeRow ? '已复制整行（Tab 分隔，NULL 为空字符串）' : '已复制单元格（NULL 为空字符串）')
+    props.workbench.setStatus(wholeRow ? '已复制整行可见列（Tab 分隔，NULL 为空字符串）' : '已复制单元格（NULL 为空字符串）')
   } catch (cause) { error.value = `复制失败：${errorText(cause)}` }
   finally { reading.value = false; props.tab.busy = false }
 }
@@ -89,18 +94,21 @@ async function copyMarkedRows() {
   const cursorId = result?.cursorId
   const generation = tab.generation
   const dirty = new Map(tab.dirty)
+  const indices = [...visibleOrder.value]
+  const orderKey = indices.join(',')
   const ownsCopy = () => !disposed && props.tab === tab && props.workbench.activeTab.value === tab &&
     tab.generation === generation && tab.page === page && tab.result === result &&
-    tab.result?.cursorId === cursorId && !tab.invalidated
+    tab.result?.cursorId === cursorId && !tab.invalidated && visibleOrder.value.join(',') === orderKey
 
   reading.value = true
   error.value = ''
   try {
-    const lines = [page.columns.map(({ name }) => tsvField(name)).join('\t')]
+    const lines = [indices.map(index => tsvField(page.columns[index]!.name)).join('\t')]
     for (const row of rows) {
       const fields: string[] = []
-      for (const [index, { name }] of page.columns.entries()) {
+      for (const index of indices) {
         if (!ownsCopy()) return
+        const { name } = page.columns[index]!
         const cell = dirty.get(row.index)?.changes[name] ?? row.cells[index]!
         const value = await fullCell(tab, row.index, index, cell)
         fields.push(tsvField(textValue(value) ?? ''))
@@ -109,7 +117,7 @@ async function copyMarkedRows() {
     }
     if (!ownsCopy()) return
     await writeClipboardText(lines.join('\r\n'))
-    if (ownsCopy()) props.workbench.setStatus(`已复制 ${rows.length} 行（含表头，NULL 为空字段）`)
+    if (ownsCopy()) props.workbench.setStatus(`已复制 ${rows.length} 行可见列（含表头，NULL 为空字段）`)
   } catch (cause) {
     if (ownsCopy()) error.value = `复制失败：${errorText(cause)}`
   } finally {
@@ -173,11 +181,13 @@ function pasteCells(event: ClipboardEvent, row: ResultRow, firstColumn: number) 
     if (!matrix.length) return
     const firstRow = page.rows.indexOf(row)
     const width = matrix[0]!.length
-    if (firstRow < 0 || firstRow + matrix.length > page.rows.length || firstColumn + width > page.columns.length) {
+    const start = visibleOrder.value.indexOf(firstColumn)
+    if (firstRow < 0 || start < 0 || firstRow + matrix.length > page.rows.length || start + width > visibleOrder.value.length) {
       throw new Error('粘贴范围超出当前页，请选择足够的行和列')
     }
     const metadata = props.tab.description?.columns ?? []
-    const columns = page.columns.slice(firstColumn, firstColumn + width).map(({ name }) => {
+    const columns = visibleOrder.value.slice(start, start + width).map(index => {
+      const { name } = page.columns[index]!
       const description = metadata.find((column) => column.name === name)
       if (!description || page.columns.filter((column) => column.name === name).length !== 1) {
         throw new Error('无法确定目标列「' + name + '」')
@@ -309,7 +319,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(false)">复制单元格</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(true)">复制整行</button>
       <button :disabled="locked || reading || tab.invalidated || !tab.page || !tab.selectedRows.size" @click="copyMarkedRows">复制选中行</button>
-      <button :disabled="locked || tab.invalidated || !tab.page" @click="openLoadedExport">导出当前页…</button>
+      <button :disabled="locked || tab.invalidated || !tab.page" title="导出当前页全部结果列，包括隐藏列，使用原始列顺序" @click="openLoadedExport">导出当前页…</button>
       <button v-if="tab.table?.kind === 'table'" :disabled="locked || tab.invalidated" @click="countRows">COUNT{{ rowCount !== null ? `: ${rowCount}` : '' }}</button>
       <span class="spacer" /><span class="transaction-state">{{ workbench.transactions[tab.connectionId]?.active ? `未提交 · ${workbench.transactions[tab.connectionId]?.pendingAffected ?? 0} 行` : '无活动事务' }}</span>
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, true))">提交</button>
@@ -326,19 +336,24 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <label :for="`column-search-${tab.id}`">跳转列</label>
       <input :id="`column-search-${tab.id}`" v-model="columnQuery" type="search" placeholder="输入列名" @keydown.enter="jumpKey" />
       <select v-model="targetColumn" aria-label="匹配列" :disabled="!matchingColumns.length" @keydown.enter="jumpKey">
-        <option v-for="column in matchingColumns" :key="column.index" :value="column.index">{{ column.index + 1 }} · {{ column.name }}</option>
+        <option v-for="column in matchingColumns" :key="column.index" :value="column.index">{{ column.index + 1 }} · {{ column.name }}{{ isHidden(column.index) ? '（隐藏）' : isPinned(column.index) ? '（固定）' : '' }}</option>
       </select>
       <button :disabled="!matchingColumns.length" @click="jumpToColumn">跳转</button>
+      <button :disabled="targetColumn < 0 || reading" :aria-pressed="isPinned(targetColumn)" @click="togglePinned(targetColumn)">{{ isPinned(targetColumn) ? '取消固定此列' : '固定此列' }}</button>
+      <button :disabled="targetColumn < 0 || reading || (!isHidden(targetColumn) && visibleOrder.length <= 1)" @click="toggleHidden(targetColumn)">{{ isHidden(targetColumn) ? '显示此列' : '隐藏此列' }}</button>
+      <button v-if="hiddenCount" :disabled="reading" @click="showAll">显示全部列 ({{ hiddenCount }})</button>
+      <button v-if="pinnedCount" :disabled="reading" @click="unpinAll">取消全部固定</button>
       <span v-if="!matchingColumns.length" class="muted" role="status">没有匹配列</span>
       <span class="spacer" />
       <button title="根据列名和当前页已加载内容适宽，不读取完整大字段" @click="fitAll">适宽全部列</button>
       <button @click="resetWidths">重置列宽</button>
     </div>
+    <p v-if="overflowPins" class="column-hint muted" role="status">固定列较宽，部分列随表格滚动；缩小列宽或加宽窗口可恢复固定。</p>
     <div v-if="tab.page" ref="viewport" class="grid-scroll" :class="{ 'is-resizing': resizing }" @scroll="saveScroll">
       <table class="data-table result-data-table" :style="{ width: `${tableWidth}px` }">
-        <colgroup><col :style="{ width: `${rowNumberWidth}px` }" /><col v-for="(_, index) in tab.page.columns" :key="index" :style="{ width: `${columnWidth(index)}px` }" /></colgroup>
+        <colgroup><col :style="{ width: `${rowNumberWidth}px` }" /><col v-for="{ index } in visibleColumns" :key="index" :style="{ width: `${columnWidth(index)}px` }" /></colgroup>
         <thead><tr><th class="row-number">#</th>
-        <th v-for="(column, index) in tab.page.columns" :key="index" :data-column-index="index" tabindex="-1" :class="{ 'is-column-target': highlightedColumn === index }">
+        <th v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" tabindex="-1" :style="columnStyle(index)" :class="{ 'is-column-target': highlightedColumn === index, 'is-pinned': stickyOffsets.has(index) }">
           <button class="column-sort"
             :disabled="locked || tab.invalidated || ambiguousSortColumns.has(column.name)"
             :title="ambiguousSortColumns.has(column.name) ? '结果列名重复，请先在 SQL 中设置不同别名' : '点击切换单列排序，按住 Shift 点击添加或调整多列排序'"
@@ -354,7 +369,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="(column, index) in tab.page.columns" :key="index" :data-column-index="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
     </div>
@@ -372,6 +387,14 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
 .result-data-table { table-layout:fixed; min-width:0; }
 .result-data-table th,.result-data-table td { min-width:0; max-width:none; }
 .result-data-table .row-number { min-width:0; }
+.result-data-table .row-number { position:sticky; left:0; z-index:2; background:var(--bg-alt); }
+.result-data-table th.row-number { z-index:4; }
+.result-data-table td.is-pinned { position:sticky; z-index:2; background:var(--bg); }
+.result-data-table th.is-pinned { z-index:3; }
+.result-data-table td.is-pinned.is-dirty { background:#4b4020; }
+.result-data-table tr.is-selected td.is-pinned { background:#26364a; }
+.result-data-table tr:hover td.is-pinned { background:#252a31; }
+.column-hint { margin:0; padding:3px 8px; border-bottom:1px solid var(--border); }
 .result-data-table .column-sort,.result-data-table th small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:8px; }
 .result-data-table th.is-column-target { box-shadow:inset 0 -2px var(--accent); background:#263d5c; }
 .result-data-table th:focus { outline:2px solid var(--accent); outline-offset:-2px; }

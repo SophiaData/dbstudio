@@ -53,6 +53,31 @@ Object.assign(window, { gridFixture: {
     tab.page = { ...tab.page!, columns: tab.page!.columns.map((column, index) => index === 0 ? { ...column, name: 'new_id' } : column) }
   },
   emptyRows: () => { const tab = wb.activeTab.value!; tab.page = { ...tab.page!, rows: [], returned: 0 } },
+  prepareEditable: () => {
+    const tab = wb.activeTab.value!
+    const connection = wb.connections.value.find(connection => connection.id === tab.connectionId)!
+    connection.dialectId = 'mysql'
+    const columns = ['id', 'exact_int', 'hidden_note', 'amount', 'nullable_note', 'empty_note'].map(name => ({ name, type: 'text' as const }))
+    const cells = [
+      { kind: 'text' as const, text: '9007199254740993' }, { kind: 'text' as const, text: '9007199254740994' },
+      { kind: 'text' as const, text: 'must-stay-hidden' }, { kind: 'text' as const, text: '1234567890.123456789012345678' },
+      { kind: 'null' as const }, { kind: 'text' as const, text: '' }
+    ]
+    const page = { ...tab.page!, columns, rows: [0, 1].map(index => ({ index, cells: structuredClone(cells) })), returned: 2 }
+    tab.result = page; tab.page = page; tab.dirty.clear(); tab.selectedRows.clear()
+    tab.table = { id: 'connection:' + tab.connectionId + '|table:synthetic', name: 'synthetic', kind: 'table' } as ResultTab['table']
+    tab.description = { hasUniqueKey: true, columns: columns.map((column, index) => ({
+      name: column.name, typeName: index < 2 ? 'BIGINT' : index === 3 ? 'DECIMAL(38,18)' : 'TEXT',
+      nullable: index > 1, primaryKeyOrdinal: index === 0 ? 1 : null, generated: null, identity: null
+    })) } as ResultTab['description']
+  },
+  edits: () => [...wb.activeTab.value!.dirty.entries()],
+  clipboard: () => [...copied],
+  clearEdits: () => wb.activeTab.value!.dirty.clear(),
+  duplicatePasteColumn: () => {
+    const tab = wb.activeTab.value!
+    tab.page = { ...tab.page!, columns: tab.page!.columns.map((column, index) => index === 5 ? { ...column, name: 'exact_int' } : column) }
+  },
   closeAndReopen: () => {
     tabs[0] = makeTab('A')
     wb.tabs.value.splice(0, 1, tabs[0])

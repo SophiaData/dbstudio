@@ -5,7 +5,7 @@ const MIN_WIDTH = 72
 const MAX_WIDTH = 720
 const DEFAULT_WIDTH = 160
 const ROW_NUMBER_WIDTH = 64
-interface Layout { signature: string; widths: number[]; scrollLeft: number }
+interface Layout { signature: string; widths: number[]; scrollLeft: number; hidden: Set<number>; pinned: Set<number> }
 // Result tabs own their session-only layout; closing a tab allows its state to be collected.
 const layouts = new WeakMap<ResultTab, Layout>()
 
@@ -13,13 +13,63 @@ export function useResultGridLayout(tab: () => ResultTab) {
   const viewport = ref<HTMLDivElement | null>(null)
   const columns = computed(() => tab().page?.columns ?? [])
   const signature = computed(() => JSON.stringify(columns.value.map(({ name, type }) => [name, type])))
-  const layout = shallowRef<Layout>({ signature: '', widths: [], scrollLeft: 0 })
+  const layout = shallowRef<Layout>({ signature: '', widths: [], scrollLeft: 0, hidden: new Set(), pinned: new Set() })
   const query = ref('')
   const target = ref(0)
   const highlighted = ref<number | null>(null)
   const resizing = ref(false)
   let drag: { index: number; x: number; width: number; id: number; element: HTMLElement } | null = null
   let restoreVersion = 0
+  const viewportWidth = ref(0)
+  let observer: ResizeObserver | null = null
+  watch(viewport, (element) => {
+    observer?.disconnect()
+    if (!element) return
+    viewportWidth.value = element.clientWidth
+    observer = new ResizeObserver(() => { viewportWidth.value = element.clientWidth })
+    observer.observe(element)
+  }, { flush: 'post' })
+
+  const isHidden = (index: number) => layout.value.hidden.has(index)
+  const isPinned = (index: number) => layout.value.pinned.has(index)
+  const visibleColumns = computed(() => {
+    const available = columns.value.map((column, index) => ({ column, index })).filter(({ index }) => !isHidden(index))
+    return [...available.filter(({ index }) => isPinned(index)), ...available.filter(({ index }) => !isPinned(index))]
+  })
+  const visibleOrder = computed(() => visibleColumns.value.map(({ index }) => index))
+  const hiddenCount = computed(() => layout.value.hidden.size)
+  const pinnedCount = computed(() => layout.value.pinned.size)
+  // Leave a usable scrolling area even when pinned columns are wider than the window.
+  const stickyOffsets = computed(() => {
+    const offsets = new Map<number, number>()
+    let left = ROW_NUMBER_WIDTH
+    for (const { index } of visibleColumns.value) {
+      if (!isPinned(index) || left + width(index) > viewportWidth.value - 160) break
+      offsets.set(index, left)
+      left += width(index)
+    }
+    return offsets
+  })
+  const pinnedWidth = computed(() => ROW_NUMBER_WIDTH + [...stickyOffsets.value.keys()].reduce((sum, index) => sum + width(index), 0))
+  const overflowPins = computed(() => visibleColumns.value.filter(({ index }) => isPinned(index)).length > stickyOffsets.value.size)
+  function columnStyle(index: number) {
+    const left = stickyOffsets.value.get(index)
+    return left === undefined ? {} : { left: `${left}px` }
+  }
+  function toggleHidden(index: number) {
+    if (!columns.value[index]) return
+    endResize(true)
+    if (isHidden(index)) layout.value.hidden.delete(index)
+    else if (visibleOrder.value.length > 1) layout.value.hidden.add(index)
+  }
+  function togglePinned(index: number) {
+    if (!columns.value[index]) return
+    endResize(true)
+    if (isPinned(index)) layout.value.pinned.delete(index)
+    else { layout.value.hidden.delete(index); layout.value.pinned.add(index) }
+  }
+  function showAll() { endResize(true); layout.value.hidden.clear() }
+  function unpinAll() { endResize(true); layout.value.pinned.clear() }
 
   const matches = computed(() => columns.value.map((column, index) => ({ name: column.name, index }))
     .filter(({ name }) => name.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
@@ -31,7 +81,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
   function setWidth(index: number, value: number) {
     if (columns.value[index]) layout.value.widths[index] = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(value)))
   }
-  const tableWidth = computed(() => ROW_NUMBER_WIDTH + layout.value.widths.reduce((sum, value) => sum + value, 0))
+  const tableWidth = computed(() => ROW_NUMBER_WIDTH + visibleOrder.value.reduce((sum, index) => sum + width(index), 0))
 
   function endResize(cancel = false) {
     if (!drag) return
@@ -76,7 +126,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
     viewport.value.querySelectorAll(`tbody td[data-column-index="${index}"]`).forEach(measure)
     setWidth(index, measured)
   }
-  function fitAll() { columns.value.forEach((_, index) => fitColumn(index)) }
+  function fitAll() { visibleOrder.value.forEach(fitColumn) }
   function resetWidths() { layout.value.widths = columns.value.map(() => DEFAULT_WIDTH) }
   function resizeKey(event: KeyboardEvent, index: number) {
     if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return
@@ -89,13 +139,20 @@ export function useResultGridLayout(tab: () => ResultTab) {
     else if (event.key === 'End') setWidth(index, MAX_WIDTH)
     else setWidth(index, width(index) + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 40 : 10))
   }
-  function jumpToColumn() {
+  async function jumpToColumn() {
     if (!matches.value.some(({ index }) => index === target.value)) return
-    const head = header(target.value)
+    const index = target.value
+    const currentTab = tab()
+    layout.value.hidden.delete(index)
+    await nextTick()
+    if (currentTab !== tab()) return
+    const head = header(index)
     const scroll = viewport.value
     if (!head || !scroll) return
-    scroll.scrollLeft += head.getBoundingClientRect().left - scroll.getBoundingClientRect().left - scroll.clientLeft
-    highlighted.value = target.value
+    if (!stickyOffsets.value.has(index)) {
+      scroll.scrollLeft += head.getBoundingClientRect().left - scroll.getBoundingClientRect().left - scroll.clientLeft - pinnedWidth.value
+    }
+    highlighted.value = index
     head.focus({ preventScroll: true })
     saveScroll()
   }
@@ -111,7 +168,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
     const currentTab = tab()
     let saved = layouts.get(currentTab)
     if (!saved || saved.signature !== signature.value) {
-      saved = reactive({ signature: signature.value, widths: columns.value.map(() => DEFAULT_WIDTH), scrollLeft: 0 })
+      saved = reactive({ signature: signature.value, widths: columns.value.map(() => DEFAULT_WIDTH), scrollLeft: 0, hidden: new Set<number>(), pinned: new Set<number>() })
       layouts.set(currentTab, saved)
     }
     layout.value = saved
@@ -124,11 +181,14 @@ export function useResultGridLayout(tab: () => ResultTab) {
   watch(() => tab().page, () => endResize(true), { flush: 'sync' })
   onBeforeUnmount(() => {
     ++restoreVersion
+    observer?.disconnect()
     endResize(true)
     saveScroll()
   })
 
   return { viewport, query, target, matches, highlighted, resizing, tableWidth, width, minWidth: MIN_WIDTH,
+    visibleColumns, visibleOrder, isHidden, isPinned, hiddenCount, pinnedCount, stickyOffsets, columnStyle, overflowPins,
+    toggleHidden, togglePinned, showAll, unpinAll,
     maxWidth: MAX_WIDTH, rowNumberWidth: ROW_NUMBER_WIDTH, startResize, moveResize, endResize, cancelResize,
     resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll }
 }
