@@ -110,6 +110,20 @@ export function useResultGridLayout(tab: () => ResultTab) {
   function header(index: number) {
     return viewport.value?.querySelector<HTMLElement>(`thead th[data-column-index="${index}"]`)
   }
+  function revealColumn(index: number) {
+    const scroll = viewport.value
+    const head = header(index)
+    if (!scroll || !head || stickyOffsets.value.has(index)) return
+    const viewportLeft = scroll.getBoundingClientRect().left + scroll.clientLeft
+    const left = viewportLeft + pinnedWidth.value
+    const right = viewportLeft + scroll.clientWidth
+    const box = head.getBoundingClientRect()
+    // Native focus scrolling only sees the scrollport, not its sticky siblings.
+    // For a column wider than the remaining area, keep its beginning visible.
+    if (box.left < left || box.width > right - left) scroll.scrollLeft += box.left - left
+    else if (box.right > right) scroll.scrollLeft += box.right - right
+    saveScroll()
+  }
   function fitColumn(index: number) {
     const head = header(index)
     if (!head || !viewport.value) return
@@ -188,7 +202,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
 
   return { viewport, query, target, matches, highlighted, resizing, tableWidth, width, minWidth: MIN_WIDTH,
     visibleColumns, visibleOrder, isHidden, isPinned, hiddenCount, pinnedCount, stickyOffsets, columnStyle, overflowPins,
-    toggleHidden, togglePinned, showAll, unpinAll,
+    toggleHidden, togglePinned, showAll, unpinAll, revealColumn,
     maxWidth: MAX_WIDTH, rowNumberWidth: ROW_NUMBER_WIDTH, startResize, moveResize, endResize, cancelResize,
     resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll }
 }

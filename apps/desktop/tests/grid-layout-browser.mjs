@@ -242,6 +242,17 @@ try {
     await page.keyboard.press('Shift+Tab'); await settle()
     await assertRevealed(1)
     await page.screenshot({ path: path.join(output, 'keyboard-focus-visible.png') })
+    await handle(0).focus(); await page.keyboard.press('End'); await settle()
+    await page.setViewportSize({ width: 720, height: 650 }); await settle()
+    await cell(0).focus()
+    await page.locator('.grid-scroll').evaluate(el => { el.scrollLeft = 800 })
+    await page.keyboard.press('Tab'); await settle()
+    assert.equal(await cell(2).evaluate(el => el === document.activeElement), true)
+    const fallback = await cell(2).boundingBox()
+    assert.ok(fallback.x >= 64 && fallback.x + fallback.width <= 721,
+      'Keyboard visibility must use effective sticky width when oversized pins scroll')
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.getByRole('button', { name: '重置列宽', exact: true }).click(); await settle()
   })
   await check('hidden columns can be searched/restored and visibility stays isolated by tab', async () => {
     await hide(3); await hide(0)
