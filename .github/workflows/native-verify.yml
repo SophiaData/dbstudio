@@ -1,9 +1,7 @@
 name: native-verify
 
 on:
-  push:
-    branches: [main]
-  # Pull requests enter through verify.yml so Node and native checks run in order.
+  # PRs and main pushes enter through verify.yml; releases reuse the full suite.
   workflow_dispatch:
   workflow_call:
 

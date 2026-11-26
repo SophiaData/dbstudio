@@ -18,6 +18,8 @@ export default defineConfig({
     }
   },
   test: {
+    maxWorkers: 1,
+    fileParallelism: false,
     environment: 'happy-dom',
     include: ['src/**/*.spec.ts', 'apps/desktop/src/**/*.spec.ts'],
     // 单测不碰真实数据库与网络；出现这些调用说明用例写错了边界。
