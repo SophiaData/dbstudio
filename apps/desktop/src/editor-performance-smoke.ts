@@ -15,8 +15,7 @@ export async function measureEditorPerformance(wb: Workbench, tools: NativeToolH
     await nextTick()
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   }
-  const summary = (samples: number[]) => ({ samplesMs: samples, p95Ms: [...samples].sort((a, b) => a - b)[Math.ceil(samples.length * 0.95) - 1]!, maxMs: Math.max(...samples) })
-  const sizes: { lines: number; loadMs: number; input: ReturnType<typeof summary> }[] = []
+  const sizes: { lines: number; loadMs: number; samples: number[] }[] = []
   const heapBytes: (number | null)[] = [heap()]
   const switches: number[] = []
   try {
@@ -38,7 +37,7 @@ export async function measureEditorPerformance(wb: Workbench, tools: NativeToolH
         samples.push(performance.now() - started)
       }
       if (wb.sql.value !== text + '字'.repeat(30) || view.state.doc.lines !== lines) throw new Error('Large editor draft lost input')
-      sizes.push({ lines, loadMs, input: summary(samples) })
+      sizes.push({ lines, loadMs, samples })
     }
     const text = wb.sql.value
     while (tabs.length < 10) { tabs.push(wb.openEditorTab(wb.currentConnectionId.value, text)); await painted() }
@@ -55,8 +54,8 @@ export async function measureEditorPerformance(wb: Workbench, tools: NativeToolH
       heapBytes.push(heap())
     }
     if (wb.editorStorageWarning.value) throw new Error('Large draft persistence failed')
-    return { environment: 'GitHub Windows WebView; synthetic transactions to two animation frames', sizes, tabs: 10, switches: summary(switches), heapBytes,
-      memoryScope: 'Optional WebView JS heap estimate; no forced GC, excludes native memory and is not a leak test' }
+    return { input1000Ms: sizes[0]!.samples, input10000Ms: sizes[1]!.samples,
+      loadMs: sizes.map((size) => size.loadMs), switchMs: switches, heapBytes }
   } finally {
     for (const id of tabs) {
       wb.activateEditorTab(id)
