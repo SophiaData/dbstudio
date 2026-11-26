@@ -250,6 +250,65 @@ await check('sql_failure_keeps_original_error_when_state_refresh_fails', async (
   assert.ok(wb.tabs.value.every((tab) => !tab.busy))
 })
 
+await check('failed_second_statement_maps_selected_script_back_to_original_draft', async () => {
+  const { wb, backend, page } = fixture()
+  const document = "-- 中文😀\r\nSELECT 0;\r\nSELECT 1;\r\nSELECT missing_col;\r\nSELECT 3;"
+  wb.sql.value = document
+  const from = document.indexOf('SELECT 1')
+  const request = wb.captureEditorExecution(document.slice(from), { document, from, to: document.length })
+  const calls = []
+  backend.executeStatement = async (_node, sql) => {
+    calls.push(sql)
+    if (calls.length === 2) throw originalError()
+    return { kind: 'rows', result: page(0) }
+  }
+  await assert.rejects(wb.executeEditorRequest(request), /编辑器第 4 行/)
+  assert.deepEqual(calls, ['SELECT 1', 'SELECT missing_col'])
+  const failure = wb.activeTab.value.failure
+  assert.equal(failure.statementIndex, 1)
+  assert.equal(failure.startLine, 4)
+  assert.equal(failure.endLine, 4)
+  assert.equal(failure.source.document, document)
+  assert.equal(document.slice(failure.source.from, failure.source.to), 'SELECT missing_col')
+  assert.equal(failure.phase, 'execution')
+  assert.equal(wb.executing.value, false)
+})
+
+await check('execution_source_is_captured_before_parameter_wait_and_tab_switch', async () => {
+  const { wb, backend } = fixture()
+  const document = 'SELECT $1;\nSELECT $1;'
+  wb.sql.value = document
+  const request = wb.captureEditorExecution('SELECT $1', { document, from: 11, to: 20 })
+  wb.sql.value = 'SELECT 999'
+  wb.selectConnection('b')
+  backend.executeStatement = async () => { throw originalError() }
+  await assert.rejects(wb.executeEditorRequest(request, [{ statementIndex: 0, name: '$1', value: 'sample' }]), /SYNTHETIC_SQL_FAILED/)
+  const failure = wb.tabs.value.at(-1).failure
+  assert.equal(failure.startLine, 2)
+  assert.equal(failure.source.document, document)
+  assert.equal(failure.source.from, 11)
+  assert.equal(wb.currentConnectionId.value, 'b')
+  assert.equal(wb.editorTabs.value.find((tab) => tab.id === request.editorTabId).sql, 'SELECT 999')
+})
+
+await check('unrelated_script_has_no_guessed_editor_location_and_bad_source_is_rejected', async () => {
+  const { wb, backend } = fixture()
+  wb.sql.value = 'SELECT 1; SELECT 1;'
+  assert.throws(() => wb.captureEditorExecution('SELECT 1', { document: wb.sql.value, from: 3, to: 11 }), /选区已变化/)
+  backend.executeStatement = async () => { throw originalError() }
+  await assert.rejects(wb.executeScript('SELECT external'), /执行片段第 1 行/)
+  assert.equal(wb.activeTab.value.failure.source, undefined)
+})
+
+await check('successful_statement_with_failed_refresh_warns_before_retry', async () => {
+  const { wb, backend, page } = fixture()
+  backend.executeStatement = async () => ({ kind: 'rows', result: page(0) })
+  backend.transactionState = async () => { throw new Error('SYNTHETIC_STATE_REFRESH_FAILED') }
+  await assert.rejects(wb.executeScript('SELECT 1'), /语句已执行，后续处理失败/)
+  assert.equal(wb.activeTab.value.failure.phase, 'after-execution')
+  assert.equal(wb.activeTab.value.failure.message, 'SYNTHETIC_STATE_REFRESH_FAILED')
+})
+
 for (const cancelled of [false, true]) {
   await check(`cancel_${cancelled}_reports_result_for_original_execution`, async () => {
     const { wb, backend, page } = fixture()

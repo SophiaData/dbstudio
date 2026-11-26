@@ -9,12 +9,27 @@ import {
 } from '../../../src/core/sql-parameters'
 import type { SqlParameter, SqlParameterValue } from '../../../src/core/resultset'
 
-export function currentSql(sql: string, start: number, end: number, rules: SqlScriptRules): string {
-  if (end > start && sql.slice(start, end).trim()) return sql.slice(start, end).trim()
+export interface SqlSourceRange {
+  readonly document: string
+  readonly from: number
+  readonly to: number
+}
+
+export function currentSqlRange(sql: string, start: number, end: number, rules: SqlScriptRules) {
+  const selected = sql.slice(start, end)
+  if (end > start && selected.trim()) {
+    const from = start + selected.length - selected.trimStart().length
+    return { sql: selected.trim(), from, to: from + selected.trim().length }
+  }
   const statements = splitStatements(sql, rules)
-  return statements.find((statement) => start >= statement.startOffset && start <= statement.endOffset)?.sql
-    ?? [...statements].reverse().find((statement) => statement.endOffset <= start)?.sql
-    ?? statements[0]?.sql ?? ''
+  const statement = statements.find((statement) => start >= statement.startOffset && start <= statement.endOffset)
+    ?? [...statements].reverse().find((statement) => statement.endOffset <= start)
+    ?? statements[0]
+  return statement ? { sql: statement.sql, from: statement.startOffset, to: statement.endOffset } : { sql: '', from: 0, to: 0 }
+}
+
+export function currentSql(sql: string, start: number, end: number, rules: SqlScriptRules): string {
+  return currentSqlRange(sql, start, end, rules).sql
 }
 
 interface CompletionTable {

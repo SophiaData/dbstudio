@@ -19,6 +19,7 @@ import {
   scopedParametersForStatement,
   statementParameterSlots,
   validateScopedSqlParameters,
+  type SqlSourceRange,
   type ScopedSqlParameter
 } from './sql-editor-model'
 
@@ -35,6 +36,16 @@ export interface EditorExecution {
   readonly connectionId: string
   readonly connectionRevision: number
   readonly sql: string
+  readonly source?: SqlSourceRange
+}
+export interface SqlExecutionFailure {
+  readonly message: string
+  readonly statementIndex: number
+  readonly sql: string
+  readonly startLine: number
+  readonly endLine: number
+  readonly phase: 'execution' | 'after-execution'
+  readonly source?: SqlSourceRange
 }
 export interface SortKey {
   readonly column: string
@@ -45,6 +56,7 @@ export interface ResultTab {
   connectionId: string
   editorTabId?: string
   executionFailed?: boolean
+  failure?: SqlExecutionFailure
   title: string
   table: ObjectRef | null
   description: TableDescription | null
@@ -292,10 +304,15 @@ export function useWorkbench() {
     if (!connectionId) return []
     return statementParameterSlots(script, dialectFor(connectionId)?.scriptRules ?? SQLITE_SCRIPT_RULES, parameterDialect(connectionId))
   }
-  function captureEditorExecution(script: string): EditorExecution {
+  function captureEditorExecution(script: string, source?: SqlSourceRange): EditorExecution {
     const tab = activeEditorTab.value
     if (!tab || !currentConnection.value?.connected) throw new Error('请先选择一个已连接的数据源')
-    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script }
+    if (source && (source.document !== tab.sql || !Number.isInteger(source.from) || !Number.isInteger(source.to) ||
+      source.from < 0 || source.to < source.from || source.to > source.document.length || source.document.slice(source.from, source.to) !== script)) {
+      throw new Error('SQL 草稿或选区已变化，请重新发起执行')
+    }
+    const origin = source ? { ...source } : script === tab.sql ? { document: tab.sql, from: 0, to: script.length } : undefined
+    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script, source: origin }
   }
   async function executeEditorRequest(request: EditorExecution, parameters: ScopedSqlParameter[] = []) {
     const tab = editorTabs.value.find((item) => item.id === request.editorTabId)
@@ -351,7 +368,17 @@ export function useWorkbench() {
           catch { /* Keep the original execution error if transaction state is unavailable. */ }
           if (!executed) await recordHistory({ sql: statement.sql, connectionId: connection.id, dialectId: connection.dialectId, elapsedMs: performance.now() - startedAt, status: 'error', error: errorText(cause) })
           tab.executionFailed = true
-          tab.message = `${connection.name} · 第 ${statement.startLine} 行：${errorText(cause)}`
+          const source = request.source ? {
+            document: request.source.document,
+            from: request.source.from + statement.startOffset,
+            to: request.source.from + statement.endOffset,
+          } : undefined
+          const startLine = source ? source.document.slice(0, source.from).split('\n').length : statement.startLine
+          const endLine = source ? source.document.slice(0, Math.max(source.from, source.to - 1)).split('\n').length : statement.endLine
+          tab.failure = { message: errorText(cause), sql: statement.sql, statementIndex: statement.index,
+            startLine, endLine, phase: executed ? 'after-execution' : 'execution', source }
+          const location = source ? `编辑器第 ${startLine} 行` : `执行片段第 ${startLine} 行`
+          tab.message = `${connection.name} · ${location}：${executed ? '语句已执行，后续处理失败；请先核对结果。' : ''}${errorText(cause)}`
           throw new Error(tab.message)
         }
         finally { tab.busy = false }

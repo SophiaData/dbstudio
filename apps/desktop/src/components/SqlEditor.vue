@@ -3,18 +3,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { Compartment, EditorSelection, EditorState, Prec, StateEffect } from '@codemirror/state'
 import { EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleLineComment } from '@codemirror/commands'
-import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
+import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, foldedRanges, unfoldEffect, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
 import { closeSearchPanel, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { MySQL, PostgreSQL, SQLite, StandardSQL, sql } from '@codemirror/lang-sql'
 import { inferSchemaFromObjectId } from '../../../../src/core/er-relations'
 import { SQL_COMPLETION_KEYWORDS } from '../../../../src/core/sql-keywords'
 import { SQLITE_SCRIPT_RULES } from '../../../../src/core/sql-script'
-import { completionTable, currentSql, formattedSql } from '../sql-editor-model'
+import { completionTable, currentSql, currentSqlRange, formattedSql, type SqlSourceRange } from '../sql-editor-model'
 import { editorSnapshots } from '../sql-editor-state'
 import { connectionOf, type TreeNode, type Workbench } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; disabled?: boolean }>()
-const emit = defineEmits<{ execute: [sql: string]; explain: [sql: string]; library: [] }>()
+const emit = defineEmits<{ execute: [sql: string, source: SqlSourceRange]; explain: [sql: string]; library: [] }>()
 const editorHost = ref<HTMLElement>()
 const editor = shallowRef<EditorView>()
 const editorTabId = props.workbench.activeEditorTabId.value
@@ -84,9 +84,13 @@ function currentStatement() {
 function execute(all = false) {
   if (props.disabled) return
   try {
-    const text = all ? props.workbench.sql.value : currentStatement()
-    if (!text.trim()) throw new Error('当前位置没有可执行的 SQL')
-    emit('execute', text)
+    const document = props.workbench.sql.value
+    const selection = editor.value?.state.selection.main
+    const range = all ? { sql: document, from: 0, to: document.length }
+      : currentSqlRange(document, selection?.from ?? caret.value, selection?.to ?? caret.value, rules.value)
+    if (!range.sql.trim()) throw new Error('当前位置没有可执行的 SQL')
+    error.value = ''
+    emit('execute', range.sql, { document, from: range.from, to: range.to })
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'SQL 解析失败' }
 }
 function executeCurrent() { execute(false) }
@@ -133,6 +137,18 @@ function setSelection(start: number, end = start) {
   caret.value = start
   const view = editor.value
   if (view) view.dispatch({ selection: EditorSelection.single(Math.min(start, view.state.doc.length), Math.min(end, view.state.doc.length)) })
+}
+function revealSource(source: SqlSourceRange) {
+  const view = editor.value
+  if (!view || props.workbench.activeEditorTabId.value !== editorTabId || view.state.doc.toString() !== source.document ||
+    source.from < 0 || source.to > view.state.doc.length || source.to <= source.from) return false
+  completionOpen.value = false
+  closeSearchPanel(view)
+  const effects: StateEffect<unknown>[] = [EditorView.scrollIntoView(source.from, { y: 'center' })]
+  foldedRanges(view.state).between(source.from, source.to, (from, to) => { effects.push(unfoldEffect.of({ from, to })) })
+  view.dispatch({ selection: EditorSelection.single(source.from, source.to), effects })
+  view.focus()
+  return true
 }
 async function acceptCompletion(index = completionIndex.value) {
   const word = candidates.value[index]
@@ -290,7 +306,7 @@ onBeforeUnmount(() => {
   view.destroy()
   editor.value = undefined
 })
-defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, editor, error, candidates, completionOpen, prefix, qualifier, caret, updateCaret, setSelection, acceptCompletion, keydown })
+defineExpose({ currentStatement, execute, executeCurrent, executeAll, format, editor, error, candidates, completionOpen, prefix, qualifier, caret, updateCaret, setSelection, revealSource, acceptCompletion, keydown })
 </script>
 
 <template>

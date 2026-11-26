@@ -4,6 +4,7 @@ import { decision } from './dialogs'
 import type { NativeToolHost } from './native-tool-smoke'
 import { cellText, connectionNode, type Workbench } from './workbench'
 import { ensureSyntaxTree, foldedRanges } from '@codemirror/language'
+import { measureEditorPerformance } from './editor-performance-smoke'
 
 const database = 'dbstudio_acceptance'
 const options = { host: '127.0.0.1', port: 13306, database, user: 'acceptance', sslmode: 'disable' }
@@ -19,12 +20,13 @@ async function waitFor(check: () => boolean | Promise<boolean>) {
 
 export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost, fixture: SmokeFixture) {
   const checks: Record<string, boolean> = { isolated_fixture: fixture.isolated }
+  let editorPerformance: Awaited<ReturnType<typeof measureEditorPerformance>> | undefined
   let check = 'mysql_connection'
   let deadline: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
       exercise(),
-      new Promise<{ ok: boolean; checks: Record<string, boolean> }>((resolve) => {
+      new Promise<{ ok: boolean; checks: Record<string, boolean>; editorPerformance?: typeof editorPerformance }>((resolve) => {
         deadline = setTimeout(() => resolve({ ok: false, checks: { ...checks, [check]: false, stage_timed_out: false } }), 75000)
       })
     ])
@@ -113,6 +115,29 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     editorKey('}', { ctrlKey: true, shiftKey: true, code: 'BracketRight', keyCode: 221 })
     wrapButton.click()
     await wb.closeTab(dailyResult)
+
+    check = 'mysql_editor_error_navigation'
+    const failureSql = "SELECT 'before-error';\nSELECT dbstudio_missing_column;\nSELECT 'must-not-run';"
+    wb.sql.value = failureSql
+    view.focus()
+    const beforeFailure = wb.tabs.value.length
+    editorKey('Enter', { shiftKey: true })
+    await waitFor(() => !wb.executing.value && wb.activeTab.value?.failure !== undefined)
+    const failed = wb.activeTab.value!
+    const failure = failed.failure!
+    const locate = document.querySelector<HTMLButtonElement>('.sql-execution-failure button')!
+    const captured = wb.tabs.value.length === beforeFailure + 2 && failure.startLine === 2 && failure.source?.from === failureSql.indexOf('SELECT dbstudio')
+    locate.click()
+    await waitFor(() => view.state.selection.main.from === failure.source!.from)
+    const located = view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) === 'SELECT dbstudio_missing_column'
+    wb.sql.value = 'SELECT 42 AS recovered'
+    await waitFor(() => locate.disabled)
+    const originalRetained = failure.source?.document === failureSql && failure.sql === 'SELECT dbstudio_missing_column'
+    editor.executeAll()
+    await waitFor(() => !wb.executing.value && wb.activeTab.value?.id !== failed.id)
+    const recovered = wb.activeTab.value!
+    checks[check] = captured && located && originalRetained && cellText(recovered.page!.rows[0]!.cells[0]!) === '42'
+    for (const result of wb.tabs.value.slice(beforeFailure)) await wb.closeTab(result)
 
     check = 'mysql_multi_sort_pages'
     const grid = await tools.grid(tab)
@@ -283,9 +308,12 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     const task = await backend.startTransfer({ source: { nodeId: table.id }, destinationPath, format: 'sql-insert', options: { batchSize: 100 } })
     const result = await backend.waitTransfer(task.taskId)
     checks[check] = result.status === 'completed' && result.rowsRead === 405 && result.bytesWritten > 0
+    check = 'mysql_editor_large_drafts'
+    editorPerformance = await measureEditorPerformance(wb, tools)
+    checks[check] = true
   } catch {
     checks[check] = false
   }
-  return { ok: Object.values(checks).every(Boolean), checks }
+  return { ok: Object.values(checks).every(Boolean), checks, editorPerformance }
   }
 }

@@ -585,6 +585,27 @@ public static class AcceptanceDesktop {
     $null = Find-Control $app.Window $cell 'row-1' -AllowOffscreen
     $report.checks.connectedAndQueried = $true
 
+    $script:action = 'failed_sql_navigation'
+    $failureSql = "SELECT 1;`nSELECT dbstudio_missing_column;`nSELECT 3;"
+    $sqlEditor = Set-SqlEditorText $app $failureSql
+    [Windows.Forms.SendKeys]::SendWait('+{ENTER}')
+    $locate = Find-Control $app.Window $button '定位执行语句'
+    Invoke-Button $app.Window '定位执行语句'
+    $pattern = $sqlEditor.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern)
+    $deadline = [datetime]::UtcNow.AddSeconds(10)
+    $located = $false
+    do {
+        $selection = @($pattern.GetSelection())
+        if ($selection.Count -eq 1 -and $selection[0].GetText(-1) -ceq 'SELECT dbstudio_missing_column') { $located = $true; break }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    if (-not $located) { Stop-Acceptance 'SQL_EDITOR_FAILURE_SELECTION_MISMATCH' }
+    $sqlEditor = Set-SqlEditorText $app 'SELECT 42 AS recovered;'
+    $null = Find-Control $app.Window $cell '草稿已变化，请查看执行快照。' -AllowOffscreen
+    [Windows.Forms.SendKeys]::SendWait('^{ENTER}')
+    $null = Find-Control $app.Window $cell '42' -AllowOffscreen
+    $report.checks.editorFailureNavigationAndRecovery = $true
+
     $script:action = 'open_fixture_table'
     $tree = Find-Control $app.Window ([Windows.Automation.ControlType]::Tree) '数据库对象'
     foreach ($group in @($profile, 'Schemas', 'dbstudio_acceptance', 'Tables')) {

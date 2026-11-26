@@ -42,6 +42,11 @@ jobs:
           VITE_DBSTUDIO_TEST_HOOKS: '1'
           VITE_DBSTUDIO_WINDOWS_MYSQL: '1'
         run: pnpm build:desktop
+      - name: Check editor and execution regressions
+        run: |
+          node apps/desktop/tests/editor-regressions.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/desktop/tests/sql-workflow-regressions.mjs
       - name: Build the actual Windows Tauri host
         shell: pwsh
         run: |
@@ -58,3 +63,10 @@ jobs:
       - name: Verify Windows WebView against isolated MySQL and replay exported SQL
         shell: pwsh
         run: ./scripts/windows-mysql-acceptance.ps1
+      - name: Save editor performance measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-performance-${{ github.run_id }}
+          path: editor-performance.json
+          if-no-files-found: warn

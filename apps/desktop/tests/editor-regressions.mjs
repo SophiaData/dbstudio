@@ -21,6 +21,7 @@ const vueEntry = pathToFileURL(fileURLToPath(import.meta.resolve('vue'))).href
 const bundle = await build({
   stdin: { resolveDir: project, sourcefile: 'editor-regressions-entry.ts', contents: `
     export { default as Editor } from './apps/desktop/src/components/SqlEditor.vue';
+    export { default as FailurePanel } from './apps/desktop/src/components/SqlExecutionFailure.vue';
     export { useWorkbench } from './apps/desktop/src/workbench.ts';
     export { editorSnapshots } from './apps/desktop/src/sql-editor-state.ts';
     export { undo, redo } from '@codemirror/commands';
@@ -31,14 +32,14 @@ const bundle = await build({
     builder.onResolve({ filter: /^vue$/ }, () => ({ path: vueEntry, external: true }))
     builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'forbidden-native-call', namespace: 'editor-test' }))
     builder.onLoad({ filter: /.*/, namespace: 'editor-test' }, () => ({ contents: 'export const invoke = () => { throw new Error("Unexpected native call") }' }))
-    builder.onLoad({ filter: /SqlEditor\.vue$/ }, async ({ path }) => {
+    builder.onLoad({ filter: /(?:SqlEditor|SqlExecutionFailure)\.vue$/ }, async ({ path }) => {
       const { descriptor } = parse(await readFile(path, 'utf8'), { filename: path })
       const script = compileScript(descriptor, { id: 'editor-regressions', inlineTemplate: true })
       return { contents: script.content, loader: 'ts' }
     })
   } }]
 })
-const { Editor, useWorkbench, editorSnapshots, undo, redo, ensureSyntaxTree, foldedRanges, foldable } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
+const { Editor, FailurePanel, useWorkbench, editorSnapshots, undo, redo, ensureSyntaxTree, foldedRanges, foldable } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 const outcomes = []
 async function test(name, action) {
   window.localStorage.clear()
@@ -48,19 +49,23 @@ async function test(name, action) {
   wb.selectConnection('A')
   const disabled = ref(false)
   const events = []
+  const sources = []
   let editor
   const root = document.createElement('div')
   document.body.append(root)
-  const app = createApp({ render: () => h(Editor, { key: wb.activeEditorTabId.value, workbench: wb, disabled: disabled.value, ref: (value) => { editor = value }, onExecute: (sql) => events.push(sql) }) })
+  const app = createApp({ render: () => h('div', [
+    h(Editor, { key: wb.activeEditorTabId.value, workbench: wb, disabled: disabled.value, ref: (value) => { editor = value }, onExecute: (sql, source) => { events.push(sql); sources.push(source) } }),
+    h(FailurePanel, { workbench: wb, onLocate: async (id, source) => { wb.activateEditorTab(id); await nextTick(); editor.revealSource(source) } }),
+  ]) })
   app.mount(root)
   const key = (options) => {
     const event = new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...options })
     editor.editor.contentDOM.dispatchEvent(event)
     return event
   }
-  const edit = (text) => editor.editor.dispatch({ changes: { from: 0, to: editor.editor.state.doc.length, insert: text }, selection: { anchor: text.length }, userEvent: 'input.type' })
+  const edit = (text) => editor.editor.dispatch({ changes: { from: 0, to: editor.editor.state.doc.length, insert: text }, selection: { anchor: editor.editor.state.toText(text).length }, userEvent: 'input.type' })
   try {
-    await action({ wb, disabled, events, getEditor: () => editor, key, edit, root })
+    await action({ wb, disabled, events, sources, getEditor: () => editor, key, edit, root })
     outcomes.push({ name, passed: true })
     console.log(`PASS editor: ${name}`)
   } catch (error) {
@@ -346,6 +351,55 @@ await test('fold_and_wrapping_survive_tabs_without_changing_execution', async ({
   assert.equal(foldedRanges(getEditor().editor.state).size, 0)
   assert.ok(undo(getEditor().editor))
   assert.equal(wb.sql.value, '')
+})
+
+await test('execution_emits_exact_source_for_repeated_statements_and_trimmed_selection', async ({ edit, getEditor, key, events, sources }) => {
+  const document = '-- 中文😀\r\nSELECT 1;\r\n  SELECT 1;\r\n'
+  edit(document)
+  // CodeMirror normalizes line endings; source offsets use the actual editor document.
+  const actual = getEditor().editor.state.doc.toString()
+  const second = actual.lastIndexOf('SELECT')
+  getEditor().setSelection(second)
+  key({ key: 'Enter', ctrlKey: true })
+  assert.equal(events.at(-1), 'SELECT 1')
+  assert.equal(sources.at(-1).from, second)
+  assert.equal(sources.at(-1).document, actual)
+  getEditor().setSelection(second - 2, actual.length)
+  key({ key: 'Enter', ctrlKey: true })
+  assert.equal(events.at(-1), 'SELECT 1;')
+  assert.equal(sources.at(-1).from, second)
+  assert.equal(sources.at(-1).to, second + 'SELECT 1;'.length)
+})
+
+await test('failure_panel_locates_original_tab_unfolds_and_refuses_changed_draft', async ({ wb, edit, getEditor, key, root }) => {
+  const document = 'SELECT\n  missing_col\nFROM items;'
+  const tabId = wb.activeEditorTabId.value
+  edit(document)
+  getEditor().setSelection(0)
+  ensureSyntaxTree(getEditor().editor.state, document.length, 100)
+  key({ key: '{', code: 'BracketLeft', keyCode: 219, ctrlKey: true, shiftKey: true })
+  assert.equal(foldedRanges(getEditor().editor.state).size, 1)
+  const source = { document, from: 0, to: document.length - 1 }
+  wb.tabs.value.push({ id: 'failed-result', editorTabId: tabId, connectionId: 'A', failure: { message: 'SYNTHETIC_MISSING_COLUMN', sql: document.slice(0, -1), statementIndex: 0, startLine: 1, endLine: 3, phase: 'execution', source } })
+  wb.activeTabId.value = 'failed-result'
+  wb.selectConnection('B')
+  await nextTick()
+  const button = root.querySelector('.sql-execution-failure button')
+  assert.equal(button.disabled, false)
+  button.click()
+  await nextTick()
+  assert.equal(wb.activeEditorTabId.value, tabId)
+  assert.equal(getEditor().editor.state.selection.main.to, source.to)
+  assert.equal(foldedRanges(getEditor().editor.state).size, 0)
+  assert.equal(wb.sql.value, document)
+  edit('SELECT corrected_col FROM items;')
+  await nextTick()
+  assert.equal(root.querySelector('.sql-execution-failure button').disabled, true)
+  assert.match(root.querySelector('.sql-execution-failure').textContent, /草稿已变化/)
+  assert.equal(root.querySelector('.sql-execution-failure pre').textContent, document.slice(0, -1))
+  const before = getEditor().editor.state.selection.main
+  assert.equal(getEditor().revealSource(source), false)
+  assert.equal(getEditor().editor.state.selection.main, before)
 })
 
 console.log(JSON.stringify({ suite: 'mounted-codemirror', passed: outcomes.filter((item) => item.passed).length, failed: outcomes.filter((item) => !item.passed).length }))
