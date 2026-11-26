@@ -422,6 +422,33 @@ await test('partial_apply_failure_preserves_all_drafts_and_prior_transaction', a
   assert.deepEqual(ipcCalls.slice(start), ['applyEdits', 'transactionState'])
 })
 
+for (const navigation of ['page', 'size']) {
+  for (const outcome of ['success', 'failure']) {
+    await test(`full_cell_${outcome}_cannot_open_an_editor_during_${navigation}`, async (f) => {
+      const cellRequest = f.deferCell(), opening = f.open()
+      const pageRequest = defer()
+      nativeMethods.fetchResultPage = () => pageRequest.promise
+      const moving = navigation === 'page' ? f.wb.pageTab(f.tab, 1) : f.wb.changePageSize(f.tab, 100)
+      try {
+        for (let turn = 0; turn < 100 && !f.tab.busy; turn++) await Promise.resolve()
+        assert.equal(f.tab.busy, true)
+        assert.equal(f.wb.locks.has('A'), true)
+        if (outcome === 'success') cellRequest.resolve(text('loaded-while-paging'))
+        else cellRequest.reject(new Error('old-full-read-failed'))
+        await opening
+        assert.equal(f.grid.editing, null, 'Do not open an editable draft that the pending page will erase')
+        assert.equal(f.wb.pendingEditors.size, 0)
+        assert.equal(f.grid.error, '')
+      } finally {
+        pageRequest.resolve(f.makePage(navigation === 'page' ? 200 : 0))
+        await moving
+      }
+      assert.equal(f.tab.busy, false)
+      assert.equal(f.grid.editing, null)
+    })
+  }
+}
+
 const failed = results.filter((result) => !result.passed)
 const summary = { scope: 'real-component-script-and-workbench-with-memory-ipc', mounted_gui: false, native_driver: false, total: results.length, passed: results.length - failed.length, failed: failed.length, cases: results, ipc_methods: [...new Set(ipcCalls)].sort() }
 await writeFile(path.join(output, 'results.json'), JSON.stringify(summary, null, 2) + '\n', { flag: 'wx' })
