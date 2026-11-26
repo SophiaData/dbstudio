@@ -8,7 +8,7 @@ import { fullCell, textValue } from '../result-export'
 import { writeClipboardText } from '../clipboard'
 import { parseGridPaste, pastedMysqlCell } from '../grid-paste'
 import { useResultGridLayout } from '../result-grid-layout'
-import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } from '../workbench'
+import { cellText, inputCell, RESULT_PAGE_SIZES, type Workbench, type ResultTab, type SortKey } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
 const { viewport, query: columnQuery, target: targetColumn, matches: matchingColumns, highlighted: highlightedColumn,
@@ -109,6 +109,33 @@ function moveFocus(row: ResultRow, column: number, extend: boolean) {
   revealCell(row, column)
 }
 function pointCell(event: MouseEvent, row: ResultRow, column: number) { moveFocus(row, column, event.shiftKey) }
+const pageSearch = ref('')
+const pageSearchIndex = ref(-1)
+const pageMatches = computed(() => {
+  const query = pageSearch.value.toLocaleLowerCase()
+  if (!query || props.tab.invalidated) return []
+  const matches: CellPoint[] = []
+  for (const row of props.tab.page?.rows ?? []) {
+    for (const column of visibleOrder.value) {
+      if (cellText(displayed(row, column)).toLocaleLowerCase().includes(query)) matches.push({ row, column })
+    }
+  }
+  return matches
+})
+const matchingCells = computed(() => new Set(pageMatches.value.map(({ row, column }) => `${row.index}:${column}`)))
+watch(pageMatches, () => { pageSearchIndex.value = -1 }, { flush: 'sync' })
+function findOnPage(direction = 1) {
+  if (!pageMatches.value.length) return
+  const count = pageMatches.value.length
+  pageSearchIndex.value = pageSearchIndex.value < 0 ? (direction > 0 ? 0 : count - 1) : (pageSearchIndex.value + direction + count) % count
+  const target = pageMatches.value[pageSearchIndex.value]!
+  moveFocus(target.row, target.column, false)
+}
+function searchPageKey(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  findOnPage(event.shiftKey ? -1 : 1)
+}
 function cellKey(event: KeyboardEvent, row: ResultRow, column: number) {
   if (event.isComposing || event.keyCode === 229 || props.tab.invalidated) return
   if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'c') {
@@ -284,6 +311,14 @@ async function openLoadedExport() {
 function closeLoadedExport() { loadedExport.value = false }
 const writable = computed(() => props.workbench.canEdit(props.tab))
 const locked = computed(() => props.tab.busy || props.workbench.executing.value || props.workbench.locks.has(props.tab.connectionId))
+const pagingLocked = computed(() => locked.value || props.workbench.pendingEditors.has(props.tab.id))
+async function choosePageSize(event: Event) {
+  const input = event.target as HTMLSelectElement
+  const size = Number(input.value)
+  input.value = String(props.tab.pageSize ?? 200)
+  await props.workbench.attempt(() => props.workbench.changePageSize(props.tab, size))
+  input.value = String(props.tab.pageSize ?? 200)
+}
 const canPaste = computed(() => writable.value && props.workbench.connections.value.some((connection) =>
   connection.id === props.tab.connectionId && connection.dialectId === 'mysql'))
 
@@ -447,11 +482,19 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, false))">回滚</button>
     </div>
     <form v-if="tab.result && !tab.invalidated" class="filter-bar" @submit.prevent="workbench.attempt(() => workbench.transformTab(tab))">
-      <label class="muted" :for="`filter-${tab.id}`">筛选</label>
-      <input :id="`filter-${tab.id}`" v-model="tab.filter" placeholder="status = 'active' AND age >= 18" :disabled="locked" />
-      <button :disabled="locked">应用筛选</button>
-      <button v-if="tab.order.length" type="button" :disabled="locked" @click="clearSort">清除排序</button>
+      <label class="muted" :for="`filter-${tab.id}`">服务端筛选</label>
+      <input :id="`filter-${tab.id}`" v-model="tab.filter" placeholder="status = 'active' AND age >= 18" :disabled="pagingLocked" />
+      <button :disabled="pagingLocked">应用筛选</button>
+      <button v-if="tab.order.length" type="button" :disabled="pagingLocked" @click="clearSort">清除排序</button>
     </form>
+    <p v-if="tab.result && !tab.invalidated" class="column-hint muted" role="status">已应用服务端筛选：{{ tab.appliedFilter || '无' }}<span v-if="tab.filter !== (tab.appliedFilter ?? '')"> · 输入条件尚未应用</span></p>
+    <div v-if="tab.page" class="column-tools page-search">
+      <label :for="`page-search-${tab.id}`">本页搜索</label>
+      <input :id="`page-search-${tab.id}`" v-model="pageSearch" type="search" placeholder="查找已加载的可见单元格" :disabled="tab.invalidated" @keydown="searchPageKey" />
+      <button :disabled="!pageMatches.length" @click="findOnPage(-1)">上一个匹配</button>
+      <button :disabled="!pageMatches.length" @click="findOnPage()">下一个匹配</button>
+      <span class="muted" role="status">{{ pageSearchIndex >= 0 ? `${pageSearchIndex + 1} / ` : '' }}{{ pageMatches.length }} 个匹配单元格 · 仅当前页可见列，长字段只搜已加载预览</span>
+    </div>
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
     <div v-if="tab.page?.columns.length" class="column-tools">
       <label :for="`column-search-${tab.id}`">跳转列</label>
@@ -491,12 +534,14 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :data-row-index="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-in-range': inRange(row, index), 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="focusCell(row, index)" @mousedown.left.prevent @click="pointCell($event, row, index)" @paste="pasteCells($event, row, index)" @keydown="cellKey($event, row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-in-range': inRange(row, index), 'is-page-match': matchingCells.has(`${row.index}:${index}`), 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="focusCell(row, index)" @mousedown.left.prevent @click="pointCell($event, row, index)" @paste="pasteCells($event, row, index)" @keydown="cellKey($event, row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
     </div>
     <div v-else class="command-result" :class="{ 'is-error': tab.invalidated }">{{ tab.message || (tab.busy ? '正在执行…' : '没有结果') }}</div>
-    <div v-if="tab.page" class="page-bar"><span v-if="!tab.page.rows.length" role="status">结果为空</span><span>{{ tab.page.offset + (tab.page.returned ? 1 : 0) }}–{{ tab.page.offset + tab.page.returned }} 行 · {{ Math.round(tab.result?.elapsedMs ?? 0) }} ms{{ writable ? ' · 双击单元格编辑' : ' · 只读' }}<template v-if="canPaste"> · 选中单元格后可粘贴</template></span><span class="spacer" /><button :disabled="locked || !tab.page.offset || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, -1))">上一页</button><button :disabled="locked || !tab.page.hasMore || !tab.result?.cursorId || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, 1))">下一页</button></div>
+    <div v-if="tab.page" class="page-bar"><span v-if="!tab.page.rows.length" role="status">结果为空</span><span>{{ tab.page.offset + (tab.page.returned ? 1 : 0) }}–{{ tab.page.offset + tab.page.returned }} 行 · {{ Math.round(tab.result?.elapsedMs ?? 0) }} ms{{ writable ? ' · 双击单元格编辑' : ' · 只读' }}<template v-if="canPaste"> · 选中单元格后可粘贴</template></span><span class="spacer" />
+      <label :for="`page-size-${tab.id}`">每页行数</label><select :id="`page-size-${tab.id}`" :value="tab.pageSize ?? 200" :disabled="pagingLocked || !tab.result?.cursorId || tab.invalidated" @change="choosePageSize"><option v-for="size in RESULT_PAGE_SIZES" :key="size" :value="size">{{ size.toLocaleString() }}</option></select>
+      <button :disabled="pagingLocked || !tab.page.offset || !tab.result?.cursorId || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, -1))">上一页</button><button :disabled="pagingLocked || !tab.page.hasMore || !tab.result?.cursorId || tab.invalidated" @click="workbench.attempt(() => workbench.pageTab(tab, 1))">下一页</button></div>
     <div v-if="editing" class="modal-backdrop" @keydown.esc="editing = null"><section class="modal" role="dialog" aria-modal="true" aria-label="编辑单元格"><h2>编辑 {{ tab.page?.columns[editing.column]?.name }}</h2><form @submit.prevent="saveCell"><textarea v-model="editing.raw" :disabled="editing.isNull" rows="5" aria-label="单元格值" autofocus /><label class="checkbox"><input v-model="editing.isNull" type="checkbox" />NULL</label><p v-if="error" class="is-error">{{ error }}</p><div class="modal-actions"><button type="button" @click="editing = null">取消</button><button type="submit" class="primary">保存到本地修改</button></div></form></section></div>
     <div v-if="insertOpen" class="modal-backdrop"><section class="modal insert-dialog" role="dialog" aria-modal="true" aria-label="新增行"><h2>新增行</h2><p class="muted">未勾选的列由数据库默认值填充；插入后需要提交事务。</p><form @submit.prevent="submitInsert"><div v-for="column in insertColumns" :key="column.name" class="insert-field"><label class="checkbox"><input type="checkbox" :checked="insertInclude.has(column.name)" @change="insertInclude.has(column.name) ? insertInclude.delete(column.name) : insertInclude.add(column.name)" />{{ column.name }}{{ column.requiredOnInsert ? ' *' : '' }}</label><input v-model="insertValues[column.name]" :disabled="!insertInclude.has(column.name) || insertNulls.has(column.name)" :aria-label="column.name" :placeholder="column.defaultValue ?? column.typeName" /><label class="checkbox"><input type="checkbox" :disabled="!insertInclude.has(column.name) || !column.nullable" :checked="insertNulls.has(column.name)" @change="insertNulls.has(column.name) ? insertNulls.delete(column.name) : insertNulls.add(column.name)" />NULL</label></div><p v-if="error" class="is-error">{{ error }}</p><div class="modal-actions"><button type="button" @click="insertOpen = false">取消</button><button class="primary" type="submit">插入</button></div></form></section></div>
     <CellViewer v-if="viewer" :value="viewer.value" :title="viewer.title" @close="viewer = null" />
@@ -517,6 +562,8 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
 .result-data-table tr.is-selected td.is-pinned { background:#26364a; }
 .result-data-table tr:hover td.is-pinned { background:#252a31; }
 .result-data-table td.is-cell-in-range { background-image:linear-gradient(#5289d433, #5289d433); }
+.result-data-table td.is-page-match { text-decoration:underline; text-decoration-color:#e8ba66; text-underline-offset:3px; }
+.page-bar { flex-wrap:wrap; }
 .result-data-table td[data-column-index] { user-select:none; }
 .column-hint { margin:0; padding:3px 8px; border-bottom:1px solid var(--border); }
 .result-data-table .column-sort,.result-data-table th small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:8px; }

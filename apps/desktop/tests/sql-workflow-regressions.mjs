@@ -45,7 +45,7 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-function fixture(offset = 0, { preserveStorage = false } = {}) {
+function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) {
   if (!preserveStorage) storage.clear()
   const wb = useWorkbench()
   wb.connections.value = ['a', 'b'].map((id) => ({
@@ -55,16 +55,16 @@ function fixture(offset = 0, { preserveStorage = false } = {}) {
   wb.dialects.value = [{ id: 'postgresql', quoting: { open: '"', close: '"', escape: 'double' } }]
   wb.selectConnection('a')
   const values = new Map()
-  const calls = { state: [], inserts: 0, applies: 0, offsets: [], closed: [] }
+  const calls = { state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [] }
   let sequence = 0
-  const page = (start) => {
-    const rows = Array.from({ length: Math.max(0, Math.min(200, 805 - start)) }, (_, index) => {
+  const page = (start, limit = 200) => {
+    const rows = Array.from({ length: Math.max(0, Math.min(limit, totalRows - start)) }, (_, index) => {
       const id = start + index + 1
       return { index: start + index, cells: [number(id), text(values.get(id) ?? `original-${id}`)] }
     })
     return {
       columns: [{ name: 'id', type: 'integer' }, { name: 'body', type: 'text' }], rows,
-      offset: start, returned: rows.length, hasMore: start + rows.length < 805,
+      offset: start, returned: rows.length, hasMore: start + rows.length < totalRows,
       cursorId: `connection:a|cursor:synthetic-${++sequence}`,
       executedSql: 'SELECT id, body FROM synthetic ORDER BY id', elapsedMs: 0
     }
@@ -87,8 +87,17 @@ function fixture(offset = 0, { preserveStorage = false } = {}) {
     async recordSqlHistory() { return {} },
     async transactionState(node) { calls.state.push(node); return { active: values.size > 0, pendingAffected: values.size } },
     async closeCursor(id) { calls.closed.push(id) },
-    async runQuery(_node, _sql, options) { return page(options?.offset ?? 0) },
-    async fetchResultPage(_cursor, requestedOffset) { calls.offsets.push(requestedOffset); return page(requestedOffset) },
+    async runQuery(node, sql, options) {
+      calls.queries.push({ node, sql, options: { ...options } })
+      const result = page(options?.offset ?? 0, options?.limit ?? 200)
+      result.cursorId = result.cursorId.replace('connection:a|', `${node}|`)
+      return result
+    },
+    async fetchResultPage(cursor, requestedOffset, limit) {
+      calls.offsets.push(requestedOffset)
+      calls.fetches.push({ cursor, offset: requestedOffset, limit })
+      return { ...page(requestedOffset, limit), cursorId: cursor }
+    },
     async applyEdits(_table, updates) {
       calls.applies++
       for (const update of updates) values.set(update.keyValues.id.value, update.changes.body.text)
@@ -102,6 +111,74 @@ function fixture(offset = 0, { preserveStorage = false } = {}) {
 function finishDecision(value) {
   assert.ok(decision.value, 'synthetic decision must be open')
   decision.value.settle(value)
+}
+function addResultTab({ wb, tab, page }, connectionId, size) {
+  const result = page(0, size)
+  result.cursorId = result.cursorId.replace('connection:a|', `connection:${connectionId}|`)
+  wb.tabs.value.push({
+    ...tab, id: `synthetic-tab-${connectionId}-${wb.tabs.value.length}`, connectionId,
+    table: { ...tab.table, id: `connection:${connectionId}|table:public.synthetic` },
+    result, page: result, pageSize: size, generation: 0, busy: false, invalidated: false,
+    filter: '', appliedFilter: '', order: [], dirty: new Map(), selectedRows: new Set()
+  })
+  return wb.tabs.value.at(-1)
+}
+// Hold an IPC response after recording its actual arguments. No timers or native work.
+function holdBackend(backend, method) {
+  const original = backend[method]
+  const response = deferred()
+  const held = { args: null, resolve: response.resolve, reject: response.reject }
+  backend[method] = (...args) => {
+    held.args = args
+    const result = original(...args)
+    return response.promise.then(() => result)
+  }
+  return held
+}
+async function waitForBackend(held) {
+  for (let turn = 0; turn < 100 && !held.args; turn++) await Promise.resolve()
+  assert.ok(held.args, 'operation must reach the held backend call')
+}
+function pageSnapshot(tab) {
+  return {
+    result: tab.result, page: tab.page, pageSize: tab.pageSize,
+    generation: tab.generation, cursor: tab.result?.cursorId, invalidated: tab.invalidated,
+    selectedRows: [...tab.selectedRows]
+  }
+}
+function assertPageSnapshot(tab, before) {
+  assert.equal(tab.result, before.result)
+  assert.equal(tab.page, before.page)
+  assert.equal(tab.pageSize, before.pageSize)
+  assert.equal(tab.generation, before.generation)
+  assert.equal(tab.result?.cursorId, before.cursor)
+  assert.equal(tab.invalidated, before.invalidated)
+  assert.deepEqual([...tab.selectedRows], before.selectedRows)
+}
+function assertIdle(wb, tab) {
+  assert.equal(tab.busy, false)
+  assert.equal(wb.locks.has(tab.connectionId), false)
+}
+function assertNoBackendWork(calls) {
+  assert.deepEqual(calls, { state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [] })
+}
+async function rejectsWithoutDecision(action, expected) {
+  // Observe rejection immediately; cancel an unexpected dialog so a regression cannot hang the suite.
+  let outcome
+  const observed = Promise.resolve().then(action).then(
+    () => { outcome = { rejected: false } },
+    (error) => { outcome = { rejected: true, error } }
+  )
+  let asked = false
+  for (let turn = 0; turn < 100 && !outcome; turn++) {
+    if (decision.value) { asked = true; finishDecision('cancel') }
+    await Promise.resolve()
+  }
+  assert.ok(outcome, 'rejection must settle without waiting for user input')
+  await observed
+  assert.equal(asked, false, 'invalid input must be rejected before any dirty-draft decision')
+  assert.equal(outcome.rejected, true)
+  if (expected) assert.match(outcome.error.message, expected)
 }
 const outcomes = []
 async function check(name, action) {
@@ -424,6 +501,547 @@ await check('clean_failed_next_page_keeps_position_without_reapplying', async ()
   assert.equal(tab.page.rows[0].cells[1].text, 'original-401')
   assert.deepEqual(calls.offsets, [600])
   assert.equal(calls.applies, 0)
+})
+
+const pageSizes = [100, 200, 500, 1000]
+const navigation = [
+  { name: 'page', invoke: (wb, tab) => wb.pageTab(tab, 1), offset: 600, size: 200 },
+  { name: 'size', invoke: (wb, tab) => wb.changePageSize(tab, 100), offset: 0, size: 100 }
+]
+
+for (const size of pageSizes) {
+  await check(`page_size_${size}_commits_only_after_cursor_fetch_succeeds`, async () => {
+    const { wb, tab, backend, calls } = fixture(400)
+    tab.pageSize = size === 200 ? 100 : 200
+    tab.appliedFilter = 'id >= 1'
+    tab.selectedRows.add(400)
+    const before = pageSnapshot(tab)
+    const held = holdBackend(backend, 'fetchResultPage')
+    const pending = wb.changePageSize(tab, size)
+    try {
+      await waitForBackend(held)
+      assertPageSnapshot(tab, before)
+      assert.equal(tab.busy, true)
+      assert.equal(wb.locks.has('a'), true)
+      assert.deepEqual(calls.fetches, [{ cursor: before.cursor, offset: 0, limit: size }])
+      assert.deepEqual(calls.queries, [])
+      assert.deepEqual(calls.closed, [])
+      held.resolve()
+      await pending
+      assert.equal(tab.result, before.result)
+      assert.notEqual(tab.page, before.page)
+      assert.equal(tab.page.offset, 0)
+      assert.equal(tab.page.returned, Math.min(size, 805))
+      assert.equal(tab.page.rows.length, Math.min(size, 805))
+      assert.equal(tab.pageSize, size)
+      assert.equal(tab.appliedFilter, 'id >= 1')
+      assert.equal(tab.selectedRows.size, 0)
+      assertIdle(wb, tab)
+    } finally { held.resolve(); await pending.catch(() => {}) }
+  })
+
+  await check(`page_navigation_${size}_uses_current_size_for_step_and_limit`, async () => {
+    const { wb, tab, page, calls } = fixture(0, { totalRows: 3205 })
+    tab.pageSize = size
+    tab.result = tab.page = page(0, size)
+    const cursor = tab.result.cursorId
+    await wb.pageTab(tab, 1)
+    assert.equal(tab.page.offset, size)
+    assert.equal(tab.page.rows.length, size)
+    await wb.pageTab(tab, -1)
+    assert.equal(tab.page.offset, 0)
+    assert.deepEqual(calls.fetches, [
+      { cursor, offset: size, limit: size }, { cursor, offset: 0, limit: size }
+    ])
+    assert.equal(tab.pageSize, size)
+    assert.deepEqual(calls.queries, [])
+    assertIdle(wb, tab)
+  })
+}
+
+await check('legacy_result_defaults_to_200_rows_and_empty_applied_filter', async () => {
+  const { wb, tab, calls } = fixture()
+  assert.equal(tab.pageSize, undefined)
+  assert.equal(tab.appliedFilter, undefined)
+  const cursor = tab.result.cursorId
+  await wb.pageTab(tab, 1)
+  assert.deepEqual(calls.fetches, [{ cursor, offset: 200, limit: 200 }])
+  assert.equal(tab.page.offset, 200)
+  assert.equal(tab.pageSize ?? 200, 200)
+  assert.equal(tab.appliedFilter ?? '', '')
+  await wb.reloadTab(tab)
+  await wb.transformTab(tab)
+  assert.deepEqual(calls.queries.map(({ options }) => options.limit), [200, 200])
+  assert.equal(tab.appliedFilter, '')
+  assert.equal(tab.querySql, tab.sql)
+})
+
+for (const size of [0, -100, 1, 199, 201, 500.5, 1001, NaN, Infinity, '200', null, undefined]) {
+  await check(`page_size_rejects_${typeof size}_${String(size)}_before_dirty_guard`, async () => {
+    const { wb, tab, calls } = fixture(400)
+    wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+    tab.selectedRows.add(400)
+    const before = pageSnapshot(tab)
+    await rejectsWithoutDecision(() => wb.changePageSize(tab, size))
+    assertPageSnapshot(tab, before)
+    assert.equal(tab.dirty.size, 1)
+    assertNoBackendWork(calls)
+    assertIdle(wb, tab)
+  })
+}
+
+for (const explicitSize of [false, true]) {
+  await check(`same_page_size_${explicitSize ? 'explicit' : 'default'}_is_a_noop_even_when_dirty`, async () => {
+    const { wb, tab, calls } = fixture(400)
+    if (explicitSize) tab.pageSize = 500
+    wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+    const before = pageSnapshot(tab)
+    const pending = wb.changePageSize(tab, explicitSize ? 500 : 200)
+    const asked = Boolean(decision.value)
+    if (asked) finishDecision('cancel')
+    await pending
+    assert.equal(asked, false)
+    assertPageSnapshot(tab, before)
+    assert.equal(tab.dirty.size, 1)
+    assertNoBackendWork(calls)
+    assertIdle(wb, tab)
+  })
+}
+
+for (const operation of navigation) {
+  await check(`${operation.name}_without_cursor_is_a_noop_before_dirty_guard`, async () => {
+    const { wb, tab, calls } = fixture(400)
+    tab.result.cursorId = undefined
+    wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+    tab.selectedRows.add(400)
+    const before = pageSnapshot(tab)
+    const pending = operation.invoke(wb, tab)
+    const asked = Boolean(decision.value)
+    if (asked) finishDecision('cancel')
+    await pending
+    assert.equal(asked, false)
+    assertPageSnapshot(tab, before)
+    assert.equal(tab.dirty.size, 1)
+    assertNoBackendWork(calls)
+    assertIdle(wb, tab)
+  })
+}
+
+await check('page_navigation_respects_first_last_pages_and_rejects_invalid_directions', async () => {
+  const { wb, tab, page, calls } = fixture()
+  const first = pageSnapshot(tab)
+  await wb.pageTab(tab, -1)
+  assertPageSnapshot(tab, first)
+  tab.page = page(800)
+  const last = pageSnapshot(tab)
+  await wb.pageTab(tab, 1)
+  assertPageSnapshot(tab, last)
+  for (const direction of [0, 2, -2, NaN, '1']) {
+    await assert.rejects(wb.pageTab(tab, direction))
+    assertPageSnapshot(tab, last)
+  }
+  assertNoBackendWork(calls)
+  assertIdle(wb, tab)
+})
+
+for (const connectionId of ['a', 'b']) {
+  await check(`page_size_and_position_are_isolated_from_other_tab_on_${connectionId}`, async () => {
+    const f = fixture(400)
+    const { wb, tab, calls } = f
+    const other = addResultTab(f, connectionId, 500)
+    other.filter = 'id > 5'
+    other.appliedFilter = 'id > 1'
+    other.selectedRows.add(0)
+    wb.stageCell(other, other.page.rows[0], 'body', text('other-tab-draft'))
+    const before = pageSnapshot(other)
+    await wb.changePageSize(tab, 100)
+    await wb.pageTab(tab, 1)
+    assert.equal(tab.page.offset, 100)
+    assert.equal(tab.pageSize, 100)
+    assertPageSnapshot(other, before)
+    assert.equal(other.filter, 'id > 5')
+    assert.equal(other.appliedFilter, 'id > 1')
+    assert.equal(other.dirty.size, 1)
+    assert.deepEqual(calls.fetches.map(({ offset, limit }) => [offset, limit]), [[0, 100], [100, 100]])
+    assert.deepEqual(calls.queries, [])
+  })
+}
+
+for (const operation of navigation) {
+  for (const choice of ['cancel', 'discard', 'apply']) {
+    await check(`dirty_${choice}_${operation.name}_guards_before_fetch_and_uses_current_cursor`, async () => {
+      const { wb, tab, calls, values } = fixture(400)
+      tab.pageSize = 200
+      tab.selectedRows.add(400)
+      wb.stageCell(tab, tab.page.rows[0], 'body', text('applied-row-401'))
+      const before = pageSnapshot(tab)
+      const pending = operation.invoke(wb, tab)
+      try {
+        assertPageSnapshot(tab, before)
+        assertNoBackendWork(calls)
+        assert.equal(wb.locks.has('a'), true)
+        finishDecision(choice)
+        await pending
+        if (choice === 'cancel') {
+          assertPageSnapshot(tab, before)
+          assert.equal(tab.dirty.size, 1)
+          assertNoBackendWork(calls)
+        } else {
+          assert.equal(tab.page.offset, operation.offset)
+          assert.equal(tab.pageSize, operation.size)
+          assert.equal(tab.dirty.size, 0)
+          assert.equal(tab.selectedRows.size, 0)
+          assert.deepEqual(calls.fetches, [{ cursor: tab.result.cursorId, offset: operation.offset, limit: operation.size }])
+          if (choice === 'apply') {
+            assert.notEqual(tab.result.cursorId, before.cursor, 'fetch must use the cursor produced by applying drafts')
+            assert.equal(values.get(401), 'applied-row-401')
+            assert.equal(calls.applies, 1)
+            assert.deepEqual(calls.queries.map(({ options }) => [options.offset, options.limit]), [[400, 200]])
+            assert.ok(calls.closed.includes(before.cursor))
+          } else {
+            assert.equal(tab.result, before.result)
+            assert.equal(calls.applies, 0)
+            assert.deepEqual(calls.queries, [])
+            assert.equal(values.size, 0)
+          }
+        }
+        assertIdle(wb, tab)
+      } finally {
+        if (decision.value) finishDecision('cancel')
+        await pending.catch(() => {})
+      }
+    })
+  }
+
+  await check(`failed_${operation.name}_retains_page_size_and_selection_then_can_retry`, async () => {
+    const { wb, tab, backend, calls } = fixture(400)
+    tab.pageSize = 200
+    tab.selectedRows.add(400)
+    const before = pageSnapshot(tab)
+    const originalFetch = backend.fetchResultPage
+    backend.fetchResultPage = async (...args) => {
+      await originalFetch(...args)
+      throw new Error('SYNTHETIC_PAGE_FAILED')
+    }
+    await assert.rejects(operation.invoke(wb, tab), /SYNTHETIC_PAGE_FAILED/)
+    assertPageSnapshot(tab, before)
+    assertIdle(wb, tab)
+    backend.fetchResultPage = originalFetch
+    await operation.invoke(wb, tab)
+    assert.deepEqual(calls.fetches, Array.from({ length: 2 }, () => ({ cursor: before.cursor, offset: operation.offset, limit: operation.size })))
+    assert.equal(tab.page.offset, operation.offset)
+    assert.equal(tab.pageSize, operation.size)
+    assert.equal(tab.selectedRows.size, 0)
+    assert.deepEqual(calls.queries, [])
+    assert.equal(calls.applies, 0)
+    assertIdle(wb, tab)
+  })
+}
+
+await check('dirty_apply_failed_size_change_keeps_fresh_page_and_previous_size', async () => {
+  const { wb, tab, backend, calls } = fixture(400)
+  tab.pageSize = 200
+  const oldCursor = tab.result.cursorId
+  wb.stageCell(tab, tab.page.rows[0], 'body', text('applied-row-401'))
+  const originalFetch = backend.fetchResultPage
+  backend.fetchResultPage = async (...args) => {
+    await originalFetch(...args)
+    throw new Error('SYNTHETIC_SIZE_FAILED')
+  }
+  const pending = wb.changePageSize(tab, 500)
+  finishDecision('apply')
+  await assert.rejects(pending, /SYNTHETIC_SIZE_FAILED/)
+  assert.notEqual(tab.result.cursorId, oldCursor)
+  assert.equal(tab.page.offset, 400)
+  assert.equal(tab.page.rows[0].cells[1].text, 'applied-row-401')
+  assert.equal(tab.pageSize, 200)
+  assert.equal(tab.dirty.size, 0)
+  assert.equal(wb.transactions.a.active, true)
+  assertIdle(wb, tab)
+  backend.fetchResultPage = originalFetch
+  await wb.changePageSize(tab, 500)
+  assert.deepEqual(calls.fetches, Array.from({ length: 2 }, () => ({ cursor: tab.result.cursorId, offset: 0, limit: 500 })))
+  assert.equal(calls.applies, 1)
+  assert.equal(calls.queries.length, 1)
+  assert.equal(tab.pageSize, 500)
+  assert.equal(tab.page.offset, 0)
+})
+
+const staleChanges = [
+  ['result', ({ tab }) => { tab.result = { ...tab.result } }],
+  ['page', ({ tab }) => { tab.page = { ...tab.page } }],
+  ['generation', ({ tab }) => { tab.generation++ }],
+  ['cursor', ({ tab }) => { tab.result.cursorId = 'connection:a|cursor:replacement' }],
+  ['removed', ({ wb, tab }) => { wb.tabs.value.splice(wb.tabs.value.indexOf(tab), 1) }],
+  ['invalidated', ({ tab }) => { tab.invalidated = true }],
+  ['size', ({ tab }) => { tab.pageSize = 500 }]
+]
+for (const operation of navigation) {
+  for (const [changed, mutate] of staleChanges) {
+    await check(`late_${operation.name}_response_is_discarded_after_${changed}_changes`, async () => {
+      const f = fixture(400)
+      const { wb, tab, backend, calls } = f
+      tab.pageSize = 200
+      const cursor = tab.result.cursorId
+      const held = holdBackend(backend, 'fetchResultPage')
+      const pending = operation.invoke(wb, tab)
+      try {
+        await waitForBackend(held)
+        mutate(f)
+        tab.selectedRows.add(401)
+        const current = pageSnapshot(tab)
+        held.resolve()
+        await pending
+        assertPageSnapshot(tab, current)
+        assert.equal(wb.tabs.value.includes(tab), changed !== 'removed')
+        assert.deepEqual(calls.fetches, [{ cursor, offset: operation.offset, limit: operation.size }])
+        assert.deepEqual(calls.queries, [])
+        assertIdle(wb, tab)
+      } finally { held.resolve(); await pending.catch(() => {}) }
+    })
+  }
+
+  await check(`pending_${operation.name}_locks_same_connection_and_allows_other_connection`, async () => {
+    const f = fixture(400)
+    const { wb, tab, backend, calls } = f
+    const other = addResultTab(f, 'a', 500)
+    const remote = addResultTab(f, 'b', 100)
+    const before = pageSnapshot(other)
+    const held = holdBackend(backend, 'fetchResultPage')
+    const pending = operation.invoke(wb, tab)
+    try {
+      await waitForBackend(held)
+      assert.equal(wb.locks.has('a'), true)
+      for (const target of [tab, other]) {
+        await assert.rejects(wb.pageTab(target, 1))
+        await assert.rejects(wb.changePageSize(target, 1000))
+        await assert.rejects(wb.reloadTab(target))
+        await assert.rejects(wb.transformTab(target))
+      }
+      assertPageSnapshot(other, before)
+      assert.equal(calls.fetches.length, 1)
+      assert.deepEqual(calls.queries, [])
+      await wb.reloadTab(remote)
+      assert.equal(calls.queries.length, 1)
+      assert.equal(calls.queries[0].node, 'connection:b')
+      assert.equal(calls.queries[0].options.limit, 100)
+      assert.equal(wb.locks.has('a'), true)
+      assertIdle(wb, remote)
+      held.resolve()
+      await pending
+      assertIdle(wb, tab)
+    } finally { held.resolve(); await pending.catch(() => {}) }
+  })
+}
+
+for (const operation of [
+  ...navigation,
+  { name: 'reload', invoke: (wb, tab) => wb.reloadTab(tab) },
+  { name: 'filter', invoke: (wb, tab) => wb.transformTab(tab) }
+]) {
+  await check(`pending_cell_editor_blocks_${operation.name}_before_dirty_guard_and_backend`, async () => {
+    const { wb, tab, calls } = fixture(400)
+    tab.filter = 'id > 1'
+    wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+    wb.pendingEditors.add(tab.id)
+    const before = pageSnapshot(tab)
+    await rejectsWithoutDecision(() => operation.invoke(wb, tab), /编辑|保存|取消/)
+    assertPageSnapshot(tab, before)
+    assert.equal(tab.dirty.size, 1)
+    assert.equal(wb.pendingEditors.has(tab.id), true)
+    assertNoBackendWork(calls)
+    assertIdle(wb, tab)
+  })
+}
+
+await check('internal_reload_without_guard_is_allowed_with_a_pending_editor', async () => {
+  const { wb, tab, calls } = fixture(400)
+  tab.pageSize = 500
+  wb.pendingEditors.add(tab.id)
+  await wb.reloadTab(tab, false)
+  assert.equal(calls.queries.length, 1)
+  assert.equal(calls.queries[0].options.limit, 500)
+  assert.equal(tab.page.offset, 0)
+  assert.equal(tab.page.rows.length, 500)
+  assert.equal(tab.pageSize, 500)
+  assertIdle(wb, tab)
+})
+
+for (const size of pageSizes) {
+  for (const operation of ['reload', 'filter']) {
+    await check(`${operation}_query_inherits_page_size_${size}`, async () => {
+      const { wb, tab, calls } = fixture(400)
+      tab.pageSize = size
+      const oldResult = tab.result
+      if (operation === 'filter') {
+        tab.filter = 'id >= 1'
+        await wb.transformTab(tab, [{ column: 'body', direction: 'DESC' }])
+        assert.match(calls.queries[0].sql, /WHERE "id" >= 1/)
+        assert.match(calls.queries[0].sql, /ORDER BY "body" DESC$/)
+        assert.equal(tab.appliedFilter, 'id >= 1')
+        assert.equal(tab.querySql, calls.queries[0].sql)
+      } else {
+        await wb.reloadTab(tab)
+        assert.equal(calls.queries[0].sql, tab.querySql)
+      }
+      assert.equal(calls.queries.length, 1)
+      assert.equal(calls.queries[0].node, 'connection:a')
+      assert.equal(calls.queries[0].options.limit, size)
+      assert.equal(calls.queries[0].options.offset, 0)
+      assert.equal(calls.queries[0].options.keepCursor, true)
+      assert.deepEqual(calls.fetches, [])
+      assert.notEqual(tab.result, oldResult)
+      assert.equal(tab.page.offset, 0)
+      assert.equal(tab.page.returned, Math.min(size, 805))
+      assert.equal(tab.pageSize, size)
+      assertIdle(wb, tab)
+    })
+  }
+}
+
+await check('failed_filter_keeps_applied_filter_query_order_and_old_page', async () => {
+  const { wb, tab, backend, calls } = fixture(400)
+  tab.pageSize = 500
+  tab.appliedFilter = 'id > 10'
+  tab.querySql = `SELECT * FROM (${tab.sql}) _dbstudio_filter WHERE "id" > 10 ORDER BY "id" ASC`
+  tab.order = [{ column: 'id', direction: 'ASC' }]
+  tab.filter = 'id > 20'
+  tab.selectedRows.add(400)
+  const before = pageSnapshot(tab)
+  const oldQuery = tab.querySql
+  const oldOrder = tab.order
+  const originalQuery = backend.runQuery
+  backend.runQuery = async (...args) => {
+    await originalQuery(...args)
+    throw new Error('SYNTHETIC_FILTER_FAILED')
+  }
+  await assert.rejects(wb.transformTab(tab, [{ column: 'body', direction: 'DESC' }]), /SYNTHETIC_FILTER_FAILED/)
+  assert.equal(tab.result, before.result)
+  assert.equal(tab.page, before.page)
+  assert.equal(tab.page.offset, 400)
+  assert.equal(tab.pageSize, before.pageSize)
+  assert.deepEqual([...tab.selectedRows], before.selectedRows)
+  assert.equal(tab.appliedFilter, 'id > 10')
+  assert.equal(tab.filter, 'id > 20')
+  assert.equal(tab.querySql, oldQuery)
+  assert.equal(tab.order, oldOrder)
+  assert.equal(calls.queries.length, 1)
+  assert.equal(calls.queries[0].options.limit, 500)
+  assert.deepEqual(calls.closed, [])
+  assertIdle(wb, tab)
+})
+
+for (const [name, filter] of [
+  ['missing_value', 'id >'],
+  ['trailing_and', 'id > 1 AND'],
+  ['unclosed_quote', "body = 'unterminated"]
+]) {
+  await check(`invalid_filter_${name}_cannot_prompt_discard_or_apply_dirty_rows`, async () => {
+    const { wb, tab, calls } = fixture(400)
+    tab.appliedFilter = 'id > 10'
+    tab.filter = filter
+    wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+    const before = pageSnapshot(tab)
+    const oldQuery = tab.querySql
+    await rejectsWithoutDecision(() => wb.transformTab(tab))
+    assertPageSnapshot(tab, before)
+    assert.equal(tab.dirty.size, 1)
+    assert.equal(tab.appliedFilter, 'id > 10')
+    assert.equal(tab.filter, filter)
+    assert.equal(tab.querySql, oldQuery)
+    assertNoBackendWork(calls)
+    assertIdle(wb, tab)
+  })
+}
+
+await check('filter_sql_generation_failure_precedes_dirty_guard_and_backend', async () => {
+  const { wb, tab, calls } = fixture(400)
+  wb.dialects.value = []
+  tab.filter = 'id > 1'
+  wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+  const before = pageSnapshot(tab)
+  await rejectsWithoutDecision(() => wb.transformTab(tab), /缺少方言引用规则/)
+  assertPageSnapshot(tab, before)
+  assert.equal(tab.dirty.size, 1)
+  assertNoBackendWork(calls)
+  assertIdle(wb, tab)
+})
+
+await check('cancelled_filter_keeps_applied_filter_and_old_page_without_query', async () => {
+  const { wb, tab, calls } = fixture(400)
+  tab.pageSize = 500
+  tab.appliedFilter = 'id > 10'
+  tab.filter = 'id > 20'
+  wb.stageCell(tab, tab.page.rows[0], 'body', text('keep-local-draft'))
+  const before = pageSnapshot(tab)
+  const oldQuery = tab.querySql
+  const pending = wb.transformTab(tab)
+  finishDecision('cancel')
+  await pending
+  assertPageSnapshot(tab, before)
+  assert.equal(tab.appliedFilter, 'id > 10')
+  assert.equal(tab.filter, 'id > 20')
+  assert.equal(tab.querySql, oldQuery)
+  assert.equal(tab.dirty.size, 1)
+  assertNoBackendWork(calls)
+  assertIdle(wb, tab)
+})
+
+for (const waitAt of ['guard', 'query']) {
+  await check(`successful_filter_uses_submitted_snapshot_when_draft_changes_during_${waitAt}`, async () => {
+    const { wb, tab, backend, calls } = fixture(400)
+    tab.pageSize = 500
+    tab.appliedFilter = 'id >= 1'
+    tab.filter = 'id > 10'
+    if (waitAt === 'guard') wb.stageCell(tab, tab.page.rows[0], 'body', text('discard-this-draft'))
+    const before = pageSnapshot(tab)
+    const held = holdBackend(backend, 'runQuery')
+    const pending = wb.transformTab(tab)
+    try {
+      if (waitAt === 'guard') {
+        assertPageSnapshot(tab, before)
+        assertNoBackendWork(calls)
+        tab.filter = 'id < 5'
+        finishDecision('discard')
+      }
+      await waitForBackend(held)
+      assert.equal(tab.appliedFilter, 'id >= 1', 'applied filter changes only after query success')
+      assert.equal(tab.page, before.page)
+      tab.filter = 'id = 7'
+      assert.equal(calls.queries.length, 1)
+      assert.match(calls.queries[0].sql, /WHERE "id" > 10/)
+      assert.equal(calls.queries[0].options.limit, 500)
+      held.resolve()
+      await pending
+      assert.equal(tab.appliedFilter, 'id > 10')
+      assert.equal(tab.filter, 'id = 7')
+      assert.equal(tab.querySql, calls.queries[0].sql)
+      assert.equal(tab.page.offset, 0)
+      assert.equal(tab.pageSize, 500)
+      assert.notEqual(tab.page, before.page)
+      assert.equal(calls.applies, 0)
+      assertIdle(wb, tab)
+    } finally {
+      if (decision.value) finishDecision('cancel')
+      held.resolve()
+      await pending.catch(() => {})
+    }
+  })
+}
+
+await check('clearing_filter_commits_empty_applied_filter_and_restores_base_sql', async () => {
+  const { wb, tab, calls } = fixture(400)
+  tab.pageSize = 100
+  tab.appliedFilter = 'id > 10'
+  tab.querySql = `SELECT * FROM (${tab.sql}) _dbstudio_filter WHERE "id" > 10`
+  tab.filter = ''
+  await wb.transformTab(tab)
+  assert.equal(tab.appliedFilter, '')
+  assert.equal(tab.querySql, tab.sql)
+  assert.equal(tab.page.offset, 0)
+  assert.equal(tab.pageSize, 100)
+  assert.equal(calls.queries[0].sql, tab.sql)
+  assert.equal(calls.queries[0].options.limit, 100)
 })
 
 const failed = outcomes.filter((item) => !item.passed).length

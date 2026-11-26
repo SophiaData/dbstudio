@@ -122,7 +122,7 @@ try {
     assert.equal(await head(7).evaluate(el => el === document.activeElement), true)
     await search.fill('不存在的列')
     assert.equal(await page.getByRole('button', { name: '跳转', exact: true }).isDisabled(), true)
-    assert.equal(await page.getByRole('status').textContent(), '没有匹配列')
+    assert.equal(await page.getByRole('status').filter({ hasText: /^没有匹配列$/ }).textContent(), '没有匹配列')
     await search.fill('')
   })
   await check('each tab keeps its own widths and horizontal position through unmount and page replacement', async () => {
@@ -654,6 +654,525 @@ try {
   })
   assert.equal((await nativeState()).queued, 0)
   assert.deepEqual((await nativeState()).unexpected, [])
+
+  // P2 pagination/search starts after the original 31 acceptance checks.
+  assert.equal(results.length, 31, 'Keep the original layout/range checks intact')
+  const pageSize = () => page.getByLabel('每页行数', { exact: true })
+  const pageSearch = () => page.getByLabel('本页搜索', { exact: true })
+  const serverFilter = () => page.getByLabel('服务端筛选', { exact: true })
+  const previousPage = () => page.getByRole('button', { name: '上一页', exact: true })
+  const nextPage = () => page.getByRole('button', { name: '下一页', exact: true })
+  const nextMatch = () => page.getByRole('button', { name: '下一个匹配', exact: true })
+  const previousMatch = () => page.getByRole('button', { name: '上一个匹配', exact: true })
+  const searchStatus = () => page.getByRole('status').filter({ hasText: '个匹配单元格' })
+  const applyFilter = () => page.getByRole('button', { name: '应用筛选', exact: true })
+  const refresh = () => page.getByRole('button', { name: '刷新', exact: true })
+  const paginationState = () => page.evaluate(() => window.gridFixture.paginationState())
+  const selectionState = async () => ({ active: await coordinates('.is-cell-selected'), range: await coordinates('.is-cell-in-range') })
+  const retainedState = state => ({ size: state.size, explicitSize: state.explicitSize, page: state.page,
+    cursor: state.cursor, querySql: state.querySql, appliedFilter: state.appliedFilter, dirty: state.dirty, selectedRows: state.selectedRows })
+  async function idlePagination() {
+    await page.waitForFunction(() => {
+      const state = window.gridFixture.paginationState()
+      return !state.busy && !state.locked && !state.decision
+    })
+    await settle()
+    const native = await nativeState()
+    assert.equal(native.queued, 0, 'All exact native expectations must be consumed')
+    assert.deepEqual(native.unexpected, [], 'No unexpected IPC, including COUNT or full-cell reads')
+  }
+  async function preparePagination(options = {}) {
+    await idlePagination()
+    await page.evaluate(options => window.gridFixture.preparePagination(options), options)
+    await settle()
+    await pageSize().waitFor()
+    assert.deepEqual((await paginationState()).calls, [])
+  }
+  async function queuePage(offset, limit, outcome = 'success', deferred = false) {
+    await page.evaluate(({ offset, limit, outcome, deferred }) => window.gridFixture.queuePaginationPage(offset, limit, outcome, deferred), { offset, limit, outcome, deferred })
+  }
+  async function queueQuery(sql, limit, outcome = 'success', deferred = false) {
+    await page.evaluate(({ sql, limit, outcome, deferred }) => window.gridFixture.queuePaginationQuery(sql, limit, outcome, deferred), { sql, limit, outcome, deferred })
+  }
+  async function finishPagination() {
+    await page.evaluate(() => window.gridFixture.finishPagination())
+    await idlePagination()
+    assert.deepEqual((await paginationState()).pending, { requested: true, settled: true })
+  }
+  async function waitPendingPagination() {
+    await page.waitForFunction(() => window.gridFixture.paginationState().pending?.requested)
+    assert.equal((await paginationState()).busy, true)
+    assert.equal(await pageSize().isDisabled(), true)
+    assert.equal(await previousPage().isDisabled(), true)
+    assert.equal(await nextPage().isDisabled(), true)
+  }
+  async function assertPage(offset, size, returned) {
+    const state = await paginationState()
+    assert.equal(state.size, size)
+    assert.equal(state.page.offset, offset)
+    assert.equal(state.page.returned, returned)
+    assert.equal(await pageSize().inputValue(), String(size))
+    assert.equal(await page.locator('tbody tr').count(), returned)
+    if (returned) assert.equal(await page.locator('tbody tr').first().getAttribute('data-row-index'), String(offset))
+  }
+  async function movePage(direction, offset, size) {
+    await queuePage(offset, size)
+    await (direction < 0 ? previousPage() : nextPage()).click()
+    await idlePagination()
+  }
+  async function changeSize(size) {
+    await queuePage(0, size)
+    await pageSize().selectOption(String(size))
+    await idlePagination()
+  }
+  async function assertSearchStatus(count, position = null) {
+    assert.equal(await searchStatus().count(), 1)
+    assert.equal((await searchStatus().textContent()).split(' · ')[0].trim(), `${position === null ? '' : `${position} / `}${count} 个匹配单元格`)
+  }
+  async function tryPageSize(size) {
+    // A guard regression must fail promptly instead of leaving page.evaluate
+    // waiting forever on a decision that these no-op cases must never open.
+    return page.evaluate(async size => {
+      let timer
+      try {
+        return await Promise.race([window.gridFixture.tryPageSize(size), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Page-size no-op unexpectedly waits for a guard/IPC')), 2000)
+        })])
+      } finally { clearTimeout(timer) }
+    }, size)
+  }
+  async function searchFor(query, expected) {
+    const before = retainedState(await paginationState())
+    const callsBefore = (await paginationState()).calls
+    await pageSearch().fill(query); await settle()
+    assert.deepEqual(await coordinates('.is-page-match'), expected, 'Only currently loaded visible matching cells are highlighted')
+    await assertSearchStatus(expected.length)
+    assert.equal(await nextMatch().isDisabled(), expected.length === 0)
+    assert.equal(await previousMatch().isDisabled(), expected.length === 0)
+    const after = await paginationState()
+    assert.deepEqual(retainedState(after), before, 'Local search must neither filter rows nor mutate the result/drafts')
+    assert.deepEqual(after.calls, callsBefore, 'Local search must not invoke IPC')
+  }
+  const needleMatches = offset => [[offset, 1], [offset, 2], [offset, 3], [offset + 1, 1], [offset + 45, 11]]
+  const filteredSql = value => `SELECT * FROM (SELECT synthetic_pagination) _dbstudio_filter WHERE \`note\` = '${value}'`
+  const appliedLabel = () => page.getByText(/^已应用服务端筛选[：:]/)
+  async function assertApplied(filter) {
+    assert.equal(await appliedLabel().count(), 1)
+    assert.ok((await appliedLabel().textContent()).includes(filter), `Applied indicator must retain ${filter}`)
+  }
+  async function stageAndSelect(offset) {
+    await pasteAt(offset, 1, 'Needle staged draft')
+    await page.getByLabel(`选择第 ${offset + 1} 行`, { exact: true }).check()
+    await selectRectangle([offset, 1], [offset + 1, 3])
+    assert.equal((await paginationState()).dirty.length, 1)
+  }
+
+  await check('pagination defaults to 200 and exposes exactly four sizes with real first/last-page boundaries', async () => {
+    await preparePagination({ total: 203 })
+    assert.equal((await paginationState()).explicitSize, null)
+    assert.deepEqual(await pageSize().locator('option').evaluateAll(options => options.map(option => option.value)), ['100', '200', '500', '1000'])
+    await assertPage(0, 200, 200)
+    assert.equal(await previousPage().isDisabled(), true)
+    assert.equal(await nextPage().isEnabled(), true)
+    await movePage(1, 200, 200); await assertPage(200, 200, 3)
+    assert.equal(await nextPage().isDisabled(), true)
+    assert.equal(await previousPage().isEnabled(), true)
+    await movePage(-1, 0, 200); await assertPage(0, 200, 200)
+    assert.equal(await previousPage().isDisabled(), true)
+    assert.equal((await paginationState()).calls.length, 2)
+  })
+  await check('100/500/1000 changes fetch offset zero and page forward/back with the selected limit', async () => {
+    for (const size of [100, 500, 1000]) {
+      await preparePagination({ offset: 200, total: size + 203 })
+      await selectRectangle([200, 1])
+      await changeSize(size); await assertPage(0, size, size); await assertCleared()
+      assert.equal(await previousPage().isDisabled(), true)
+      await movePage(1, size, size)
+      await assertPage(size, size, Math.min(size, 203))
+      if (size === 100) {
+        await movePage(1, 200, size); await assertPage(200, size, 100)
+        await movePage(1, 300, size); await assertPage(300, size, 3)
+      }
+      assert.equal(await nextPage().isDisabled(), true)
+      const lastOffset = (await paginationState()).page.offset
+      await movePage(-1, lastOffset - size, size)
+      await assertPage(lastOffset - size, size, size)
+      assert.equal(await nextPage().isEnabled(), true)
+      await changeSize(200); await assertPage(0, 200, 200)
+      assert.equal((await paginationState()).explicitSize, 200)
+    }
+  })
+  await check('page-size change dispatches immediately but commits selector/model only after a successful response', async () => {
+    await preparePagination({ offset: 200 })
+    await page.getByLabel('选择第 201 行', { exact: true }).check()
+    await selectRectangle([200, 1], [201, 3])
+    const before = retainedState(await paginationState())
+    const selection = await selectionState()
+    await queuePage(0, 500, 'success', true)
+    await pageSize().selectOption('500'); await waitPendingPagination()
+    assert.equal(await pageSize().inputValue(), '200', 'Pending selection rolls back to the committed size')
+    assert.deepEqual(retainedState(await paginationState()), before)
+    assert.deepEqual(await selectionState(), selection)
+    assert.equal((await paginationState()).calls.length, 1)
+    await finishPagination(); await assertPage(0, 500, 500); await assertCleared()
+    assert.deepEqual((await paginationState()).selectedRows, [])
+  })
+  await check('failed page-size fetch preserves the original page, size and row/cell selection', async () => {
+    await preparePagination({ size: 100, offset: 200 })
+    await page.getByLabel('选择第 201 行', { exact: true }).check()
+    await selectRectangle([200, 1], [201, 3])
+    const before = retainedState(await paginationState())
+    const selection = await selectionState()
+    await queuePage(0, 1000, 'failure', true)
+    await pageSize().selectOption('1000'); await waitPendingPagination()
+    assert.equal(await pageSize().inputValue(), '100')
+    await finishPagination()
+    assert.deepEqual(retainedState(await paginationState()), before)
+    assert.deepEqual(await selectionState(), selection)
+    assert.equal(await pageSize().inputValue(), '100')
+    assert.equal((await paginationState()).statusError, true)
+    assert.match((await paginationState()).status, /合成分页请求失败/)
+    assert.equal(await nextPage().isEnabled(), true)
+  })
+  await check('real draft Cancel preserves page/dirty/selection for size, previous, next, refresh and filter', async () => {
+    for (const action of ['size', 'previous', 'next', 'refresh', 'filter']) {
+      await preparePagination({ offset: 200 })
+      await stageAndSelect(200)
+      await searchFor('needle', needleMatches(200))
+      for (let index = 0; index < 3; index++) await nextMatch().click()
+      await settle(); await assertRectangle([200], [3], [200, 3])
+      if (action === 'filter') await serverFilter().fill("note = 'Alpha'")
+      const before = retainedState(await paginationState())
+      const selection = await selectionState()
+      if (action === 'size') await pageSize().selectOption('500')
+      else await ({ previous: previousPage, next: nextPage, refresh, filter: applyFilter }[action])().click()
+      const dialog = page.getByRole('dialog').filter({ hasText: '尚未应用的修改' })
+      await dialog.waitFor()
+      assert.deepEqual((await paginationState()).calls, [], 'Guard must run before any native request')
+      if (action === 'size') assert.equal(await pageSize().inputValue(), '200')
+      await dialog.getByRole('button', { name: '取消', exact: true }).click()
+      await idlePagination()
+      assert.equal(await page.getByRole('dialog').count(), 0)
+      assert.deepEqual(retainedState(await paginationState()), before, action)
+      assert.deepEqual(await selectionState(), selection, action)
+      assert.equal(await pageSize().inputValue(), '200')
+      assert.equal(await pageSearch().inputValue(), 'needle')
+      assert.deepEqual(await coordinates('.is-page-match'), needleMatches(200))
+      await nextMatch().click(); await settle(); await assertRectangle([201], [1], [201, 1])
+      assert.deepEqual((await paginationState()).calls, [])
+    }
+  })
+  await check('real draft Discard continues the page-size request only after the user chooses it', async () => {
+    await preparePagination({ offset: 200 })
+    await stageAndSelect(200)
+    await queuePage(0, 100)
+    await pageSize().selectOption('100')
+    const dialog = page.getByRole('dialog').filter({ hasText: '尚未应用的修改' })
+    await dialog.waitFor()
+    assert.deepEqual((await paginationState()).calls, [])
+    assert.equal((await paginationState()).dirty.length, 1)
+    await dialog.getByRole('button', { name: '放弃本地修改', exact: true }).click()
+    await idlePagination(); await assertPage(0, 100, 100); await assertCleared()
+    assert.deepEqual((await paginationState()).dirty, [])
+  })
+  await check('unfinished real cell editing disables both page buttons and the page-size selector', async () => {
+    await preparePagination({ offset: 200 })
+    await rangeCell(200, 1).dblclick()
+    const dialog = page.getByRole('dialog', { name: '编辑单元格', exact: true })
+    await dialog.waitFor()
+    await dialog.getByLabel('单元格值', { exact: true }).fill('unfinished')
+    assert.equal((await paginationState()).pendingEditor, true)
+    for (const control of [previousPage(), nextPage(), pageSize()]) assert.equal(await control.isDisabled(), true)
+    assert.deepEqual((await paginationState()).calls, [])
+    await dialog.getByRole('button', { name: '取消', exact: true }).click(); await settle()
+    assert.equal((await paginationState()).pendingEditor, false)
+    for (const control of [previousPage(), nextPage(), pageSize()]) assert.equal(await control.isEnabled(), true)
+    assert.deepEqual((await paginationState()).dirty, [])
+  })
+  await check('workbench rejects unsupported page sizes without IPC, guards or result changes', async () => {
+    await preparePagination({ offset: 200 })
+    await stageAndSelect(200)
+    const before = retainedState(await paginationState())
+    for (const size of [0, -1, 50, 201, 200.5, 2000, NaN, Infinity]) {
+      assert.match(await tryPageSize(size), /每页行数只支持/)
+      await idlePagination()
+      assert.deepEqual(retainedState(await paginationState()), before)
+      assert.deepEqual((await paginationState()).calls, [])
+      assert.equal(await page.getByRole('dialog').count(), 0)
+    }
+  })
+  await check('same-size and cursorless changes are no-ops even with drafts; cursorless paging controls are disabled', async () => {
+    for (const cursor of [true, false]) {
+      await preparePagination({ offset: 200, cursor })
+      await stageAndSelect(200)
+      const before = retainedState(await paginationState())
+      const selection = await selectionState()
+      for (const size of cursor ? [200] : [100, 200, 500, 1000]) {
+        assert.equal(await tryPageSize(size), null)
+        await idlePagination()
+        assert.deepEqual(retainedState(await paginationState()), before)
+        assert.deepEqual(await selectionState(), selection)
+        assert.deepEqual((await paginationState()).calls, [])
+        assert.equal(await page.getByRole('dialog').count(), 0)
+      }
+      if (!cursor) {
+        for (const control of [previousPage(), nextPage(), pageSize()]) assert.equal(await control.isDisabled(), true)
+      }
+    }
+  })
+  await check('refresh and subsequent paging inherit the selected page size and close only the old cursor', async () => {
+    await preparePagination()
+    await changeSize(500)
+    await movePage(1, 500, 500)
+    await queueQuery('SELECT synthetic_pagination', 500)
+    await refresh().click(); await idlePagination(); await assertPage(0, 500, 500)
+    await movePage(1, 500, 500); await assertPage(500, 500, 500)
+    assert.deepEqual((await paginationState()).calls.map(call => call[1].method), ['fetchResultPage', 'fetchResultPage', 'runQuery', 'closeCursor', 'fetchResultPage'])
+  })
+  await check('server filter distinguishes unapplied draft from a successful applied filter and inherits page size', async () => {
+    await preparePagination()
+    await changeSize(500)
+    await serverFilter().fill("note = 'Alpha'"); await settle()
+    assert.ok(await page.getByText(/未应用/).count(), 'Editing a filter must explain it is still a draft')
+    const previous = retainedState(await paginationState())
+    const beforeLabel = await appliedLabel().allTextContents()
+    await queueQuery(filteredSql('Alpha'), 500, 'success', true)
+    await applyFilter().click(); await waitPendingPagination()
+    assert.deepEqual(retainedState(await paginationState()), previous)
+    assert.deepEqual(await appliedLabel().allTextContents(), beforeLabel, 'Do not mark a pending filter as applied')
+    await finishPagination(); await assertApplied("note = 'Alpha'")
+    await assertPage(0, 500, 500)
+    assert.equal((await paginationState()).querySql, filteredSql('Alpha'))
+    await movePage(1, 500, 500); await assertApplied("note = 'Alpha'")
+    await queueQuery(filteredSql('Alpha'), 500)
+    await refresh().click(); await idlePagination(); await assertApplied("note = 'Alpha'")
+    await assertPage(0, 500, 500)
+  })
+  await check('failed server filter retains the previous applied SQL/indicator and keeps the new draft unapplied', async () => {
+    await preparePagination({ size: 100 })
+    await serverFilter().fill("note = 'Alpha'")
+    await queueQuery(filteredSql('Alpha'), 100)
+    await applyFilter().click(); await idlePagination(); await assertApplied("note = 'Alpha'")
+    await movePage(1, 100, 100)
+    await serverFilter().fill("note = 'Beta'"); await settle()
+    const before = retainedState(await paginationState())
+    const callCount = (await paginationState()).calls.length
+    await queueQuery(filteredSql('Beta'), 100, 'failure', true)
+    await applyFilter().click(); await waitPendingPagination(); await assertApplied("note = 'Alpha'")
+    await finishPagination()
+    assert.deepEqual(retainedState(await paginationState()), before)
+    await assertApplied("note = 'Alpha'")
+    assert.equal(await serverFilter().inputValue(), "note = 'Beta'")
+    assert.ok(await page.getByText(/未应用/).count())
+    assert.equal((await paginationState()).statusError, true)
+    assert.equal((await paginationState()).calls.length, callCount + 1, 'Failed query must not close the original cursor')
+    await movePage(1, 200, 100); await assertPage(200, 100, 100)
+  })
+  await check('invalid filter is parsed before draft guard and cannot prompt, discard or invoke native writes', async () => {
+    await preparePagination({ offset: 200 })
+    await stageAndSelect(200)
+    await serverFilter().fill('note =')
+    const before = retainedState(await paginationState())
+    const selection = await selectionState()
+    const indicator = await appliedLabel().allTextContents()
+    await applyFilter().click(); await settle()
+    assert.equal(await page.getByRole('dialog').count(), 0, 'Invalid syntax must not reach the draft decision dialog')
+    await idlePagination()
+    assert.equal((await paginationState()).statusError, true)
+    assert.match((await paginationState()).status, /缺少右侧值/)
+    assert.deepEqual(retainedState(await paginationState()), before)
+    assert.deepEqual(await selectionState(), selection)
+    assert.deepEqual(await appliedLabel().allTextContents(), indicator)
+    assert.deepEqual((await paginationState()).calls, [])
+  })
+  await check('page search is case insensitive, counts matching cells and never filters rows or searches unloaded pages', async () => {
+    await preparePagination()
+    await searchFor('nEeDlE', needleMatches(0))
+    await searchFor('NextPageOnly', [])
+    await searchFor('far_note', []) // Column headings are outside cell search.
+    await searchFor('不存在的文本', [])
+    await searchFor('', [])
+    assert.equal(await page.locator('tbody tr').count(), 200)
+  })
+  await check('page search follows pinned/visible order, skips hidden cells and selects one focused cell per navigation', async () => {
+    await preparePagination()
+    await pin(3); await hide(2)
+    const matches = [[0, 3], [0, 1], [1, 1], [45, 11]]
+    await searchFor('needle', matches)
+    await nextMatch().click(); await settle(); await assertRectangle([0], [3], [0, 3])
+    await assertSearchStatus(4, 1)
+    await nextMatch().click(); await settle(); await assertRectangle([0], [1], [0, 1])
+    await assertSearchStatus(4, 2)
+    await pageSearch().press('Enter'); await settle(); await assertRectangle([1], [1], [1, 1])
+    await assertSearchStatus(4, 3)
+    await pageSearch().press('Shift+Enter'); await settle(); await assertRectangle([0], [1], [0, 1])
+    await assertSearchStatus(4, 2)
+    await previousMatch().click(); await settle(); await assertRectangle([0], [3], [0, 3])
+    await assertSearchStatus(4, 1)
+    await choose(2); await page.getByRole('button', { name: '显示此列', exact: true }).click(); await settle()
+    assert.deepEqual(await coordinates('.is-page-match'), [[0, 3], [0, 1], [0, 2], [1, 1], [45, 11]])
+    assert.deepEqual((await paginationState()).calls, [])
+  })
+  await check('page search uses staged text, updates live after paste and preserves original cells and exact staged values', async () => {
+    await preparePagination()
+    await searchFor('StagedOnly', [])
+    await pasteAt(0, 1, 'StagedOnly replacement'); await settle()
+    assert.deepEqual(await coordinates('.is-page-match'), [[0, 1]])
+    await searchFor('Needle Alpha', [])
+    await searchFor('stagedonly', [[0, 1]])
+    await pasteAt(0, 4, '9876543210.123456789012345678')
+    await searchFor('9876543210.123456789012345678', [[0, 4]])
+    await searchFor('1234567890.123456789012345678', [])
+    await pasteAt(0, 5, 'StagedFullOnly')
+    await searchFor('PreviewToken', [])
+    await searchFor('stagedfullonly', [[0, 5]])
+    const state = await paginationState()
+    assert.equal(state.page.rows[0].cells[1].text, 'Needle Alpha')
+    assert.equal(state.page.rows[0].cells[4].text, '1234567890.123456789012345678')
+    assert.equal(state.dirty[0][1].changes.amount.text, '9876543210.123456789012345678')
+    assert.deepEqual(state.calls, [])
+  })
+  await check('page search reads truncated preview only and preserves integer/decimal precision and rendered scalar text', async () => {
+    await preparePagination()
+    for (const [query, matches] of [
+      ['previewtoken', [[0, 5]]], ['FullTextOnlyNeverLoaded', []],
+      ['9007199254740993', [[0, 0]]], ['9223372036854775807', [[0, 8]]],
+      ['1234567890.123456789012345678', [[0, 4]]], ['NULL', [[0, 6]]],
+      ['true', [[0, 9]]], ['7.25', [[0, 10]]]
+    ]) await searchFor(query, matches)
+    await searchFor('PreviewToken', [[0, 5]])
+    await nextMatch().click(); await settle(); await assertRectangle([0], [5], [0, 5])
+    assert.deepEqual((await paginationState()).calls, [], 'Even preview navigation must not fetch full text')
+  })
+  await check('empty pages and zero matches disable navigation and Enter leaves selection intact', async () => {
+    await preparePagination()
+    await selectRectangle([0, 1], [1, 3])
+    const selection = await selectionState()
+    await searchFor('NoMatchAnywhere', [])
+    for (const key of ['Enter', 'Shift+Enter']) {
+      await pageSearch().press(key); await settle()
+      assert.deepEqual(await selectionState(), selection)
+    }
+    await preparePagination({ total: 0 })
+    await assertPage(0, 200, 0)
+    await searchFor('needle', [])
+    await pageSearch().press('Enter'); await pageSearch().press('Shift+Enter'); await settle()
+    await assertCleared()
+    assert.equal(await previousPage().isDisabled(), true)
+    assert.equal(await nextPage().isDisabled(), true)
+    assert.deepEqual((await paginationState()).calls, [])
+  })
+  await check('page-search IME Enter/ShiftEnter and keyCode 229 leave default, focus, selection and scroll untouched', async () => {
+    await preparePagination()
+    await searchFor('needle', needleMatches(0))
+    await nextMatch().click(); await settle(); await assertRectangle([0], [1], [0, 1])
+    await pageSearch().focus()
+    const selection = await selectionState()
+    const scroll = await page.locator('.grid-scroll').evaluate(el => [el.scrollLeft, el.scrollTop])
+    for (const ime of [{ isComposing: true }, { keyCode: 229 }]) {
+      for (const shiftKey of [false, true]) {
+        const observed = await pageSearch().evaluate((element, options) => {
+          const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...options })
+          element.dispatchEvent(event)
+          return { prevented: event.defaultPrevented, focused: element === document.activeElement }
+        }, { ...ime, shiftKey })
+        await settle()
+        assert.deepEqual(observed, { prevented: false, focused: true })
+        assert.deepEqual(await selectionState(), selection)
+        assert.deepEqual(await page.locator('.grid-scroll').evaluate(el => [el.scrollLeft, el.scrollTop]), scroll)
+      }
+    }
+    await pageSearch().press('Enter'); await settle(); await assertRectangle([0], [2], [0, 2])
+    await pageSearch().press('Shift+Enter'); await settle(); await assertRectangle([0], [1], [0, 1])
+    assert.deepEqual((await paginationState()).calls, [])
+  })
+  await check('page navigation retains search query, recomputes loaded matches and resets navigation position', async () => {
+    await preparePagination()
+    await searchFor('needle', needleMatches(0))
+    await nextMatch().click(); await nextMatch().click(); await nextMatch().click(); await settle()
+    await assertRectangle([0], [3], [0, 3])
+    await movePage(1, 200, 200)
+    assert.equal(await pageSearch().inputValue(), 'needle')
+    assert.deepEqual(await coordinates('.is-page-match'), needleMatches(200))
+    await assertSearchStatus(5)
+    await assertCleared()
+    await nextMatch().click(); await settle(); await assertRectangle([200], [1], [200, 1])
+    await assertSearchStatus(5, 1)
+    await searchFor('NextPageOnly', [[220, 1]])
+    await movePage(-1, 0, 200)
+    assert.equal(await pageSearch().inputValue(), 'NextPageOnly')
+    assert.deepEqual(await coordinates('.is-page-match'), [])
+    assert.equal(await nextMatch().isDisabled(), true)
+    assert.equal(await previousMatch().isDisabled(), true)
+  })
+  await check('page-size, refresh and filter result replacements retain query and reset match position', async () => {
+    for (const action of ['size', 'refresh', 'filter']) {
+      await preparePagination()
+      await searchFor('needle', needleMatches(0))
+      for (let index = 0; index < 3; index++) await nextMatch().click()
+      await settle(); await assertRectangle([0], [3], [0, 3])
+      if (action === 'size') await changeSize(100)
+      else if (action === 'refresh') {
+        await queueQuery('SELECT synthetic_pagination', 200)
+        await refresh().click(); await idlePagination()
+      } else {
+        await serverFilter().fill("note = 'Alpha'")
+        await queueQuery(filteredSql('Alpha'), 200)
+        await applyFilter().click(); await idlePagination()
+      }
+      assert.equal(await pageSearch().inputValue(), 'needle')
+      assert.deepEqual(await coordinates('.is-page-match'), needleMatches(0))
+      await assertSearchStatus(5)
+      await assertCleared()
+      await nextMatch().click(); await settle(); await assertRectangle([0], [1], [0, 1])
+    }
+  })
+  await check('tab remount resets page search while each tab retains its own committed page size', async () => {
+    await preparePagination()
+    await changeSize(100)
+    await searchFor('needle', needleMatches(0))
+    await nextMatch().click(); await settle()
+    await page.getByRole('button', { name: '宽表 B', exact: true }).click(); await settle()
+    assert.equal(await pageSize().inputValue(), '200')
+    assert.equal(await pageSearch().inputValue(), '')
+    assert.deepEqual(await coordinates('.is-page-match'), [])
+    await searchFor('previewtoken', [[0, 5]])
+    await page.getByRole('button', { name: '宽表 A', exact: true }).click(); await settle()
+    assert.equal(await pageSize().inputValue(), '100')
+    assert.equal(await pageSearch().inputValue(), '')
+    assert.deepEqual(await coordinates('.is-page-match'), [])
+    await assertCleared()
+    assert.equal(await nextMatch().isDisabled(), true)
+    assert.equal(await previousMatch().isDisabled(), true)
+    assert.equal((await paginationState()).calls.length, 1, 'Tab/search actions must not add IPC')
+  })
+  await check('search reveals offscreen cells in both axes without sticky headers/pins covering the focused match', async () => {
+    await preparePagination()
+    await pin(0); await pin(3)
+    await searchFor('ScrollOnly', [[45, 11]])
+    const before = await rangeCell(45, 11).boundingBox()
+    const initialView = await page.locator('.grid-scroll').boundingBox()
+    assert.ok(before.y > initialView.y + initialView.height, 'The target must start below the viewport')
+    assert.ok(before.x > initialView.x + initialView.width, 'The target must start beyond the viewport horizontally')
+    await nextMatch().click(); await settle(); await assertRectangle([45], [11], [45, 11])
+    const box = await rangeCell(45, 11).boundingBox()
+    const view = await page.locator('.grid-scroll').boundingBox()
+    const pinned = await head(3).boundingBox()
+    const headerBottom = await page.locator('thead th').evaluateAll(elements => Math.max(...elements.map(el => el.getBoundingClientRect().bottom)))
+    assert.ok(await scrollLeft() > 0)
+    assert.ok(await page.locator('.grid-scroll').evaluate(el => el.scrollTop > 0))
+    assert.ok(box.x >= pinned.x + pinned.width - 1 && box.x + box.width <= view.x + view.width + 1)
+    assert.ok(box.y >= headerBottom - 1 && box.y + box.height <= view.y + view.height + 1)
+    assert.equal(await rangeCell(45, 11).evaluate(element => {
+      const box = element.getBoundingClientRect()
+      const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+      return hit === element || element.contains(hit)
+    }), true, 'The focused match must be hit-testable, not hidden beneath a sticky overlay')
+    await assertSearchStatus(1, 1)
+    await page.screenshot({ path: path.join(output, 'pagination-search.png') })
+    assert.deepEqual((await paginationState()).calls, [])
+  })
+  await idlePagination()
   assert.deepEqual(errors, [])
   await context.close()
 } catch (error) {

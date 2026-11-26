@@ -71,6 +71,8 @@ export interface ResultTab {
   dirty: Map<number, RowUpdate>
   selectedRows: Set<number>
   filter: string
+  appliedFilter?: string
+  pageSize?: number
   order: readonly SortKey[]
   generation: number
 }
@@ -82,6 +84,7 @@ export interface ActiveTabContext {
   hasLocalChanges: boolean
 }
 const PAGE_SIZE = 200
+export const RESULT_PAGE_SIZES = [100, 200, 500, 1000] as const
 export const connectionOf = (nodeId: string) => nodeId.startsWith('connection:') ? nodeId.slice(11).split('|')[0]! : nodeId
 export const connectionNode = (id: string) => `connection:${id}`
 export function cellText(cell: CellValue): string {
@@ -269,7 +272,7 @@ export function useWorkbench() {
     const tab: ResultTab = reactive({
       id: crypto.randomUUID(), connectionId, editorTabId, title, table, description, sql: sqlText, querySql: sqlText,
       parameters: [], result: null, page: null, message: '', busy: false, invalidated: false,
-      dirty: new Map(), selectedRows: new Set(), filter: '', order: [], generation: 0
+      dirty: new Map(), selectedRows: new Set(), filter: '', appliedFilter: '', pageSize: PAGE_SIZE, order: [], generation: 0
     })
     tabs.value.push(tab)
     if (!editorTabId || activeEditorTabId.value === editorTabId) activateTab(tab)
@@ -439,31 +442,56 @@ export function useWorkbench() {
       else tab.dirty.delete(index)
     }
   }
-  async function reloadTab(tab: ResultTab, guard = true, offset = 0, transform?: Pick<ResultTab, 'querySql' | 'order'>) {
+  async function reloadTab(tab: ResultTab, guard = true, offset = 0, transform?: Pick<ResultTab, 'querySql' | 'order' | 'appliedFilter'>) {
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
+    if (guard && pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
     if (guard && !(await guardLocal(tab, '刷新结果'))) return
     tab.busy = true
     const generation = ++tab.generation
     try {
-      const result = await backend.runQuery(connectionNode(tab.connectionId), transform?.querySql ?? tab.querySql, { limit: PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
-      if (generation !== tab.generation) { if (result.cursorId) await backend.closeCursor(result.cursorId); return }
-      if (transform) { tab.querySql = transform.querySql; tab.order = transform.order }
+      const result = await backend.runQuery(connectionNode(tab.connectionId), transform?.querySql ?? tab.querySql, { limit: tab.pageSize ?? PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
+      if (generation !== tab.generation || tab.invalidated || !tabs.value.includes(tab)) { if (result.cursorId) await backend.closeCursor(result.cursorId); return }
+      if (transform) { tab.querySql = transform.querySql; tab.order = transform.order; tab.appliedFilter = transform.appliedFilter }
       await setResult(tab, result)
     } finally { tab.busy = false }
   }
-  async function pageTab(tab: ResultTab, direction: number) {
-    if (!tab.result?.cursorId || !tab.page || tab.busy || tab.invalidated) return
-    const targetOffset = Math.max(0, tab.page.offset + direction * PAGE_SIZE)
-    if (!(await guardLocal(tab, '翻页'))) return
-    if (!tab.result?.cursorId || !tab.page || tab.invalidated) return
+  async function fetchTabPage(tab: ResultTab, offset: number, size: number) {
+    const result = tab.result, page = tab.page, cursor = result?.cursorId, generation = tab.generation
+    const previousSize = tab.pageSize ?? PAGE_SIZE
+    if (!cursor || !page || tab.invalidated || !tabs.value.includes(tab)) return
     tab.busy = true
-    try { tab.page = await backend.fetchResultPage(tab.result.cursorId, targetOffset, PAGE_SIZE); tab.selectedRows.clear() }
-    finally { tab.busy = false }
+    try {
+      const fetched = await backend.fetchResultPage(cursor, offset, size)
+      if (tab.invalidated || !tabs.value.includes(tab) || tab.result !== result || tab.page !== page ||
+          tab.result?.cursorId !== cursor || tab.generation !== generation || (tab.pageSize ?? PAGE_SIZE) !== previousSize) return
+      tab.page = fetched
+      tab.pageSize = size
+      tab.selectedRows.clear()
+    } finally { tab.busy = false }
+  }
+  async function pageTab(tab: ResultTab, direction: number) {
+    if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
+    if (!tab.result?.cursorId || !tab.page || tab.busy || tab.invalidated) return
+    if (direction !== -1 && direction !== 1) throw new Error('无效的翻页方向')
+    if ((direction < 0 && tab.page.offset === 0) || (direction > 0 && !tab.page.hasMore)) return
+    const size = tab.pageSize ?? PAGE_SIZE
+    const targetOffset = Math.max(0, tab.page.offset + direction * size)
+    if (!(await guardLocal(tab, '翻页'))) return
+    await fetchTabPage(tab, targetOffset, size)
+  }
+  async function changePageSize(tab: ResultTab, size: number) {
+    if (!RESULT_PAGE_SIZES.some(candidate => candidate === size)) throw new Error('每页行数只支持 100、200、500 或 1,000')
+    if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
+    if (!tab.result?.cursorId || !tab.page || tab.busy || tab.invalidated || size === (tab.pageSize ?? PAGE_SIZE)) return
+    if (!(await guardLocal(tab, '更改每页行数'))) return
+    await fetchTabPage(tab, 0, size)
   }
   async function transformTab(tab: ResultTab, order = tab.order) {
-    if (!(await guardLocal(tab, '排序或筛选'))) return
+    if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
+    if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
+    const appliedFilter = tab.filter
     const quoteColumn = (name: string) => quote(name, tab.connectionId)
-    const filter = parseFilter(tab.filter, quoteColumn)
+    const filter = parseFilter(appliedFilter, quoteColumn)
     if (!filter.ok) throw new Error(filter.error)
     const base = tab.sql.trim().replace(/;\s*$/, '')
     let querySql = order.length || filter.conditions.length
@@ -473,7 +501,8 @@ export function useWorkbench() {
       const keys = order.map(({ column, direction }) => `${quoteColumn(column)} ${direction}`)
       querySql += ` ORDER BY ${keys.join(', ')}`
     }
-    await reloadTab(tab, false, 0, { querySql, order })
+    if (!(await guardLocal(tab, '排序或筛选'))) return
+    await reloadTab(tab, false, 0, { querySql, order, appliedFilter })
   }
   async function reviewAndApplyTab(tab: ResultTab) {
     if (!tab.table || !tab.dirty.size) return
@@ -786,6 +815,7 @@ export function useWorkbench() {
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
     reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),
+    changePageSize: (tab: ResultTab, size: number) => withConnectionOperation(tab.connectionId, () => changePageSize(tab, size)),
     reloadTab: (tab: ResultTab, guard = true) => withConnectionOperation(tab.connectionId, () => reloadTab(tab, guard)),
     transformTab: (tab: ResultTab, order = tab.order) => withConnectionOperation(tab.connectionId, () => transformTab(tab, order)),
     settleTransaction: (id: string, commit: boolean) => withConnectionOperation(id, () => settleTransaction(id, commit)),
