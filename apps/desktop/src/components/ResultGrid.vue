@@ -7,9 +7,13 @@ import LoadedExportDialog from './LoadedExportDialog.vue'
 import { fullCell, textValue } from '../result-export'
 import { writeClipboardText } from '../clipboard'
 import { parseGridPaste, pastedMysqlCell } from '../grid-paste'
+import { useResultGridLayout } from '../result-grid-layout'
 import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } from '../workbench'
 
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
+const { viewport, query: columnQuery, target: targetColumn, matches: matchingColumns, highlighted: highlightedColumn,
+  resizing, tableWidth, width: columnWidth, minWidth, maxWidth, rowNumberWidth, startResize, moveResize, endResize,
+  cancelResize, resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, saveScroll } = useResultGridLayout(() => props.tab)
 const editing = ref<{ row: ResultRow; column: number; raw: string; kind: string; isNull: boolean } | null>(null)
 const insertOpen = ref(false)
 watch([editing, insertOpen], ([cell, insert]) => {
@@ -318,19 +322,39 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button v-if="tab.order.length" type="button" :disabled="locked" @click="clearSort">清除排序</button>
     </form>
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
-    <div v-if="tab.page" class="grid-scroll">
-      <table class="data-table"><thead><tr><th class="row-number">#</th>
-        <th v-for="(column, index) in tab.page.columns" :key="index">
+    <div v-if="tab.page?.columns.length" class="column-tools">
+      <label :for="`column-search-${tab.id}`">跳转列</label>
+      <input :id="`column-search-${tab.id}`" v-model="columnQuery" type="search" placeholder="输入列名" @keydown.enter.prevent="!$event.isComposing && jumpToColumn()" />
+      <select v-model="targetColumn" aria-label="匹配列" :disabled="!matchingColumns.length" @keydown.enter.prevent="jumpToColumn">
+        <option v-for="column in matchingColumns" :key="column.index" :value="column.index">{{ column.index + 1 }} · {{ column.name }}</option>
+      </select>
+      <button :disabled="!matchingColumns.length" @click="jumpToColumn">跳转</button>
+      <span v-if="!matchingColumns.length" class="muted" role="status">没有匹配列</span>
+      <span class="spacer" />
+      <button title="根据列名和当前页已加载内容适宽，不读取完整大字段" @click="fitAll">适宽全部列</button>
+      <button @click="resetWidths">重置列宽</button>
+    </div>
+    <div v-if="tab.page" ref="viewport" class="grid-scroll" :class="{ 'is-resizing': resizing }" @scroll="saveScroll">
+      <table class="data-table result-data-table" :style="{ width: `${tableWidth}px` }">
+        <colgroup><col :style="{ width: `${rowNumberWidth}px` }" /><col v-for="(_, index) in tab.page.columns" :key="index" :style="{ width: `${columnWidth(index)}px` }" /></colgroup>
+        <thead><tr><th class="row-number">#</th>
+        <th v-for="(column, index) in tab.page.columns" :key="index" :data-column-index="index" tabindex="-1" :class="{ 'is-column-target': highlightedColumn === index }">
           <button class="column-sort"
             :disabled="locked || tab.invalidated || ambiguousSortColumns.has(column.name)"
             :title="ambiguousSortColumns.has(column.name) ? '结果列名重复，请先在 SQL 中设置不同别名' : '点击切换单列排序，按住 Shift 点击添加或调整多列排序'"
             @click="sort(column.name, $event.shiftKey)">
             {{ column.name }} <span v-if="sortIndicators.has(column.name)">{{ sortIndicators.get(column.name) }}</span>
           </button><small>{{ column.type }}</small>
+          <span class="column-resize" role="separator" tabindex="0" aria-orientation="vertical"
+            :aria-label="`调整第 ${index + 1} 列 ${column.name} 的宽度`" :aria-valuemin="minWidth" :aria-valuemax="maxWidth" :aria-valuenow="columnWidth(index)"
+            title="拖动调整列宽，双击适宽；方向键微调，Enter 适宽"
+            @pointerdown.stop.prevent="startResize($event, index)" @pointermove="moveResize"
+            @pointerup="endResize()" @pointercancel="cancelResize" @lostpointercapture="cancelResize"
+            @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="(column, index) in tab.page.columns" :key="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+          <td v-for="(column, index) in tab.page.columns" :key="index" :data-column-index="index" :class="{ 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
       <p v-if="!tab.page.rows.length" class="empty muted">结果为空</p>
@@ -346,4 +370,16 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
 
 <style scoped>
 .data-table td.is-cell-selected { outline:1px solid var(--accent); outline-offset:-1px; }
+.result-data-table { table-layout:fixed; min-width:0; }
+.result-data-table th,.result-data-table td { min-width:0; max-width:none; }
+.result-data-table .row-number { min-width:0; }
+.result-data-table .column-sort,.result-data-table th small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:8px; }
+.result-data-table th.is-column-target { box-shadow:inset 0 -2px var(--accent); background:#263d5c; }
+.result-data-table th:focus { outline:2px solid var(--accent); outline-offset:-2px; }
+.column-resize { position:absolute; top:0; right:0; bottom:0; width:9px; cursor:col-resize; touch-action:none; }
+.column-resize:hover,.column-resize:focus-visible { background:var(--accent); outline:none; }
+.is-resizing { cursor:col-resize; user-select:none; }
+.column-tools { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--border); }
+.column-tools input { width:160px; }
+.column-tools select { width:200px; max-width:100%; }
 </style>
