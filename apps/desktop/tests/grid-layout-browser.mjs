@@ -244,6 +244,11 @@ try {
     await page.screenshot({ path: path.join(output, 'keyboard-focus-visible.png') })
     await handle(0).focus(); await page.keyboard.press('End'); await settle()
     await page.setViewportSize({ width: 720, height: 650 }); await settle()
+    await page.getByLabel('跳转列', { exact: true }).focus()
+    await handle(0).focus(); await settle()
+    const resizeBox = await handle(0).boundingBox()
+    assert.ok(resizeBox.x >= 64 && resizeBox.x + resizeBox.width <= 721,
+      'Focused resize handle must remain visible at the right edge of an oversized column')
     await cell(0).focus()
     await page.locator('.grid-scroll').evaluate(el => { el.scrollLeft = 800 })
     await page.keyboard.press('Tab'); await settle()
