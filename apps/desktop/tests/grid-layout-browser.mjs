@@ -163,6 +163,9 @@ try {
     assert.equal(await page.locator('tbody tr').count(), 0)
     assert.equal(await head(39).evaluate(el => el === document.activeElement), true)
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+    const emptyBox = await page.getByRole('status').filter({ hasText: '结果为空' }).boundingBox()
+    assert.ok(emptyBox && emptyBox.x >= 0 && emptyBox.x + emptyBox.width <= 720 && emptyBox.y + emptyBox.height <= 650,
+      'Empty result status must remain inside the viewport after horizontal navigation')
     await page.screenshot({ path: path.join(output, 'empty-narrow-table.png') })
   })
   assert.deepEqual(errors, [])
