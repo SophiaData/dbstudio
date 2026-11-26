@@ -54,7 +54,8 @@ jobs:
           '{"identifier":"io.dbstudio.windows-mysql-smoke"}' | Set-Content -LiteralPath $config -Encoding utf8NoBOM
           pnpm exec tauri build --debug --features test-hooks --no-bundle --ci --config $config
       - name: Verify native report contracts
-        run: cargo test --locked -p dbstudio-desktop --lib --features test-hooks smoke::tests:: -- --test-threads=1
+        run: |
+          cargo test --locked -p dbstudio-desktop --lib --features test-hooks smoke::tests:: -- --test-threads=1
       - uses: actions/cache/save@v4
         if: steps.rust-build-cache.outputs.cache-hit != 'true'
         with:
