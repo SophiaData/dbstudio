@@ -380,7 +380,7 @@ async function edit(row: ResultRow, column: number) {
   const request = ++editRequest
   const ownsRequest = () => !disposed && request === editRequest && props.tab === tab &&
     tab.page === page && tab.result === result && tab.generation === generation &&
-    tab.result?.cursorId === cursorId && !tab.invalidated && !insertOpen.value
+    tab.result?.cursorId === cursorId && !tab.invalidated && !insertOpen.value && !locked.value
   error.value = ''
   try {
     props.workbench.rowKeys(tab, row)
