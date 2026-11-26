@@ -54,7 +54,8 @@ Object.assign(window, { gridFixture: {
   },
   emptyRows: () => { const tab = wb.activeTab.value!; tab.page = { ...tab.page!, rows: [], returned: 0 } },
   closeAndReopen: () => {
-    wb.tabs.value.splice(0, wb.tabs.value.length, makeTab('A'))
+    tabs[0] = makeTab('A')
+    wb.tabs.value.splice(0, 1, tabs[0])
     wb.activeTabId.value = 'A'
   }
 } })
