@@ -99,6 +99,11 @@ export function useResultGridLayout(tab: () => ResultTab) {
     head.focus({ preventScroll: true })
     saveScroll()
   }
+  function jumpKey(event: KeyboardEvent) {
+    if (event.isComposing || event.keyCode === 229) return
+    event.preventDefault()
+    jumpToColumn()
+  }
   function saveScroll() { if (viewport.value) layout.value.scrollLeft = viewport.value.scrollLeft }
 
   watch([tab, signature], async () => {
@@ -125,5 +130,5 @@ export function useResultGridLayout(tab: () => ResultTab) {
 
   return { viewport, query, target, matches, highlighted, resizing, tableWidth, width, minWidth: MIN_WIDTH,
     maxWidth: MAX_WIDTH, rowNumberWidth: ROW_NUMBER_WIDTH, startResize, moveResize, endResize, cancelResize,
-    resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, saveScroll }
+    resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll }
 }

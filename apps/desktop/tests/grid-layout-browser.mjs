@@ -95,6 +95,22 @@ try {
     assert.ok(targetBox.x >= viewportBox.x && targetBox.x + targetBox.width <= viewportBox.x + viewportBox.width + 1)
     await page.screenshot({ path: path.join(output, 'wide-table-jump.png') })
   })
+  await check('IME confirmation leaves native default behavior and focus in the column search', async () => {
+    const search = page.getByLabel('跳转列', { exact: true })
+    await search.fill('id')
+    const left = await scrollLeft()
+    for (const options of [{ isComposing: true }, { keyCode: 229 }]) {
+      const observed = await search.evaluate((element, options) => {
+        const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...options })
+        element.dispatchEvent(event)
+        return { prevented: event.defaultPrevented, focused: element === document.activeElement }
+      }, options)
+      assert.deepEqual(observed, { prevented: false, focused: true })
+      approx(await scrollLeft(), left)
+    }
+    await search.press('Enter'); await settle()
+    assert.equal(await head(0).evaluate(el => el === document.activeElement), true)
+  })
   await check('duplicate names retain column positions; search is case insensitive and handles no match', async () => {
     const search = page.getByLabel('跳转列', { exact: true })
     await search.fill('重复名称')

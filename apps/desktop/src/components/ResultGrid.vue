@@ -13,7 +13,7 @@ import { cellText, inputCell, type Workbench, type ResultTab, type SortKey } fro
 const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
 const { viewport, query: columnQuery, target: targetColumn, matches: matchingColumns, highlighted: highlightedColumn,
   resizing, tableWidth, width: columnWidth, minWidth, maxWidth, rowNumberWidth, startResize, moveResize, endResize,
-  cancelResize, resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, saveScroll } = useResultGridLayout(() => props.tab)
+  cancelResize, resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll } = useResultGridLayout(() => props.tab)
 const editing = ref<{ row: ResultRow; column: number; raw: string; kind: string; isNull: boolean } | null>(null)
 const insertOpen = ref(false)
 watch([editing, insertOpen], ([cell, insert]) => {
@@ -324,8 +324,8 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
     <div v-if="tab.page?.columns.length" class="column-tools">
       <label :for="`column-search-${tab.id}`">跳转列</label>
-      <input :id="`column-search-${tab.id}`" v-model="columnQuery" type="search" placeholder="输入列名" @keydown.enter.prevent="!$event.isComposing && jumpToColumn()" />
-      <select v-model="targetColumn" aria-label="匹配列" :disabled="!matchingColumns.length" @keydown.enter.prevent="jumpToColumn">
+      <input :id="`column-search-${tab.id}`" v-model="columnQuery" type="search" placeholder="输入列名" @keydown.enter="jumpKey" />
+      <select v-model="targetColumn" aria-label="匹配列" :disabled="!matchingColumns.length" @keydown.enter="jumpKey">
         <option v-for="column in matchingColumns" :key="column.index" :value="column.index">{{ column.index + 1 }} · {{ column.name }}</option>
       </select>
       <button :disabled="!matchingColumns.length" @click="jumpToColumn">跳转</button>
