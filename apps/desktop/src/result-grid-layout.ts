@@ -110,6 +110,22 @@ export function useResultGridLayout(tab: () => ResultTab) {
   function header(index: number) {
     return viewport.value?.querySelector<HTMLElement>(`thead th[data-column-index="${index}"]`)
   }
+  function revealColumn(index: number, focusEnd = false) {
+    const scroll = viewport.value
+    const head = header(index)
+    if (!scroll || !head || stickyOffsets.value.has(index)) return
+    const viewportLeft = scroll.getBoundingClientRect().left + scroll.clientLeft
+    const left = viewportLeft + pinnedWidth.value
+    const right = viewportLeft + scroll.clientWidth
+    const box = head.getBoundingClientRect()
+    const focusLeft = focusEnd ? box.right - 9 : box.left
+    const focusWidth = focusEnd ? 9 : box.width
+    // Native focus scrolling only sees the scrollport, not its sticky siblings.
+    // Wide cells show their beginning; resize handles must instead show the right edge.
+    if (focusLeft < left || focusWidth > right - left) scroll.scrollLeft += focusLeft - left
+    else if (box.right > right) scroll.scrollLeft += box.right - right
+    saveScroll()
+  }
   function fitColumn(index: number) {
     const head = header(index)
     if (!head || !viewport.value) return
@@ -188,7 +204,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
 
   return { viewport, query, target, matches, highlighted, resizing, tableWidth, width, minWidth: MIN_WIDTH,
     visibleColumns, visibleOrder, isHidden, isPinned, hiddenCount, pinnedCount, stickyOffsets, columnStyle, overflowPins,
-    toggleHidden, togglePinned, showAll, unpinAll,
+    toggleHidden, togglePinned, showAll, unpinAll, revealColumn,
     maxWidth: MAX_WIDTH, rowNumberWidth: ROW_NUMBER_WIDTH, startResize, moveResize, endResize, cancelResize,
     resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll }
 }

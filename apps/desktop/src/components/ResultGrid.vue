@@ -14,7 +14,7 @@ const props = defineProps<{ workbench: Workbench; tab: ResultTab }>()
 const { viewport, query: columnQuery, target: targetColumn, matches: matchingColumns, highlighted: highlightedColumn,
   resizing, tableWidth, width: columnWidth, minWidth, maxWidth, rowNumberWidth, startResize, moveResize, endResize,
   visibleColumns, visibleOrder, isHidden, isPinned, hiddenCount, pinnedCount, stickyOffsets, columnStyle, overflowPins,
-  toggleHidden, togglePinned, showAll, unpinAll,
+  toggleHidden, togglePinned, showAll, unpinAll, revealColumn,
   cancelResize, resizeKey, fitColumn, fitAll, resetWidths, jumpToColumn, jumpKey, saveScroll } = useResultGridLayout(() => props.tab)
 const editing = ref<{ row: ResultRow; column: number; raw: string; kind: string; isNull: boolean } | null>(null)
 const insertOpen = ref(false)
@@ -53,6 +53,7 @@ watch([
   rowCount.value = null
 }, { flush: 'sync' })
 function selectCell(row: ResultRow, column: number) { selectedCell.value = { row, column } }
+function focusCell(row: ResultRow, column: number) { selectCell(row, column); revealColumn(column) }
 function readSelected() { if (selectedCell.value) void readCell(selectedCell.value.row, selectedCell.value.column) }
 function copySelected(wholeRow: boolean) { if (selectedCell.value) void copyCell(wholeRow) }
 async function readCell(row: ResultRow, column: number) {
@@ -357,6 +358,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
           <button class="column-sort"
             :disabled="locked || tab.invalidated || ambiguousSortColumns.has(column.name)"
             :title="ambiguousSortColumns.has(column.name) ? '结果列名重复，请先在 SQL 中设置不同别名' : '点击切换单列排序，按住 Shift 点击添加或调整多列排序'"
+            @focus="revealColumn(index)"
             @click="sort(column.name, $event.shiftKey)">
             {{ column.name }} <span v-if="sortIndicators.has(column.name)">{{ sortIndicators.get(column.name) }}</span>
           </button><small>{{ column.type }}</small>
@@ -365,11 +367,11 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
             title="拖动调整列宽，双击适宽；方向键微调，Enter 适宽"
             @pointerdown.stop.prevent="startResize($event, index)" @pointermove="moveResize"
             @pointerup="endResize()" @pointercancel="cancelResize" @lostpointercapture="cancelResize"
-            @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
+            @focus="revealColumn(index, true)" @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="selectCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="focusCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
     </div>

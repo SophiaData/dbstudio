@@ -219,6 +219,46 @@ try {
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.getByRole('button', { name: '重置列宽', exact: true }).click(); await settle()
   })
+  await check('Tab and Shift+Tab reveal the selected cell outside pinned overlays', async () => {
+    const cell = index => page.locator(`tbody tr:first-child td[data-column-index="${index}"]`)
+    const assertRevealed = async index => {
+      assert.equal(await cell(index).evaluate(el => el === document.activeElement), true)
+      const box = await cell(index).boundingBox()
+      const pinned = await head(2).boundingBox()
+      const viewport = await page.locator('.grid-scroll').boundingBox()
+      assert.ok(box.x >= pinned.x + pinned.width - 1, 'Focused cell is covered by pinned columns')
+      assert.ok(box.x + box.width <= viewport.x + viewport.width + 1)
+      assert.equal(await cell(index).evaluate(el => {
+        const box = el.getBoundingClientRect()
+        return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === el
+      }), true, 'Focused cell must be hit-testable at its visible center')
+    }
+    await cell(2).focus()
+    await page.locator('.grid-scroll').evaluate(el => { el.scrollLeft = 160; el.scrollTop = 0 })
+    await page.keyboard.press('Tab'); await settle()
+    await assertRevealed(1)
+    await cell(3).focus()
+    await page.locator('.grid-scroll').evaluate(el => { el.scrollLeft = 320 })
+    await page.keyboard.press('Shift+Tab'); await settle()
+    await assertRevealed(1)
+    await page.screenshot({ path: path.join(output, 'keyboard-focus-visible.png') })
+    await handle(0).focus(); await page.keyboard.press('End'); await settle()
+    await page.setViewportSize({ width: 720, height: 650 }); await settle()
+    await page.getByLabel('跳转列', { exact: true }).focus()
+    await handle(0).focus(); await settle()
+    const resizeBox = await handle(0).boundingBox()
+    assert.ok(resizeBox.x >= 64 && resizeBox.x + resizeBox.width <= 721,
+      'Focused resize handle must remain visible at the right edge of an oversized column')
+    await cell(0).focus()
+    await page.locator('.grid-scroll').evaluate(el => { el.scrollLeft = 800 })
+    await page.keyboard.press('Tab'); await settle()
+    assert.equal(await cell(2).evaluate(el => el === document.activeElement), true)
+    const fallback = await cell(2).boundingBox()
+    assert.ok(fallback.x >= 64 && fallback.x + fallback.width <= 721,
+      'Keyboard visibility must use effective sticky width when oversized pins scroll')
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.getByRole('button', { name: '重置列宽', exact: true }).click(); await settle()
+  })
   await check('hidden columns can be searched/restored and visibility stays isolated by tab', async () => {
     await hide(3); await hide(0)
     assert.equal(await head(0).count(), 0); assert.equal(await head(3).count(), 0)
