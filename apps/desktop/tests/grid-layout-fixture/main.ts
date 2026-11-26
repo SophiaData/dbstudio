@@ -184,6 +184,6 @@ Object.assign(window, { gridFixture: {
 createApp({ render: () => h('main', { class: 'workbench' }, [
   h('nav', { class: 'actions', 'aria-label': '合成结果标签' }, tabs.map(tab => h('button', {
     'data-fixture-tab': tab.id, onClick: () => wb.activateTab(tab)
-  }, `宽表 ${tab.id}`))),
+  }, tab.title))),
   wb.activeTab.value && h(ResultGrid, { key: wb.activeTab.value.id, workbench: wb, tab: wb.activeTab.value })
 ]) }).mount('#app')
