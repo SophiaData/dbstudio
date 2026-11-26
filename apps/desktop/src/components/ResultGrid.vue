@@ -34,10 +34,32 @@ const insertValues = reactive<Record<string, string>>({})
 const insertInclude = reactive(new Set<string>())
 const insertNulls = reactive(new Set<string>())
 const error = ref('')
-const selectedCell = ref<{ row: ResultRow; column: number } | null>(null)
-watch(visibleOrder, (indices) => {
-  if (selectedCell.value && !indices.includes(selectedCell.value.column)) selectedCell.value = null
-}, { flush: 'sync' })
+type CellPoint = { row: ResultRow; column: number }
+const selectedCell = ref<CellPoint | null>(null)
+const selectionAnchor = ref<CellPoint | null>(null)
+let selectionRevision = 0
+function clearSelection() {
+  selectionRevision++
+  selectedCell.value = null
+  selectionAnchor.value = null
+}
+watch(() => visibleOrder.value.join(','), clearSelection, { flush: 'sync' })
+const rowPositions = computed(() => new Map(props.tab.page?.rows.map((row, index) => [row.index, index])))
+const columnPositions = computed(() => new Map(visibleOrder.value.map((column, index) => [column, index])))
+const selectedRange = computed(() => {
+  const anchor = selectionAnchor.value
+  const active = selectedCell.value
+  if (!anchor || !active) return null
+  const ar = rowPositions.value.get(anchor.row.index), br = rowPositions.value.get(active.row.index)
+  const ac = columnPositions.value.get(anchor.column), bc = columnPositions.value.get(active.column)
+  if (ar === undefined || br === undefined || ac === undefined || bc === undefined) return null
+  return { firstRow: Math.min(ar, br), lastRow: Math.max(ar, br), firstColumn: Math.min(ac, bc), lastColumn: Math.max(ac, bc) }
+})
+function inRange(row: ResultRow, column: number) {
+  const range = selectedRange.value
+  const r = rowPositions.value.get(row.index), c = columnPositions.value.get(column)
+  return !!range && r !== undefined && c !== undefined && r >= range.firstRow && r <= range.lastRow && c >= range.firstColumn && c <= range.lastColumn
+}
 const viewer = ref<{ value: CellValue; title: string } | null>(null)
 const loadedExport = ref(false)
 const loadedExportController = ref<InstanceType<typeof LoadedExportDialog> | null>(null)
@@ -48,12 +70,72 @@ watch([
   () => props.tab.result?.cursorId, () => props.tab.invalidated
 ], () => {
   invalidateCellEdit()
-  selectedCell.value = null
+  clearSelection()
   viewer.value = null
   rowCount.value = null
 }, { flush: 'sync' })
-function selectCell(row: ResultRow, column: number) { selectedCell.value = { row, column } }
-function focusCell(row: ResultRow, column: number) { selectCell(row, column); revealColumn(column) }
+function selectCell(row: ResultRow, column: number, extend = false) {
+  if (props.tab.invalidated) return
+  selectionRevision++
+  if (!extend || !selectionAnchor.value) selectionAnchor.value = { row, column }
+  selectedCell.value = { row, column }
+}
+function cellElement(row: ResultRow, column: number) {
+  return viewport.value?.querySelector<HTMLElement>(`tbody tr[data-row-index="${row.index}"] td[data-column-index="${column}"]`)
+}
+function revealCell(row: ResultRow, column: number) {
+  revealColumn(column)
+  const scroller = viewport.value
+  const element = cellElement(row, column)
+  if (!scroller || !element) return
+  const box = element.getBoundingClientRect()
+  const view = scroller.getBoundingClientRect()
+  const top = scroller.querySelector('thead th')?.getBoundingClientRect().bottom ?? view.top + scroller.clientTop
+  const bottom = view.top + scroller.clientTop + scroller.clientHeight
+  if (box.top < top) scroller.scrollTop += box.top - top
+  else if (box.bottom > bottom) scroller.scrollTop += box.bottom - bottom
+}
+let movingFocus = false
+function focusCell(row: ResultRow, column: number) {
+  // Programmatic focus follows selection; ordinary Tab focus starts a new anchor.
+  if (!movingFocus) selectCell(row, column)
+  revealCell(row, column)
+}
+function moveFocus(row: ResultRow, column: number, extend: boolean) {
+  selectCell(row, column, extend)
+  movingFocus = true
+  try { cellElement(row, column)?.focus({ preventScroll: true }) }
+  finally { movingFocus = false }
+  revealCell(row, column)
+}
+function pointCell(event: MouseEvent, row: ResultRow, column: number) { moveFocus(row, column, event.shiftKey) }
+function cellKey(event: KeyboardEvent, row: ResultRow, column: number) {
+  if (event.isComposing || event.keyCode === 229 || props.tab.invalidated) return
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'c') {
+    event.preventDefault()
+    void copyRange()
+    return
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  const page = props.tab.page
+  if (!page) return
+  const r = rowPositions.value.get(row.index), c = columnPositions.value.get(column)
+  if (r === undefined || c === undefined) return
+  const moves: Record<string, readonly [number, number]> = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }
+  const delta = moves[event.key]
+  if (delta) {
+    event.preventDefault()
+    const targetRow = page.rows[Math.max(0, Math.min(page.rows.length - 1, r + delta[0]!))]!
+    const targetColumn = visibleOrder.value[Math.max(0, Math.min(visibleOrder.value.length - 1, c + delta[1]!))]!
+    moveFocus(targetRow, targetColumn, event.shiftKey)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    selectCell(row, column)
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    void openCell(row, column)
+  }
+}
 function readSelected() { if (selectedCell.value) void readCell(selectedCell.value.row, selectedCell.value.column) }
 function copySelected(wholeRow: boolean) { if (selectedCell.value) void copyCell(wholeRow) }
 async function readCell(row: ResultRow, column: number) {
@@ -84,6 +166,42 @@ async function copyCell(wholeRow = false) {
 }
 function tsvField(text: string): string {
   return /["\t\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+async function copyRange(withHeader = false) {
+  const tab = props.tab
+  const page = tab.page
+  const range = selectedRange.value
+  if (!page || !range || locked.value || reading.value || tab.invalidated) return
+  const rows = page.rows.slice(range.firstRow, range.lastRow + 1)
+  const indices = visibleOrder.value.slice(range.firstColumn, range.lastColumn + 1)
+  // Snapshot displayed values before awaiting full fields; drafts may change meanwhile.
+  const cells = rows.map(row => indices.map(column => displayed(row, column)))
+  const result = tab.result, cursorId = result?.cursorId, generation = tab.generation, revision = selectionRevision
+  const orderKey = visibleOrder.value.join(',')
+  const ownsCopy = () => !disposed && props.tab === tab && props.workbench.activeTab.value === tab &&
+    tab.page === page && tab.result === result && tab.result?.cursorId === cursorId &&
+    tab.generation === generation && !tab.invalidated && selectionRevision === revision && visibleOrder.value.join(',') === orderKey
+  reading.value = true
+  error.value = ''
+  try {
+    const lines = withHeader ? [indices.map(column => tsvField(page.columns[column]!.name)).join('\t')] : []
+    for (let r = 0; r < rows.length; r++) {
+      const fields: string[] = []
+      for (let c = 0; c < indices.length; c++) {
+        if (!ownsCopy()) return
+        const value = textValue(await fullCell(tab, rows[r]!.index, indices[c]!, cells[r]![c]!))
+        fields.push(value === null ? '\\N' : value === '' || value === '\\N' ? `"${value}"` : tsvField(value))
+      }
+      lines.push(fields.join('\t'))
+    }
+    if (!ownsCopy()) return
+    await writeClipboardText(lines.join('\r\n'))
+    if (ownsCopy()) props.workbench.setStatus(`已复制 ${rows.length} 行 × ${indices.length} 列（${withHeader ? '含表头' : '不含表头'}，NULL 为 \\N，空串为 ""）`)
+  } catch (cause) {
+    if (ownsCopy()) error.value = `复制失败：${errorText(cause)}`
+  } finally {
+    reading.value = false
+  }
 }
 async function copyMarkedRows() {
   const tab = props.tab
@@ -319,6 +437,8 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || reading || !selectedCell" @click="readSelected">查看完整值</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(false)">复制单元格</button>
       <button :disabled="locked || reading || !selectedCell" @click="copySelected(true)">复制整行</button>
+      <button :disabled="locked || reading || tab.invalidated || !selectedRange" @click="copyRange()">复制选区</button>
+      <button :disabled="locked || reading || tab.invalidated || !selectedRange" @click="copyRange(true)">复制选区（含表头）</button>
       <button :disabled="locked || reading || tab.invalidated || !tab.page || !tab.selectedRows.size" @click="copyMarkedRows">复制选中行</button>
       <button :disabled="locked || tab.invalidated || !tab.page" title="导出当前页全部结果列，包括隐藏列，使用原始列顺序" @click="openLoadedExport">导出当前页…</button>
       <button v-if="tab.table?.kind === 'table'" :disabled="locked || tab.invalidated" @click="countRows">COUNT{{ rowCount !== null ? `: ${rowCount}` : '' }}</button>
@@ -370,8 +490,8 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
             @focus="revealColumn(index, true)" @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
         </th>
       </tr></thead>
-        <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
-          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="focusCell(row, index)" @click="selectCell(row, index)" @paste="pasteCells($event, row, index)" @keydown.enter.prevent="openCell(row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
+        <tbody><tr v-for="row in tab.page.rows" :key="row.index" :data-row-index="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
+          <td v-for="{ column, index } in visibleColumns" :key="index" :data-column-index="index" :style="columnStyle(index)" :class="{ 'is-pinned': stickyOffsets.has(index), 'is-dirty': tab.dirty.get(row.index)?.changes[column.name] !== undefined, 'is-null': displayed(row, index).kind === 'null', 'is-cell-in-range': inRange(row, index), 'is-cell-selected': selectedCell?.row.index === row.index && selectedCell.column === index }" :title="cellText(displayed(row, index))" tabindex="0" @focus="focusCell(row, index)" @mousedown.left.prevent @click="pointCell($event, row, index)" @paste="pasteCells($event, row, index)" @keydown="cellKey($event, row, index)" @dblclick="openCell(row, index)">{{ cellText(displayed(row, index)) }}</td>
         </tr></tbody>
       </table>
     </div>
@@ -385,7 +505,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
 </template>
 
 <style scoped>
-.data-table td.is-cell-selected { outline:1px solid var(--accent); outline-offset:-1px; }
+.data-table td.is-cell-selected { outline:2px solid var(--accent); outline-offset:-2px; }
 .result-data-table { table-layout:fixed; min-width:0; }
 .result-data-table th,.result-data-table td { min-width:0; max-width:none; }
 .result-data-table .row-number { min-width:0; }
@@ -396,6 +516,8 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
 .result-data-table td.is-pinned.is-dirty { background:#4b4020; }
 .result-data-table tr.is-selected td.is-pinned { background:#26364a; }
 .result-data-table tr:hover td.is-pinned { background:#252a31; }
+.result-data-table td.is-cell-in-range { background-image:linear-gradient(#5289d433, #5289d433); }
+.result-data-table td[data-column-index] { user-select:none; }
 .column-hint { margin:0; padding:3px 8px; border-bottom:1px solid var(--border); }
 .result-data-table .column-sort,.result-data-table th small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:8px; }
 .result-data-table th.is-column-target { box-shadow:inset 0 -2px var(--accent); background:#263d5c; }
