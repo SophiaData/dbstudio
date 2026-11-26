@@ -110,7 +110,7 @@ export function useResultGridLayout(tab: () => ResultTab) {
   function header(index: number) {
     return viewport.value?.querySelector<HTMLElement>(`thead th[data-column-index="${index}"]`)
   }
-  function revealColumn(index: number) {
+  function revealColumn(index: number, focusEnd = false) {
     const scroll = viewport.value
     const head = header(index)
     if (!scroll || !head || stickyOffsets.value.has(index)) return
@@ -118,9 +118,11 @@ export function useResultGridLayout(tab: () => ResultTab) {
     const left = viewportLeft + pinnedWidth.value
     const right = viewportLeft + scroll.clientWidth
     const box = head.getBoundingClientRect()
+    const focusLeft = focusEnd ? box.right - 9 : box.left
+    const focusWidth = focusEnd ? 9 : box.width
     // Native focus scrolling only sees the scrollport, not its sticky siblings.
-    // For a column wider than the remaining area, keep its beginning visible.
-    if (box.left < left || box.width > right - left) scroll.scrollLeft += box.left - left
+    // Wide cells show their beginning; resize handles must instead show the right edge.
+    if (focusLeft < left || focusWidth > right - left) scroll.scrollLeft += focusLeft - left
     else if (box.right > right) scroll.scrollLeft += box.right - right
     saveScroll()
   }

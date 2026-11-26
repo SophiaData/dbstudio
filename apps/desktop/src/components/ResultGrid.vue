@@ -367,7 +367,7 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
             title="拖动调整列宽，双击适宽；方向键微调，Enter 适宽"
             @pointerdown.stop.prevent="startResize($event, index)" @pointermove="moveResize"
             @pointerup="endResize()" @pointercancel="cancelResize" @lostpointercapture="cancelResize"
-            @focus="revealColumn(index)" @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
+            @focus="revealColumn(index, true)" @click.stop @dblclick.stop.prevent="fitColumn(index)" @keydown.stop="resizeKey($event, index)" />
         </th>
       </tr></thead>
         <tbody><tr v-for="row in tab.page.rows" :key="row.index" :class="{ 'is-selected': tab.selectedRows.has(row.index) }"><td class="row-number"><label><input type="checkbox" :checked="tab.selectedRows.has(row.index)" :disabled="locked" :aria-label="`选择第 ${row.index + 1} 行`" @change="tab.selectedRows.has(row.index) ? tab.selectedRows.delete(row.index) : tab.selectedRows.add(row.index)" />{{ row.index + 1 }}</label></td>
