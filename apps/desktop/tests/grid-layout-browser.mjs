@@ -5,6 +5,7 @@ import path from 'node:path'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { chromium } from 'playwright-core'
+import { checkWorkbenchLayout } from './workbench-layout-browser.mjs'
 
 // Run on the GitHub runner's installed Chrome; no browser downloads or Rust build.
 // Locally, browser operations must use the shared Playwright connection instead.
@@ -16,10 +17,14 @@ const server = await createServer({
   configFile: false, root: project, logLevel: 'warn',
   cacheDir: path.join(process.env.RUNNER_TEMP, 'dbstudio-grid-vite'),
   server: { host: '127.0.0.1', port: 0, strictPort: false },
-  resolve: { alias: [{ find: '@tauri-apps/api/core', replacement: '/@grid-native-boundary' }] },
+  resolve: { alias: [{ find: '@tauri-apps/api/core', replacement: '/@grid-native-boundary' },
+    { find: '@tauri-apps/api/event', replacement: '/@grid-event-boundary' }] },
   plugins: [vue(), { name: 'grid-layout-external-boundaries', enforce: 'pre',
-    resolveId(id) { if (id === '/@grid-native-boundary') return '\0grid-native-boundary' },
-    load(id) { if (id === '\0grid-native-boundary') return 'export const invoke = (...args) => window.gridNativeCall(...args)' },
+    resolveId(id) { if (id === '/@grid-native-boundary') return '\0grid-native-boundary'; if (id === '/@grid-event-boundary') return '\0grid-event-boundary' },
+    load(id) {
+      if (id === '\0grid-native-boundary') return 'export const invoke = (...args) => window.gridNativeCall(...args)'
+      if (id === '\0grid-event-boundary') return 'export const listen = async () => () => {}'
+    },
     transform(_source, id) {
       if (id.replaceAll('\\', '/').endsWith('/apps/desktop/src/clipboard.ts')) {
         return 'export const writeClipboardText = text => window.gridCopy(text)'
@@ -1289,6 +1294,8 @@ try {
   })
   assert.equal(results.length, 59)
   await idlePagination()
+  await checkWorkbenchLayout({ page, baseUrl: `http://127.0.0.1:${address.port}`, check, output })
+  assert.equal(results.length, 62)
   assert.deepEqual(errors, [])
   await context.close()
 } catch (error) {
