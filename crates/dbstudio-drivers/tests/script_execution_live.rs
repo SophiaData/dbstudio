@@ -45,6 +45,9 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
     let idle = driver.call("transactionState", vec![]).unwrap();
     assert_eq!(idle["active"], false);
     assert_eq!(idle["pendingAffected"], 0);
+    // Warm the exact same prepared query before USE, as the UI session probe does.
+    let before = driver.call("runQuery", vec![json!("SELECT DATABASE() AS db"), json!({"keepCursor":false})]).unwrap();
+    assert_eq!(before["rows"][0]["cells"][0]["text"], database);
     let use_result = driver.call("executeStatement", vec![json!("/* session */ USE information_schema"), json!({})]).unwrap();
     assert_eq!(use_result["transactionState"], idle);
     let current = driver.call("runQuery", vec![json!("SELECT DATABASE() AS db"), json!({"keepCursor":false})]).unwrap();
@@ -54,6 +57,8 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
     assert!(driver.call("executeStatement", vec![json!("USE dbstudio_context_missing"), json!({})]).is_err());
     assert_eq!(driver.call("transactionState", vec![]).unwrap(), idle);
     driver.call("executeStatement", vec![json!(restore), json!({})]).unwrap();
+    let after_restore = driver.call("runQuery", vec![json!("SELECT DATABASE() AS db"), json!({"keepCursor":false})]).unwrap();
+    assert_eq!(after_restore["rows"][0]["cells"][0]["text"], database);
 
     // 临时表随测试连接关闭释放；回滚后的计数可检测 USE 意外提交事务。
     driver.call("executeStatement", vec![json!("CREATE TEMPORARY TABLE context_transaction_probe (id INT PRIMARY KEY) ENGINE=InnoDB"), json!({})]).unwrap();
