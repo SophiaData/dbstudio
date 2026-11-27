@@ -155,7 +155,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-acceptance-report-${{ github.run_id }}-${{ github.run_attempt }}
-          path: candidate-acceptance.json
+          path: |
+            candidate-acceptance.json
+            candidate-window.png
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:

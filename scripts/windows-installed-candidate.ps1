@@ -704,6 +704,23 @@ public static class AcceptanceDesktop {
     $report.status = 'passed'
     Write-Output 'Installed Windows candidate: MySQL query, update preview, commit and 405-row CSV verified.'
 } finally {
+    if ($report.status -ne 'passed') {
+        try {
+            $failedApp = Get-Variable -Name app -ValueOnly -ErrorAction SilentlyContinue
+            if ($failedApp -and -not $failedApp.Process.HasExited) {
+                Add-Type -AssemblyName System.Drawing
+                $bounds = $failedApp.Window.Current.BoundingRectangle
+                $screen = [Windows.Forms.SystemInformation]::VirtualScreen
+                $region = [Drawing.Rectangle]::Intersect($screen, [Drawing.Rectangle]::new([int]$bounds.X, [int]$bounds.Y, [int]$bounds.Width, [int]$bounds.Height))
+                $bitmap = [Drawing.Bitmap]::new($region.Width, $region.Height)
+                $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                try {
+                    $graphics.CopyFromScreen($region.Location, [Drawing.Point]::Empty, $region.Size)
+                    $bitmap.Save((Join-Path $PWD 'candidate-window.png'), [Drawing.Imaging.ImageFormat]::Png)
+                } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            }
+        } catch { $report.screenshotUnavailable = $true }
+    }
     foreach ($child in $script:children) {
         if (-not $child.HasExited) {
             $child.Kill()
