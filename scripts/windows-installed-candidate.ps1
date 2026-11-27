@@ -80,7 +80,7 @@ function Close-App($App) {
     if ($App.Process.ExitCode -ne 0) { Stop-Acceptance 'APP_EXIT_NONZERO' }
 }
 
-function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel, [switch]$AllowOffscreen) {
+function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel, [switch]$AllowOffscreen, [int]$TimeoutSeconds = 25) {
     $typeConditions = [Windows.Automation.Condition[]]@(
         foreach ($controlType in @($Type)) {
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $controlType)
@@ -92,7 +92,7 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [swit
         $condition = [Windows.Automation.AndCondition]::new($condition,
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name))
     }
-    $deadline = [datetime]::UtcNow.AddSeconds(25)
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         try {
             foreach ($control in $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
@@ -445,6 +445,9 @@ public static class AcceptanceDesktop {
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct GuiThreadInfo {
         public uint Size, Flags;
@@ -552,6 +555,22 @@ public static class AcceptanceDesktop {
     $env:DBSTUDIO_NATIVE_SMOKE_ROOT = $null
     $app = Open-App $binary
 
+    # Hosted desktops can be smaller than the app's default outer window.
+    # Keep a normal window inside the work area; do not maximize or bypass UI clicks.
+    $workArea = [Windows.Forms.Screen]::FromHandle($app.Process.MainWindowHandle).WorkingArea
+    $windowBounds = $app.Window.Current.BoundingRectangle
+    $windowWidth = [Math]::Min([int]$windowBounds.Width, $workArea.Width)
+    $windowHeight = [Math]::Min([int]$windowBounds.Height, $workArea.Height)
+    if (-not [AcceptanceDesktop]::SetWindowPos($app.Process.MainWindowHandle, [IntPtr]::Zero,
+        $workArea.X, $workArea.Y, $windowWidth, $windowHeight, 0x0014)) { Stop-Acceptance 'WINDOW_FIT_FAILED' }
+    $report.windowSize = @{ width = $windowWidth; height = $windowHeight }
+    if (-not [AcceptanceDesktop]::FocusDialog($app.Process.MainWindowHandle)) { Stop-Acceptance 'APP_WINDOW_NOT_FOCUSED' }
+    $script:action = 'wait_application_ready'
+    $startup = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $null = Find-Control $app.Window ([Windows.Automation.ControlType]::Button) '新建连接' -ContainsName -AllowOffscreen -TimeoutSeconds 90
+    } finally { $startup.Stop(); $report.readyWaitMs = $startup.ElapsedMilliseconds }
+    $report.checks.applicationReady = $true
     $script:action = 'open_connection_form'
     Invoke-Button $app.Window '新建连接' -ContainsName
     $script:action = 'select_mysql'
