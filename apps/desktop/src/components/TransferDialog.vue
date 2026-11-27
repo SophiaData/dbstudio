@@ -77,9 +77,12 @@ async function start() {
   try {
     if (!path.value) throw new Error('请先选择文件')
     if (props.workbench.executing.value || props.workbench.locks.has(id) || props.workbench.pendingEditors.size || props.workbench.tabs.value.some((tab) => tab.connectionId === id && tab.busy)) throw new Error('当前连接或编辑器正在处理其它操作')
+    if (!(await props.workbench.guardConnection(id, props.mode === 'import' ? '导入 CSV 前处理事务' : '导出前处理事务'))) return
+    if (!mounted) return
+    // The guard releases its own lock. Recheck before synchronously reserving the task lock.
+    if (props.workbench.executing.value || props.workbench.locks.has(id) || props.workbench.pendingEditors.size || props.workbench.tabs.value.some((tab) => tab.connectionId === id && tab.busy)) throw new Error('当前连接或编辑器正在处理其它操作')
     props.workbench.locks.add(id)
     ownsLock = true
-    if (!(await props.workbench.guardConnection(id, props.mode === 'import' ? '导入 CSV 前处理事务' : '导出前处理事务'))) return
     progress.value = null
     if (props.mode === 'import') {
       if (!props.tab.table || !preview.value || preview.value.errorCount) throw new Error('请先获得无解析错误的 CSV 预览')

@@ -33,6 +33,7 @@ const bundle = await build({
       export { splitStatements as splitSqlScript } from './src/core/sql-script.ts';
       export { default as Compare } from './apps/desktop/src/components/ComparePanel.vue';
       export { default as Grid } from './apps/desktop/src/components/ResultGrid.vue';
+      export { default as Transfer } from './apps/desktop/src/components/TransferDialog.vue';
        export { default as Editor } from './apps/desktop/src/components/SqlEditor.vue';
        export { decision } from './apps/desktop/src/dialogs.ts';
        export { renderLoaded } from './apps/desktop/src/result-export.ts';
@@ -47,7 +48,7 @@ const bundle = await build({
     builder.onLoad({ filter: /apps[\\/]desktop[\\/]src[\\/]clipboard\.ts$/ }, () => ({ contents: "export const writeClipboardText = async () => { throw new Error('OS clipboard forbidden') }" }))
     builder.onLoad({ filter: /\.vue$/ }, async ({ path: filename }) => {
       const normalized = filename.replaceAll('\\', '/')
-      if (!/\/(ComparePanel|ResultGrid|DdlDialog|SqlEditor|MysqlAdminDialog)\.vue$/.test(normalized)) return { contents: 'export default {}' }
+      if (!/\/(ComparePanel|ResultGrid|DdlDialog|SqlEditor|MysqlAdminDialog|TransferDialog)\.vue$/.test(normalized)) return { contents: 'export default {}' }
       const { descriptor } = parse(await readFile(filename, 'utf8'), { filename: normalized })
       const script = compileScript(descriptor, { id: normalized, genDefaultAs: '__component' })
       // Compile the actual Compare template, including its SQL emission and preview expressions.
@@ -59,7 +60,7 @@ const bundle = await build({
     })
   } }]
 })
-const { Compare, Grid, Ddl, Editor, MysqlAdmin, decision, renderLoaded, useWorkbench, splitSqlScript } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
+const { Compare, Grid, Transfer, Ddl, Editor, MysqlAdmin, decision, renderLoaded, useWorkbench, splitSqlScript } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 const renderer = createRenderer({
   insert() {}, remove() {}, patchProp() {},
   createElement: (tag) => ({ tag }), createText: (text) => ({ text }), createComment: (text) => ({ text }),
@@ -476,6 +477,55 @@ await test('mysql_admin_panel_renders_all_tabs_and_disables_self_kill', ({ wb })
     await admin.switchTab('users')
     assert.equal(admin.users.users.length, 0)
   })
+})
+
+for (const mode of ['import', 'export']) {
+  await test(`transfer_${mode}_guards_before_acquiring_task_lock`, async ({ wb, tab }) => {
+    const transfer = mount(Transfer, { workbench: wb, tab, mode }).exposed
+    transfer.path = 'synthetic-only.csv'
+    transfer.preview = { errorCount: 0, columns: [{ name: 'id' }] }
+    transfer.mapping = ['id']
+    const progress = { taskId: 'synthetic-task', status: 'completed' }
+    const start = mode === 'import' ? 'startImport' : 'startTransfer'
+    const wait = mode === 'import' ? 'waitImport' : 'waitTransfer'
+    methods[start] = async () => { assert.equal(wb.locks.has('A'), true); return progress }
+    methods[wait] = async () => { assert.equal(wb.locks.has('A'), true); return progress }
+    await transfer.start()
+    assert.equal(transfer.error, '')
+    assert.equal(transfer.progress.status, 'completed')
+    assert.equal(calls.filter((call) => call.method === start).length, 1)
+    assert.equal(wb.locks.has('A'), false)
+    assert.equal(wb.backgroundTasks.size, 0)
+  })
+}
+await test('transfer_does_not_steal_a_lock_acquired_after_guard', async ({ wb, tab }) => {
+  const guard = wb.guardConnection
+  wb.guardConnection = async (...args) => { await guard(...args); wb.locks.add('A'); return true }
+  const transfer = mount(Transfer, { workbench: wb, tab, mode: 'export' }).exposed
+  transfer.path = 'synthetic-only.csv'
+  await transfer.start()
+  assert.match(transfer.error, /正在处理其它操作/)
+  assert.equal(wb.locks.has('A'), true)
+  assert.equal(calls.some((call) => call.method === 'startTransfer'), false)
+})
+await test('transfer_mysql_commit_preview_cancel_keeps_draft_without_starting_task', async ({ wb, tab }) => {
+  wb.connections.value[0].dialectId = 'mysql'
+  wb.stageCell(tab, tab.page.rows[0], 'id', { kind: 'number', value: 2 })
+  methods.previewRowUpdates = async () => ({ fingerprint: 'preview', statements: [{ sql: 'UPDATE synthetic SET id=? WHERE id=?', parameters: [2, 1] }] })
+  const transfer = mount(Transfer, { workbench: wb, tab, mode: 'export' }).exposed
+  transfer.path = 'synthetic-only.csv'
+  const pending = transfer.start()
+  for (let turn = 0; turn < 100 && !decision.value; turn++) await Promise.resolve()
+  assert.equal(decision.value?.title, '导出前处理事务')
+  decision.value.settle('commit')
+  for (let turn = 0; turn < 100 && !decision.value; turn++) await Promise.resolve()
+  assert.equal(decision.value?.title, '提交当前连接')
+  decision.value.settle('cancel')
+  await pending
+  assert.equal(transfer.error, '')
+  assert.equal(tab.dirty.size, 1)
+  assert.equal(wb.locks.has('A'), false)
+  assert.equal(calls.some((call) => ['startTransfer', 'applyEdits', 'commitTransaction'].includes(call.method)), false)
 })
 
 const failed = results.filter((result) => !result.passed)

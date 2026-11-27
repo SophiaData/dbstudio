@@ -1493,6 +1493,64 @@ await check('mysql_existing_transaction_only_requires_confirmation_and_guard_hol
   assertIdle(f.wb, f.tab)
 })
 
+await check('mysql_aggregate_deadlock_restores_all_current_drafts_and_original_page_indices', async () => {
+  const f = aggregateFixture()
+  const snapshots = [f.tab, f.second].map(tab => ({ tab, draft: JSON.stringify([...tab.dirty]), page: tab.page }))
+  let rolledBack = false
+  const apply = f.backend.applyEdits
+  f.backend.applyEdits = async (table, ...args) => {
+    if (table.endsWith('.orders')) {
+      rolledBack = true
+      throw { code: 'driver-error', message: 'MySQL操作失败(SQLSTATE 40001, code 1213)' }
+    }
+    return apply(table, ...args)
+  }
+  f.backend.transactionState = async () => rolledBack
+    ? { active: false, pendingAffected: 0 }
+    : { active: true, pendingAffected: 5 + f.calls.applies }
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision('提交当前连接')
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  for (const { tab, draft, page } of snapshots) {
+    assert.equal(JSON.stringify([...tab.dirty]), draft)
+    assert.equal(tab.page, page)
+  }
+  assert.match(outcome.error.message, /整个事务已回滚.*草稿已保留或恢复/)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.calls.queries.length, 0)
+  assert.deepEqual(f.wb.transactions.a, { active: false, pendingAffected: 0 })
+})
+await check('mysql_apply_refresh_failure_reports_applied_uncommitted_state_without_retry_draft', async () => {
+  const f = fixture()
+  useMysql(f.wb)
+  f.wb.stageCell(f.tab, f.tab.page.rows[0], 'body', text('applied-value'))
+  f.backend.runQuery = async () => { throw new Error('SYNTHETIC_REFRESH_FAILED') }
+  const pending = f.wb.applyTab(f.tab)
+  await waitForDecision('更新 SQL 预览')
+  const outcome = await settleOpenDecision(pending, 'apply')
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.error.message, /已应用 1 行到当前事务，尚未提交；刷新结果失败/)
+  assert.equal(f.calls.applies, 1)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.tab.dirty.size, 0)
+  assert.equal(f.values.get(1), 'applied-value')
+  assert.equal(f.wb.transactions.a.active, true)
+})
+await check('mysql_aggregate_commit_refresh_failure_reports_already_committed', async () => {
+  const f = aggregateFixture()
+  f.backend.runQuery = async () => { throw new Error('SYNTHETIC_REFRESH_FAILED') }
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision('提交当前连接')
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  assert.equal(f.calls.applies, 2)
+  assert.equal(f.calls.commits.length, 1)
+  assert.match(outcome.error.message, /已提交当前连接事务，但刷新结果失败/)
+  assert.equal(f.tab.dirty.size, 0)
+  assert.equal(f.second.dirty.size, 0)
+})
+
 const failed = outcomes.filter((item) => !item.passed).length
 writeFileSync(join(output, 'results.json'), JSON.stringify({ scope: 'real-workbench-pure-memory-ipc', native_or_gui_pass: false, outcomes }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
 console.log(`SQL workflow regression checks: ${outcomes.length - failed} passed, ${failed} failed`)

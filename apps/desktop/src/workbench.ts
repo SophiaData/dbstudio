@@ -638,9 +638,20 @@ export function useWorkbench() {
       assertCurrent(reviews.slice(index))
       const review = reviews[index]!
       try {
-        await applyTab(review.tab, { updates: review.updates, fingerprint: review.plan!.fingerprint })
+        await applyTab(review.tab, { updates: review.updates, fingerprint: review.plan!.fingerprint }, !commit)
       } catch (cause) {
         if (!commit) throw cause
+        if (cause instanceof Error && 'transactionRolledBack' in cause && cause.transactionRolledBack === true) {
+          // Aggregate applies keep their original pages until settlement, so draft row indices still match.
+          for (const item of reviews.slice(0, index)) {
+            if (tabs.value.includes(item.tab) && !item.tab.invalidated && item.tab.connectionId === id &&
+                item.tab.table?.id === item.tableId && item.tab.generation === item.generation && item.tab.page === item.page && !item.tab.dirty.size) {
+              for (const [row, update] of JSON.parse(item.snapshot) as [number, RowUpdate][]) item.tab.dirty.set(row, update)
+              item.tab.message = '事务已回滚，本轮草稿已恢复；请处理草稿后刷新结果'
+            }
+          }
+          throw new Error(`未执行提交；整个事务已回滚，本轮仍有效标签的草稿已保留或恢复。请处理草稿后刷新结果。${errorText(cause)}`)
+        }
         throw new Error(`未执行提交；应用过程中发生错误，请核对当前事务。尚未应用成功的草稿已保留。${errorText(cause)}`)
       }
     }
@@ -669,7 +680,7 @@ export function useWorkbench() {
     transactions[id] = await backend.commitTransaction(connectionNode(id))
     return true
   }
-  async function applyTab(tab: ResultTab, reviewed?: { updates: RowUpdate[]; fingerprint: string }) {
+  async function applyTab(tab: ResultTab, reviewed?: { updates: RowUpdate[]; fingerprint: string }, refresh = true) {
     if (!tab.table || !tab.dirty.size) return
     if (tab.busy || tab.invalidated) throw new Error('当前结果不可应用修改')
     tab.busy = true
@@ -692,14 +703,17 @@ export function useWorkbench() {
           'message' in cause && cause.message === 'MySQL操作失败(SQLSTATE 40001, code 1213)' &&
           connections.value.some((connection) => connection.id === tab.connectionId && connection.dialectId === 'mysql')
         if (wasActive && state?.active === false && state.pendingAffected === 0 && mysqlDeadlock) {
-          throw Object.assign(new Error('MySQL操作失败(SQLSTATE 40001, code 1213)；整个事务已回滚；本地草稿已保留。请处理草稿后刷新结果'), { code: 'driver-error' })
+          throw Object.assign(new Error('MySQL操作失败(SQLSTATE 40001, code 1213)；整个事务已回滚；本地草稿已保留。请处理草稿后刷新结果'), { code: 'driver-error', transactionRolledBack: true })
         }
         throw cause
       })
       await readTransaction(tab.connectionId)
       if (!result.ok) throw new Error(result.outcomes.filter((item) => item.error).map((item) => item.error).join('；') || '部分修改失败，请回滚当前连接事务')
       tab.dirty.clear()
-      await reloadTab(tab, false, offset)
+      if (refresh) {
+        try { await reloadTab(tab, false, offset) }
+        catch (cause) { throw new Error(`已应用 ${result.affected} 行到当前事务，尚未提交；刷新结果失败，请核对事务后再继续。${errorText(cause)}`) }
+      } else tab.message = `已应用 ${result.affected} 行，尚未提交；结果将在提交后刷新`
       setStatus(`已应用 ${result.affected} 行，尚未提交`)
     } finally { tab.busy = false }
   }
@@ -728,7 +742,8 @@ export function useWorkbench() {
       transactions[id] = await backend.rollbackTransaction(connectionNode(id))
       for (const tab of localTabs) tab.dirty.clear()
     }
-    await refreshConnectionTabs(id)
+    try { await refreshConnectionTabs(id) }
+    catch (cause) { throw new Error(`${commit ? '已提交' : '已回滚'}当前连接事务，但刷新结果失败。${errorText(cause)}`) }
     setStatus(commit ? '已提交当前连接事务' : '已回滚当前连接事务')
     return true
   }
@@ -748,7 +763,8 @@ export function useWorkbench() {
       if (state.active) transactions[id] = await backend.rollbackTransaction(connectionNode(id))
       for (const tab of tabs.value.filter((tab) => tab.connectionId === id)) tab.dirty.clear()
     }
-    await refreshConnectionTabs(id)
+    try { await refreshConnectionTabs(id) }
+    catch (cause) { throw new Error(`${choice === 'commit' ? '已提交' : '已回滚'}当前连接事务，但刷新结果失败。${errorText(cause)}`) }
     return true
   }
   async function invalidateConnection(id: string) {
