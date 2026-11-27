@@ -151,6 +151,9 @@ fn cancellation(fixture: &Fixture, config: &ConnectionConfig, secrets: &SecretMa
         let sql = if pg { "SELECT 1 AS value FROM pg_sleep(20)" } else { "SELECT SLEEP(20) AS value" };
         let result: DriverResult<Value> = driver.call("runQuery", vec![json!(sql),json!({"keepCursor":false})]);
         let _ = driver.disconnect();
+        // A finished query may release its driver while KILL's control connection
+        // is still receiving its acknowledgement over the shared SSH tunnel.
+        drop(driver);
         let _ = finish_tx.send(result);
     });
     start_rx.recv_timeout(Duration::from_secs(2)).expect("native secure worker must start");

@@ -243,11 +243,11 @@ fn edit_result(total:u64,outcomes:Vec<Value>,in_transaction:bool)->Value{
     let ok=outcomes.iter().all(|outcome|outcome["error"].is_null());
     json!({"affected":total,"ok":ok,"outcomes":outcomes,"inTransaction":in_transaction})
 }
-pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<SshTunnel>,database:String}
+pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<Arc<SshTunnel>>,database:String}
 pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dyn Driver>>{
     let host=n::option(config,"host","127.0.0.1");let port=n::port(config,"port",3306)?;
     let database=n::option(config,"database","");if database.is_empty(){return Err(DriverError::invalid("缺少数据库名"));}
-    let mode=tls::mode(config,false)?;let tunnel=tunnel::open(config,secrets,&host,port)?;
+    let mode=tls::mode(config,false)?;let tunnel=tunnel::open(config,secrets,&host,port)?.map(Arc::new);
     if tunnel.is_some()&&mode==TlsMode::VerifyFull{return Err(DriverError::unsupported("MySQL SSH隧道下verify-full的原始主机名校验尚未迁移"));}
     let ssl=if mode==TlsMode::Disable{None}else{
         let ca=n::option(config,"sslrootcert","");
@@ -259,8 +259,14 @@ pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dy
         .db_name(Some(database.clone())).ssl_opts(ssl).tcp_connect_timeout(Some(n::timeout())).read_timeout(Some(n::timeout())).write_timeout(Some(n::timeout())).prefer_socket(false));
     let mut conn=connect_options(&opts).map_err(error)?;conn.query_drop("SET NAMES utf8mb4").map_err(error)?;
     let id=conn.connection_id();let running=Arc::new(AtomicBool::new(false));let flag=running.clone();
+    let cancel_tunnel=tunnel.as_ref().map(Arc::downgrade);
     let cancel:CancelHandle=Arc::new(move||{
-        if !flag.load(Ordering::SeqCst){return Ok(false);}let mut control=connect_options(&opts).map_err(error)?;
+        if !flag.load(Ordering::SeqCst){return Ok(false);}
+        // KILL can finish the query before its acknowledgement arrives. Keep the
+        // shared tunnel alive for this control request even if the driver drops.
+        // An idle cancel handle owns only Weak, so it cannot retain a closed session.
+        let _tunnel_guard=match &cancel_tunnel{Some(tunnel)=>match tunnel.upgrade(){Some(tunnel)=>Some(tunnel),None=>return Ok(false)},None=>None};
+        let mut control=connect_options(&opts).map_err(error)?;
         control.query_drop(format!("KILL QUERY {id}")).map_err(error)?;Ok(true)
     });
     Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel,database:database.clone()}))
