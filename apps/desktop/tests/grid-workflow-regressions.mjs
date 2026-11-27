@@ -337,21 +337,76 @@ await test('insert_error_preserves_form_and_all_input', async (f) => {
   assert.deepEqual(insertSnapshot(f), before)
   assert.equal(f.grid.error, 'synthetic-insert-rejected')
 })
+await test('insert_form_allows_its_own_pending_editor_through_update_preview', async (f) => {
+  f.wb.connections.value[0].dialectId = 'mysql'
+  f.wb.stageCell(f.tab, f.rows[1], 'note', text('existing-update-draft'))
+  fillInsert(f)
+  const previews = [], applies = []
+  nativeMethods.previewRowUpdates = async (tableId, updates) => {
+    previews.push({ tableId, updates })
+    return {
+      fingerprint: 'insert-guard-preview',
+      statements: [{ sql: `UPDATE ${tableId} SET note = ? WHERE id = ?`, parameters: ['existing-update-draft', 2] }]
+    }
+  }
+  nativeMethods.applyEdits = async (tableId, updates, fingerprint) => {
+    applies.push({ tableId, updates, fingerprint })
+    return { ok: true, affected: updates.length, inTransaction: true, outcomes: [] }
+  }
+  const start = ipcCalls.length
+  const submitting = f.grid.submitInsert()
+  assert.equal(f.wb.pendingEditors.has(f.tab.id), true)
+  assert.equal(f.tab.dirty.size, 1)
+  assert.equal(f.inserted.length, 0)
+  await waitForGridDecision('插入行')
+  decision.value.settle('apply')
+  await waitForGridDecision('更新 SQL 预览')
+  assert.equal(previews.length, 1)
+  assert.equal(applies.length, 0)
+  decision.value.settle('apply')
+  await submitting
+  assert.equal(f.grid.error, '')
+  assert.equal(applies.length, 1)
+  assert.equal(f.inserted.length, 1)
+  assert.equal(f.tab.dirty.size, 0)
+  assert.equal(f.bindings.insertOpen.value, false)
+  assert.equal(f.wb.pendingEditors.has(f.tab.id), false)
+  assert.ok(ipcCalls.slice(start).includes('previewRowUpdates'))
+  assert.ok(ipcCalls.slice(start).includes('applyEdits'))
+  assert.ok(ipcCalls.slice(start).includes('insertRow'))
+})
 
 const mysqlDeadlock = 'MySQL操作失败(SQLSTATE 40001, code 1213)'
 const rollbackNotice = '整个事务已回滚；本地草稿已保留。请处理草稿后刷新结果'
+async function waitForGridDecision(title) {
+  for (let turn = 0; turn < 1000 && !decision.value; turn++) await Promise.resolve()
+  assert.ok(decision.value, `expected decision: ${title}`)
+  assert.equal(decision.value.title, title)
+}
+async function applyFromRealWorkbench(f) {
+  const pending = f.wb.applyTab(f.tab)
+  await waitForGridDecision('更新 SQL 预览')
+  decision.value.settle('apply')
+  return pending
+}
 await test('apply_deadlock_reject_refreshes_transaction_and_preserves_draft', async (f) => {
   f.wb.connections.value[0].dialectId = 'mysql'
   f.wb.transactions.A = { active: true, pendingAffected: 1 }
   f.wb.stageCell(f.tab, f.rows[1], 'note', text('synthetic-local-draft'))
   const draft = JSON.stringify([...f.tab.dirty]), page = f.tab.page, result = f.tab.result, generation = f.tab.generation
   const original = Object.freeze({ code: 'driver-error', message: mysqlDeadlock })
+  nativeMethods.previewRowUpdates = async (tableId, updates) => ({
+    fingerprint: 'deadlock-preview', statements: [{ sql: `UPDATE ${tableId} SET note = ? WHERE id = ?`, parameters: ['synthetic-local-draft', 2] }]
+  })
   nativeMethods.applyEdits = async () => { throw original }
-  nativeMethods.transactionState = async () => ({ active: false, pendingAffected: 0 })
+  let stateReads = 0
+  nativeMethods.transactionState = async () => stateReads++ < 2
+    ? { active: true, pendingAffected: 1 }
+    : { active: false, pendingAffected: 0 }
   const start = ipcCalls.length
   let surfaced
   await f.wb.attempt(async () => {
-    try { await f.wb.applyTab(f.tab) } catch (cause) { surfaced = cause; throw cause }
+    try { await applyFromRealWorkbench(f) } catch (cause) { surfaced = cause; throw cause }
   })
   assert.equal(surfaced.code, 'driver-error')
   assert.equal(f.wb.statusError.value, true)
@@ -360,7 +415,9 @@ await test('apply_deadlock_reject_refreshes_transaction_and_preserves_draft', as
   assert.equal(JSON.stringify([...f.tab.dirty]), draft)
   assert.equal(f.tab.page, page); assert.equal(f.tab.result, result); assert.equal(f.tab.generation, generation)
   assert.equal(f.tab.busy, false)
-  assert.deepEqual(ipcCalls.slice(start), ['applyEdits', 'transactionState'])
+  assert.deepEqual(ipcCalls.slice(start), [
+    'transactionState', 'previewRowUpdates', 'transactionState', 'applyEdits', 'transactionState'
+  ])
 })
 await test('apply_reject_preserves_original_error_when_transaction_read_fails', async (f) => {
   f.wb.connections.value[0].dialectId = 'mysql'
@@ -368,14 +425,24 @@ await test('apply_reject_preserves_original_error_when_transaction_read_fails', 
   f.wb.stageCell(f.tab, f.rows[1], 'note', text('synthetic-retry-draft'))
   const draft = JSON.stringify([...f.tab.dirty]), page = f.tab.page
   const original = Object.freeze({ code: 'driver-error', message: mysqlDeadlock })
+  nativeMethods.previewRowUpdates = async (tableId) => ({
+    fingerprint: 'retry-preview', statements: [{ sql: `UPDATE ${tableId} SET note = ? WHERE id = ?`, parameters: ['synthetic-retry-draft', 2] }]
+  })
   nativeMethods.applyEdits = async () => { throw original }
-  nativeMethods.transactionState = async () => { throw new Error('synthetic-tx-read-failure') }
+  let stateReads = 0
+  nativeMethods.transactionState = async () => {
+    stateReads++
+    if (stateReads <= 2) return { active: true, pendingAffected: 1 }
+    throw new Error('synthetic-tx-read-failure')
+  }
   const start = ipcCalls.length
-  await assert.rejects(f.wb.applyTab(f.tab), (cause) => cause === original)
+  await assert.rejects(applyFromRealWorkbench(f), (cause) => cause === original)
   assert.deepEqual(f.wb.transactions.A, { active: true, pendingAffected: 1 })
   assert.equal(JSON.stringify([...f.tab.dirty]), draft)
   assert.equal(f.tab.page, page); assert.equal(f.tab.busy, false)
-  assert.deepEqual(ipcCalls.slice(start), ['applyEdits', 'transactionState'])
+  assert.deepEqual(ipcCalls.slice(start), [
+    'transactionState', 'previewRowUpdates', 'transactionState', 'applyEdits', 'transactionState'
+  ])
 })
 await test('apply_reject_does_not_infer_whole_rollback_without_exact_evidence', async (f) => {
   f.wb.stageCell(f.tab, f.rows[1], 'note', text('synthetic-preserved-draft'))
@@ -394,14 +461,26 @@ await test('apply_reject_does_not_infer_whole_rollback_without_exact_evidence', 
     f.wb.connections.value[0].dialectId = item.dialect ?? 'mysql'
     f.wb.transactions.A = { active: item.before ?? true, pendingAffected: item.before === false ? 0 : 1 }
     const original = Object.freeze({ code: item.code ?? 'driver-error', message: item.message })
+    nativeMethods.previewRowUpdates = async (tableId) => ({
+      fingerprint: `preview-${item.message}`, statements: [{ sql: `UPDATE ${tableId} SET note = ? WHERE id = ?`, parameters: ['synthetic-preserved-draft', 2] }]
+    })
     nativeMethods.applyEdits = async () => { throw original }
-    nativeMethods.transactionState = async () => ({ ...item.state })
+    let stateReads = 0
+    const readsBeforeApply = f.wb.connections.value[0].dialectId === 'mysql' ? 2 : 0
+    nativeMethods.transactionState = async () => stateReads++ < readsBeforeApply
+      ? { active: item.before ?? true, pendingAffected: item.before === false ? 0 : 1 }
+      : { ...item.state }
     const start = ipcCalls.length
-    await assert.rejects(f.wb.applyTab(f.tab), (cause) => cause === original)
+    const applying = f.wb.connections.value[0].dialectId === 'mysql'
+      ? applyFromRealWorkbench(f)
+      : f.wb.applyTab(f.tab)
+    await assert.rejects(applying, (cause) => cause === original)
     assert.deepEqual(f.wb.transactions.A, item.state)
     assert.equal(JSON.stringify([...f.tab.dirty]), draft)
     assert.equal(f.tab.page, page); assert.equal(f.tab.busy, false)
-    assert.deepEqual(ipcCalls.slice(start), ['applyEdits', 'transactionState'])
+    assert.deepEqual(ipcCalls.slice(start), f.wb.connections.value[0].dialectId === 'mysql'
+      ? ['transactionState', 'previewRowUpdates', 'transactionState', 'applyEdits', 'transactionState']
+      : ['applyEdits', 'transactionState'])
   }
 })
 await test('partial_apply_failure_preserves_all_drafts_and_prior_transaction', async (f) => {

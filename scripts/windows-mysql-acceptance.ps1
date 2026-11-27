@@ -66,10 +66,15 @@ CREATE TABLE dbstudio_acceptance.items (
     note VARCHAR(64) NULL,
     generated_value VARCHAR(64) GENERATED ALWAYS AS (upper(payload)) STORED
 );
+CREATE TABLE dbstudio_acceptance.items_secondary (
+    id INT PRIMARY KEY,
+    payload VARCHAR(64) NOT NULL
+);
 CREATE TABLE dbstudio_restore.items LIKE dbstudio_acceptance.items;
 CREATE USER 'acceptance'@'127.0.0.1';
 GRANT SELECT, UPDATE ON dbstudio_acceptance.* TO 'acceptance'@'127.0.0.1';
 INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $values;
+INSERT INTO dbstudio_acceptance.items_secondary (id, payload) VALUES (1, 'secondary-row-1'), (2, 'secondary-row-2');
 "@
     if ($CandidateDirectory) {
         & (Join-Path $PSScriptRoot 'windows-installed-candidate.ps1') -CandidateDirectory $CandidateDirectory -Port $port -ReadFixtureSql ${function:Invoke-FixtureSql}
@@ -96,7 +101,7 @@ INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $valu
         throw "The native WebView produced no acceptance report (exited=$exited, exitCode=$($app.ExitCode))."
     }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_codemirror_execution', 'mysql_editor_daily_tools', 'mysql_editor_error_navigation', 'mysql_editor_large_drafts', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_grid_batch_paste', 'mysql_generated_column_export')
+    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_codemirror_execution', 'mysql_editor_daily_tools', 'mysql_editor_error_navigation', 'mysql_editor_large_drafts', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_grid_batch_paste', 'mysql_guard_local_apply_preview', 'mysql_connection_draft_aggregate', 'mysql_generated_column_export')
     if ($report.editorPerformance) {
         @{ sha = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID; metrics = $report.editorPerformance } | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $PWD 'editor-performance.json') -Encoding utf8NoBOM

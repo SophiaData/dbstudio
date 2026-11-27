@@ -633,6 +633,11 @@ public static class AcceptanceDesktop {
         Stop-Acceptance 'UNCOMMITTED_DATA_VISIBLE'
     }
     Invoke-Button $app.Window '提交'
+    $null = Find-Control $app.Window $cell '提交当前连接' -AllowOffscreen
+    if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'row-1') {
+        Stop-Acceptance 'COMMIT_PREVIEW_WROTE_DATA'
+    }
+    Invoke-Button $app.Window '提交事务'
     $null = Find-Control $app.Window $cell '已提交当前连接事务' -AllowOffscreen
     if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
         Stop-Acceptance 'COMMIT_READBACK_MISMATCH'

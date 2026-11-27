@@ -18,6 +18,35 @@ async function waitFor(check: () => boolean | Promise<boolean>) {
   throw new Error('The acceptance condition did not become ready')
 }
 
+async function chooseDecision(
+  title: string,
+  value: string,
+  validate?: (content: { message: string; detail: string }) => void | Promise<void>
+) {
+  let pending = decision.value
+  await waitFor(() => {
+    const current = decision.value
+    if (current?.title === title && document.querySelector('#decision-title')?.textContent === title) {
+      pending = current
+      return true
+    }
+    return false
+  })
+  if (!pending) throw new Error(`Decision ${title} is unavailable`)
+  const dialog = document.querySelector<HTMLElement>('.modal[aria-labelledby="decision-title"]')
+  const option = pending.options.find((item) => item.value === value)
+  if (!dialog || !option) throw new Error(`Decision option ${value} is unavailable`)
+  const message = dialog.querySelector('p')?.textContent ?? ''
+  const detail = dialog.querySelector('.decision-detail')?.textContent ?? ''
+  await validate?.({ message, detail })
+  const button = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
+    .find((candidate) => candidate.textContent?.trim() === option.label)
+  if (!button) throw new Error(`Decision button ${option.label} is unavailable`)
+  button.click()
+  await waitFor(() => decision.value !== pending)
+  return { message, detail }
+}
+
 export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost, fixture: SmokeFixture) {
   const checks: Record<string, boolean> = { isolated_fixture: fixture.isolated }
   let editorPerformance: Awaited<ReturnType<typeof measureEditorPerformance>> | undefined
@@ -195,10 +224,22 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
       return cellText(result.rows[0]!.cells[0]!)
     }
     wb.stageCell(tab, row, 'payload', { kind: 'text', text: 'uncommitted-fixture' })
-    await wb.applyTab(tab)
+    const cancelledApply = wb.applyTab(tab)
+    await chooseDecision('更新 SQL 预览', 'cancel', ({ detail }) => {
+      if (!detail.includes('uncommitted-fixture')) throw new Error('Direct apply preview omitted update parameters')
+    })
+    const applyCancelled = await cancelledApply
+    const cancelledApplyClean = applyCancelled === false && tab.dirty.size === 1
+      && await readPayload() === `row-${rowId}` && !(await wb.readTransaction(id)).active
+    const confirmedApply = wb.applyTab(tab)
+    await chooseDecision('更新 SQL 预览', 'apply', ({ detail }) => {
+      if (!detail.includes('uncommitted-fixture')) throw new Error('Direct apply preview omitted update parameters')
+    })
+    const applyConfirmed = await confirmedApply
+    const appliedInTransaction = applyConfirmed === true && tab.dirty.size === 0
+      && (await wb.readTransaction(id)).active && await readPayload() === `row-${rowId}`
     const rollback = wb.settleTransaction(id, false)
-    await waitFor(() => decision.value?.title === '回滚当前连接')
-    decision.value!.settle('confirm')
+    await chooseDecision('回滚当前连接', 'confirm')
     if (!await rollback) throw new Error('Fixture rollback was not confirmed')
     const rolledBack = await readPayload() === `row-${rowId}`
     if (tab.page!.offset === 0) await wb.pageTab(tab, 1)
@@ -227,15 +268,18 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         detail.includes(JSON.stringify([committedValue, rowId])) &&
         preview.statements[0]!.sql.includes('WHERE ' + String.fromCharCode(96) + 'id' + String.fromCharCode(96) + '=?')
       const untouched = await unchanged()
-      decision.value!.settle(choice)
+      await chooseDecision('更新 SQL 预览', choice)
       await waitFor(() => !wb.locks.has(id) && !tab.busy)
       return Boolean(sqlMatches) && untouched
     }
     const cancelledReview = await review('cancel') && tab.dirty.size === 1 && await unchanged()
     const confirmedReview = await review('apply') && tab.dirty.size === 0
     const stagedInTransaction = (await wb.readTransaction(id)).active && await readPayload() === 'row-' + rowId
-    await wb.settleTransaction(id, true)
-    checks[check] = cleanBefore && cancelledReview && confirmedReview && stagedInTransaction
+    const commit = wb.settleTransaction(id, true)
+    await chooseDecision('提交当前连接', 'commit')
+    const committed = await commit
+    checks[check] = cleanBefore && cancelledApplyClean && appliedInTransaction
+      && cancelledReview && confirmedReview && stagedInTransaction && committed
     checks.mysql_transaction = rolledBack && await readPayload() === committedValue
 
     check = 'mysql_grid_batch_paste'
@@ -280,8 +324,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         .find((candidate) => candidate.textContent?.trim() === '应用修改 (2)')
       if (!button) throw new Error('Missing apply action for bulk paste')
       button.click()
-      await waitFor(() => decision.value?.title === '更新 SQL 预览')
-      decision.value!.settle('apply')
+      await chooseDecision('更新 SQL 预览', 'apply')
       await waitFor(() => !wb.locks.has(id) && !tab.busy)
       return tab.dirty.size === 0 && (await wb.readTransaction(id)).active
         && JSON.stringify(await readPastedRows()) === beforePaste
@@ -290,17 +333,118 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     const firstApply = firstPaste && await applyPastedRows()
     if (!firstApply) throw new Error('Bulk paste did not become a pending transaction')
     const revertPaste = wb.settleTransaction(id, false)
-    await waitFor(() => decision.value?.title === '回滚当前连接')
-    decision.value!.settle('confirm')
+    await chooseDecision('回滚当前连接', 'confirm')
     const reverted = await revertPaste && JSON.stringify(await readPastedRows()) === beforePaste
     const secondApply = await staged() && await applyPastedRows()
     if (!secondApply) throw new Error('Bulk paste could not be repeated after rollback')
-    await wb.settleTransaction(id, true)
+    const pasteCommit = wb.settleTransaction(id, true)
+    await chooseDecision('提交当前连接', 'commit')
+    if (!await pasteCommit) throw new Error('Bulk paste transaction was not committed')
     const expectedRows = [
       [String(ids[0]), '2', 'from\ttable', null],
       [String(ids[1]), '1', 'two\r\nlines', '']
     ].sort((left, right) => Number(left[0]) - Number(right[0]))
     checks[check] = rejectedCleanly && reverted && JSON.stringify(await readPastedRows()) === JSON.stringify(expectedRows)
+
+    check = 'mysql_guard_local_apply_preview'
+    const guardRow = tab.page!.rows[0]!
+    const guardRowId = Number(cellText(guardRow.cells[0]!))
+    const guardRead = async () => {
+      const result = await backend.runQuery(connectionNode(observer.id),
+        `SELECT payload FROM ${database}.items WHERE id = ${guardRowId}`,
+        { keepCursor: false })
+      return cellText(result.rows[0]!.cells[0]!)
+    }
+    const guardBefore = await guardRead()
+    wb.stageCell(tab, guardRow, 'payload', { kind: 'text', text: 'guard-local-value' })
+    const transform = wb.transformTab(tab, [{ column: 'id', direction: 'DESC' }])
+    await chooseDecision('排序或筛选', 'apply')
+    const guardPreview = await chooseDecision('更新 SQL 预览', 'apply', ({ detail }) => {
+      if (!detail.includes('guard-local-value')) throw new Error('Guard apply preview omitted update parameters')
+    })
+    await transform
+    await waitFor(() => !wb.locks.has(id) && !tab.busy)
+    const guardObserverBeforeCommit = await guardRead()
+    const guardCommit = wb.settleTransaction(id, true)
+    await chooseDecision('提交当前连接', 'commit')
+    const guardCommitted = await guardCommit
+    checks[check] = guardPreview.detail.includes('guard-local-value') && tab.dirty.size === 0
+      && guardObserverBeforeCommit === guardBefore && guardCommitted
+      && await guardRead() === 'guard-local-value'
+
+    check = 'mysql_connection_draft_aggregate'
+    const secondaryTable: ObjectRef = {
+      id: `${node}|table:${database}.items_secondary`,
+      name: 'items_secondary',
+      kind: 'table',
+      parentId: node,
+      hasChildren: true
+    }
+    const primaryAggregateRow = tab.page!.rows[0]!
+    const primaryAggregateId = Number(cellText(primaryAggregateRow.cells[0]!))
+    await wb.openTable(secondaryTable)
+    const secondaryTab = wb.activeTab.value!
+    const secondaryAggregateRow = secondaryTab.page!.rows[0]!
+    const secondaryAggregateId = Number(cellText(secondaryAggregateRow.cells[0]!))
+    const readAggregate = async () => {
+      const primary = await backend.runQuery(connectionNode(observer.id),
+        `SELECT payload FROM ${database}.items WHERE id = ${primaryAggregateId}`,
+        { keepCursor: false })
+      const secondary = await backend.runQuery(connectionNode(observer.id),
+        `SELECT payload FROM ${database}.items_secondary WHERE id = ${secondaryAggregateId}`,
+        { keepCursor: false })
+      return [
+        cellText(primary.rows[0]!.cells[0]!),
+        cellText(secondary.rows[0]!.cells[0]!)
+      ]
+    }
+    const aggregateBefore = await readAggregate()
+    wb.stageCell(tab, primaryAggregateRow, 'payload', { kind: 'text', text: 'aggregate-base' })
+    const baseApply = wb.applyTab(tab)
+    await chooseDecision('更新 SQL 预览', 'apply')
+    if (!await baseApply) throw new Error('Aggregate fixture base transaction was not applied')
+    const refreshedPrimaryAggregateRow = tab.page!.rows.find(
+      (item) => cellText(item.cells[0]!) === String(primaryAggregateId)
+    )
+    if (!refreshedPrimaryAggregateRow) throw new Error('Missing refreshed aggregate fixture row')
+    wb.stageCell(tab, refreshedPrimaryAggregateRow, 'payload', { kind: 'text', text: 'aggregate-primary' })
+    wb.stageCell(secondaryTab, secondaryAggregateRow, 'payload', { kind: 'text', text: 'aggregate-secondary' })
+    const aggregateValidate = (verifyUnchanged = false) => async (
+      { message, detail }: { message: string; detail: string }
+    ) => {
+      if (!message.includes('已有事务：1 行未提交。')
+          || !message.includes('本次新增草稿：2 个标签、2 行。')
+          || !detail.includes('aggregate-primary')
+          || !detail.includes('aggregate-secondary')
+          || !detail.includes('items') || !detail.includes('items_secondary')) {
+        throw new Error('Aggregate commit preview omitted the transaction or draft SQL parameters')
+      }
+      if (verifyUnchanged) {
+        const state = await wb.readTransaction(id)
+        if (!state.active || state.pendingAffected !== 1) {
+          throw new Error('Aggregate commit preview changed the existing transaction')
+        }
+        if (JSON.stringify(await readAggregate()) !== JSON.stringify(aggregateBefore)) {
+          throw new Error('Aggregate commit preview changed fixture rows before confirmation')
+        }
+      }
+    }
+    const cancelledAggregate = wb.settleTransaction(id, true)
+    await chooseDecision('提交当前连接', 'cancel', aggregateValidate())
+    const aggregateCancelled = await cancelledAggregate
+    const retainedAfterCancel = aggregateCancelled === false
+      && tab.dirty.size === 1 && secondaryTab.dirty.size === 1
+      && JSON.stringify(await readAggregate()) === JSON.stringify(aggregateBefore)
+    const confirmedAggregate = wb.settleTransaction(id, true)
+    const aggregatePreview = await chooseDecision('提交当前连接', 'commit', aggregateValidate(true))
+    const aggregateCommitted = await confirmedAggregate
+    const aggregateAfter = await readAggregate()
+    checks[check] = retainedAfterCancel && aggregateCommitted === true
+      && tab.dirty.size === 0 && secondaryTab.dirty.size === 0
+      && aggregatePreview.detail.includes('aggregate-primary')
+      && aggregatePreview.detail.includes('aggregate-secondary')
+      && aggregateAfter[0] === 'aggregate-primary' && aggregateAfter[1] === 'aggregate-secondary'
+    await wb.closeTab(secondaryTab)
 
     check = 'mysql_generated_column_export'
     const destinationPath = fixture.exportPath.replace(/export\.csv$/, 'acceptance.sql')
