@@ -34,9 +34,10 @@ const bundle = await build({
       export { default as Compare } from './apps/desktop/src/components/ComparePanel.vue';
       export { default as Grid } from './apps/desktop/src/components/ResultGrid.vue';
       export { default as Transfer } from './apps/desktop/src/components/TransferDialog.vue';
+      export { default as Context } from './apps/desktop/src/components/ConnectionContext.vue';
        export { default as Editor } from './apps/desktop/src/components/SqlEditor.vue';
        export { decision } from './apps/desktop/src/dialogs.ts';
-       export { renderLoaded } from './apps/desktop/src/result-export.ts';
+       export { renderLoaded, fullCell } from './apps/desktop/src/result-export.ts';
       export { default as Ddl } from './apps/desktop/src/components/DdlDialog.vue';
       export { default as MysqlAdmin } from './apps/desktop/src/components/MysqlAdminDialog.vue'`
   },
@@ -48,11 +49,11 @@ const bundle = await build({
     builder.onLoad({ filter: /apps[\\/]desktop[\\/]src[\\/]clipboard\.ts$/ }, () => ({ contents: "export const writeClipboardText = async () => { throw new Error('OS clipboard forbidden') }" }))
     builder.onLoad({ filter: /\.vue$/ }, async ({ path: filename }) => {
       const normalized = filename.replaceAll('\\', '/')
-      if (!/\/(ComparePanel|ResultGrid|DdlDialog|SqlEditor|MysqlAdminDialog|TransferDialog)\.vue$/.test(normalized)) return { contents: 'export default {}' }
+      if (!/\/(ComparePanel|ResultGrid|DdlDialog|SqlEditor|MysqlAdminDialog|TransferDialog|ConnectionContext)\.vue$/.test(normalized)) return { contents: 'export default {}' }
       const { descriptor } = parse(await readFile(filename, 'utf8'), { filename: normalized })
       const script = compileScript(descriptor, { id: normalized, genDefaultAs: '__component' })
       // Compile the actual Compare template, including its SQL emission and preview expressions.
-      const template = normalized.endsWith('/ComparePanel.vue') || normalized.endsWith('/MysqlAdminDialog.vue')
+      const template = normalized.endsWith('/ComparePanel.vue') || normalized.endsWith('/MysqlAdminDialog.vue') || normalized.endsWith('/ConnectionContext.vue')
         ? compileTemplate({ source: descriptor.template.content, filename: normalized, id: normalized, compilerOptions: { bindingMetadata: script.bindings } })
         : null
       assert.deepEqual(template?.errors ?? [], [])
@@ -60,7 +61,7 @@ const bundle = await build({
     })
   } }]
 })
-const { Compare, Grid, Transfer, Ddl, Editor, MysqlAdmin, decision, renderLoaded, useWorkbench, splitSqlScript } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
+const { Compare, Grid, Transfer, Context, Ddl, Editor, MysqlAdmin, decision, renderLoaded, fullCell, useWorkbench, splitSqlScript } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 const renderer = createRenderer({
   insert() {}, remove() {}, patchProp() {},
   createElement: (tag) => ({ tag }), createText: (text) => ({ text }), createComment: (text) => ({ text }),
@@ -526,6 +527,65 @@ await test('transfer_mysql_commit_preview_cancel_keeps_draft_without_starting_ta
   assert.equal(tab.dirty.size, 1)
   assert.equal(wb.locks.has('A'), false)
   assert.equal(calls.some((call) => ['startTransfer', 'applyEdits', 'commitTransaction'].includes(call.method)), false)
+})
+
+function renderedText(node) {
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(renderedText).join(' ')
+  return node && typeof node === 'object' ? renderedText(node.children) : ''
+}
+await test('connection_context_distinguishes_configuration_session_and_unknown', ({ wb }) => {
+  wb.connections.value[0].dialectId = 'mysql'
+  wb.connections.value[0].options = { database: 'configured-db' }
+  wb.sessionContexts.A = { status: 'ready', database: 'session-db', schema: null }
+  const target = reactive(wb.connectionTarget('A'))
+  const view = mount(Context, { target, label: '编辑器目标' })
+  let text = renderedText(view.render())
+  assert.match(text, /配置默认库 · configured-db/)
+  assert.match(text, /最近核实会话库 · session-db/)
+  assert.match(text, /USE 影响同连接全部 SQL 标签/)
+  target.session = { status: 'error', database: null, schema: null }
+  text = renderedText(view.render())
+  assert.match(text, /未确认.*读取失败/)
+  assert.equal(text.includes('session-db'), false)
+  target.session = { status: 'ready', database: null, schema: null }
+  assert.match(renderedText(view.render()), /未选择数据库/)
+})
+await test('connection_context_snapshot_preserves_origin_and_labels_object', ({ wb }) => {
+  wb.connections.value[0].dialectId = 'postgresql'
+  wb.sessionContexts.A = { status: 'ready', database: 'origin-db', schema: 'public' }
+  const target = wb.connectionTarget('A')
+  const view = mount(Context, { target, label: '结果执行目标', snapshot: true, object: 'public.items' })
+  wb.sessionContexts.A = { status: 'ready', database: 'later-db', schema: 'other' }
+  wb.selectConnection('B')
+  const text = renderedText(view.render())
+  assert.match(text, /结果执行目标 · synthetic-A/)
+  assert.match(text, /执行时会话库 · origin-db/)
+  assert.match(text, /当前 schema public/)
+  assert.match(text, /对象 · public.items/)
+  assert.equal(text.includes('later-db'), false)
+})
+
+await test('stale_session_blocks_full_cell_and_source_export_but_keeps_loaded_values', async ({ wb, tab }) => {
+  tab.table = null
+  tab.contextStale = true
+  const before = calls.length
+  await assert.rejects(fullCell(tab, 0, 0, { kind: 'text', text: 'preview', truncated: true }), /会话目标已变化/)
+  assert.deepEqual(await fullCell(tab, 0, 0, { kind: 'text', text: 'loaded' }), { kind: 'text', text: 'loaded' })
+  const transfer = mount(Transfer, { workbench: wb, tab, mode: 'export' }).exposed
+  transfer.path = 'synthetic-only.csv'
+  await transfer.start()
+  assert.match(transfer.error, /会话目标已变化/)
+  assert.equal(calls.length, before)
+})
+await test('full_cell_discards_response_if_session_changes_while_loading', async ({ tab }) => {
+  tab.contextStale = false
+  let resolve
+  methods.fetchCellValue = () => new Promise(done => { resolve = done })
+  const pending = fullCell(tab, 0, 0, { kind: 'text', text: 'preview', truncated: true })
+  tab.contextRevision = (tab.contextRevision ?? 0) + 1
+  resolve({ kind: 'text', text: 'different-database' })
+  await assert.rejects(pending, /读取期间会话目标已变化/)
 })
 
 const failed = results.filter((result) => !result.passed)

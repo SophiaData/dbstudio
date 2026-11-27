@@ -76,9 +76,11 @@ async function start() {
   const id = props.tab.connectionId
   try {
     if (!path.value) throw new Error('请先选择文件')
+    if (props.tab.contextStale) throw new Error('会话目标已变化或未确认，请先刷新结果再导出')
     if (props.workbench.executing.value || props.workbench.locks.has(id) || props.workbench.pendingEditors.size || props.workbench.tabs.value.some((tab) => tab.connectionId === id && tab.busy)) throw new Error('当前连接或编辑器正在处理其它操作')
     if (!(await props.workbench.guardConnection(id, props.mode === 'import' ? '导入 CSV 前处理事务' : '导出前处理事务'))) return
     if (!mounted) return
+    if (props.tab.contextStale) throw new Error('会话目标已变化或未确认，请先刷新结果再导出')
     // The guard releases its own lock. Recheck before synchronously reserving the task lock.
     if (props.workbench.executing.value || props.workbench.locks.has(id) || props.workbench.pendingEditors.size || props.workbench.tabs.value.some((tab) => tab.connectionId === id && tab.busy)) throw new Error('当前连接或编辑器正在处理其它操作')
     props.workbench.locks.add(id)

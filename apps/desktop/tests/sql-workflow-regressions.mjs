@@ -2,7 +2,7 @@
 // Standalone in CI: no pre-existing backups, DOM, native host, database, credentials or user storage.
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -10,7 +10,10 @@ import { build } from 'vite'
 
 process.umask(0o077)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
-const output = mkdtempSync(join(tmpdir(), 'dbstudio-sql-workflow-'))
+const outputParent = process.env.DBSTUDIO_SQL_WORKFLOW_TMP ||
+  (process.platform === 'win32' ? 'E:\\dbstudio-cache\\connection-context-tests' : tmpdir())
+mkdirSync(outputParent, { recursive: true })
+const output = mkdtempSync(join(outputParent, 'dbstudio-sql-workflow-'))
 const source = (name) => join(root, 'apps/desktop/src', name)
 writeFileSync(join(output, 'entry.ts'), `export { useWorkbench } from ${JSON.stringify(source('workbench.ts'))};\nexport { decision } from ${JSON.stringify(source('dialogs.ts'))};\n`, { flag: 'wx', mode: 0o600 })
 writeFileSync(join(output, 'backend.ts'), `
@@ -40,6 +43,26 @@ const { useWorkbench, decision } = await import(pathToFileURL(join(output, 'bund
 const text = (value) => ({ kind: 'text', text: value })
 const number = (value) => ({ kind: 'number', value })
 const originalError = () => new Error('SYNTHETIC_SQL_FAILED')
+function sessionProbeKind(sql) {
+  const normalized = sql.replace(/\s+/g, ' ').trim().toUpperCase()
+  if (normalized === 'SELECT DATABASE() AS DBSTUDIO_DATABASE') return 'mysql'
+  if (normalized === 'SELECT CURRENT_DATABASE() AS DBSTUDIO_DATABASE, CURRENT_SCHEMA() AS DBSTUDIO_SCHEMA') return 'postgresql'
+  return ''
+}
+function sessionProbeResult(sql, database, schema) {
+  const isMysql = sessionProbeKind(sql) === 'mysql'
+  const columns = isMysql
+    ? [{ name: 'dbstudio_database', type: 'text' }]
+    : [{ name: 'dbstudio_database', type: 'text' }, { name: 'dbstudio_schema', type: 'text' }]
+  const cells = [
+    database === null ? { kind: 'null' } : text(database),
+    ...(isMysql ? [] : [schema === null ? { kind: 'null' } : text(schema)])
+  ]
+  return {
+    columns, rows: [{ index: 0, cells }], offset: 0, returned: 1, hasMore: false,
+    cursorId: '', executedSql: sql, elapsedMs: 0
+  }
+}
 function deferred() {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -50,6 +73,7 @@ function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) 
   const wb = useWorkbench()
   wb.connections.value = ['a', 'b'].map((id) => ({
     id, name: `synthetic-${id}`, dialectId: 'postgresql', connected: true,
+    options: { database: id === 'a' ? 'configured_a' : 'configured_b' },
     capabilities: { supportsInlineEdit: true, supportsCancel: true }
   }))
   wb.dialects.value = [{ id: 'postgresql', quoting: { open: '"', close: '"', escape: 'double' } }]
@@ -57,7 +81,7 @@ function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) 
   const values = new Map()
   const calls = {
     state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [],
-    previews: [], applyArgs: [], commits: [], rollbacks: []
+    sessionQueries: [], previews: [], applyArgs: [], commits: [], rollbacks: []
   }
   let sequence = 0
   const page = (start, limit = 200) => {
@@ -87,10 +111,27 @@ function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) 
   const active = wb.tabs.value[0]
   wb.activateTab(active)
   const backend = {
+    sessionValues: {
+      a: { database: 'synthetic_a', schema: 'public_a' },
+      b: { database: 'synthetic_b', schema: 'public_b' }
+    },
     async recordSqlHistory() { return {} },
     async transactionState(node) { calls.state.push(node); return { active: values.size > 0, pendingAffected: values.size } },
     async closeCursor(id) { calls.closed.push(id) },
     async runQuery(node, sql, options) {
+      const probeKind = sessionProbeKind(sql)
+      if (probeKind) {
+        calls.sessionQueries.push({ node, sql, options: { ...options } })
+        if (backend.sessionProbe) return backend.sessionProbe(node, sql, options)
+        const id = node.startsWith('connection:') ? node.slice(11).split('|')[0] : node
+        const error = backend.sessionErrors?.[id]
+        if (error) throw error
+        const current = backend.sessionValues?.[id] ?? {
+          database: id === 'a' ? 'synthetic_a' : 'synthetic_b',
+          schema: id === 'a' ? 'public_a' : 'public_b'
+        }
+        return sessionProbeResult(sql, current.database ?? null, current.schema ?? null)
+      }
       calls.queries.push({ node, sql, options: { ...options } })
       const result = page(options?.offset ?? 0, options?.limit ?? 200)
       result.cursorId = result.cursorId.replace('connection:a|', `${node}|`)
@@ -148,6 +189,7 @@ function holdBackend(backend, method) {
   const response = deferred()
   const held = { args: null, resolve: response.resolve, reject: response.reject }
   backend[method] = (...args) => {
+    if (method === 'runQuery' && sessionProbeKind(args[1])) return original(...args)
     held.args = args
     const result = original(...args)
     return response.promise.then(() => result)
@@ -181,8 +223,12 @@ function assertIdle(wb, tab) {
 function assertNoBackendWork(calls) {
   assert.deepEqual(calls, {
     state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [],
-    previews: [], applyArgs: [], commits: [], rollbacks: []
+    sessionQueries: [], previews: [], applyArgs: [], commits: [], rollbacks: []
   })
+}
+function sessionContext(wb, id) {
+  const contexts = wb.sessionContexts?.value ?? wb.sessionContexts
+  return contexts?.[id]
 }
 function useMysql(wb) {
   for (const connection of wb.connections.value) connection.dialectId = 'mysql'
@@ -266,6 +312,389 @@ async function check(name, action) {
     if (decision.value) decision.value.settle('cancel')
   }
 }
+
+await check('session_context_probe_is_readonly_per_connection_and_returns_an_isolated_target', async () => {
+  const { wb, backend, calls } = fixture()
+  let historyWrites = 0
+  const tabCount = wb.tabs.value.length
+  const editorCount = wb.editorTabs.value.length
+  backend.recordSqlHistory = async () => { historyWrites++ }
+  await wb.refreshSessionContext('a')
+  await wb.refreshSessionContext('b')
+  assert.deepEqual(calls.sessionQueries, [
+    {
+      node: 'connection:a',
+      sql: 'SELECT current_database() AS dbstudio_database, current_schema() AS dbstudio_schema',
+      options: { limit: 1, keepCursor: false }
+    },
+    {
+      node: 'connection:b',
+      sql: 'SELECT current_database() AS dbstudio_database, current_schema() AS dbstudio_schema',
+      options: { limit: 1, keepCursor: false }
+    }
+  ])
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'ready', database: 'synthetic_a', schema: 'public_a' })
+  assert.deepEqual(sessionContext(wb, 'b'), { status: 'ready', database: 'synthetic_b', schema: 'public_b' })
+  assert.deepEqual(wb.connectionTarget('a'), {
+    connectionId: 'a', connectionName: 'synthetic-a', dialectId: 'postgresql',
+    configuredDatabase: 'configured_a', connected: true,
+    session: { status: 'ready', database: 'synthetic_a', schema: 'public_a' }
+  })
+  const target = wb.connectionTarget('a')
+  target.session.database = 'mutated-snapshot'
+  assert.equal(sessionContext(wb, 'a').database, 'synthetic_a')
+  assert.equal(calls.queries.length, 0)
+  assert.equal(historyWrites, 0)
+  assert.equal(wb.tabs.value.length, tabCount)
+  assert.equal(wb.editorTabs.value.length, editorCount)
+})
+
+await check('mysql_and_postgres_use_their_own_session_probe_and_unsupported_database_is_not_queried', async () => {
+  const { wb, backend, calls } = fixture()
+  useMysql(wb)
+  await wb.refreshSessionContext('a')
+  assert.equal(calls.sessionQueries[0].sql, 'SELECT DATABASE() AS dbstudio_database')
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'ready', database: 'synthetic_a', schema: null })
+
+  wb.connections.value[1].dialectId = 'sqlite'
+  await wb.refreshSessionContext('b')
+  assert.deepEqual(sessionContext(wb, 'b'), { status: 'unknown', database: null, schema: null })
+  assert.deepEqual(wb.connectionTarget('b'), {
+    connectionId: 'b', connectionName: 'synthetic-b', dialectId: 'sqlite',
+    configuredDatabase: 'configured_b', connected: true,
+    session: { status: 'unknown', database: null, schema: null }
+  })
+  assert.equal(calls.sessionQueries.length, 1)
+  assert.equal(calls.queries.length, 0)
+  backend.sessionValues.b = { database: 'must_not_be_read', schema: 'must_not_be_read' }
+  assert.equal(sessionContext(wb, 'b').status, 'unknown')
+})
+
+await check('nullable_session_values_are_ready_and_distinct_from_unknown', async () => {
+  const { wb, backend } = fixture()
+  backend.sessionProbe = async (_node, sql) => sessionProbeResult(sql, null, null)
+  await wb.refreshSessionContext('a')
+  assert.deepEqual(sessionContext(wb, 'a'), {
+    status: 'ready', database: null, schema: null
+  })
+  assert.notDeepEqual(sessionContext(wb, 'a'), {
+    status: 'unknown', database: null, schema: null
+  })
+
+  useMysql(wb)
+  await wb.refreshSessionContext('a')
+  assert.deepEqual(sessionContext(wb, 'a'), {
+    status: 'ready', database: null, schema: null
+  })
+  assert.deepEqual(wb.connectionTarget('a').session, sessionContext(wb, 'a'))
+})
+
+const invalidSessionProbes = [
+  ['truncated_database', (result) => { result.rows[0].cells[0] = { kind: 'text', text: 'x'.repeat(5000), truncated: true } }],
+  ['multiple_rows', (result) => { result.rows.push({ ...result.rows[0], index: 1 }) }]
+]
+for (const [name, mutate] of invalidSessionProbes) {
+  await check(`invalid_session_probe_${name}_never_remains_ready`, async () => {
+    const { wb, backend } = fixture()
+    await wb.refreshSessionContext('a')
+    assert.equal(sessionContext(wb, 'a').status, 'ready')
+    backend.sessionProbe = async (_node, sql) => {
+      const result = sessionProbeResult(sql, 'unexpected_database', 'unexpected_schema')
+      mutate(result)
+      return result
+    }
+    await wb.refreshSessionContext('a')
+    assert.deepEqual(sessionContext(wb, 'a'), {
+      status: 'error', database: null, schema: null, error: '会话信息返回格式不完整'
+    }, name)
+    assert.deepEqual(wb.connectionTarget('a').session, sessionContext(wb, 'a'))
+  })
+}
+
+await check('each_script_statement_snapshots_its_own_target_and_use_keeps_old_results_immutable', async () => {
+  const { wb, backend, calls, page } = fixture()
+  const executions = []
+  backend.executeStatement = async (node, sql, options) => {
+    executions.push({ node, sql, options: { ...options } })
+    if (sql === 'USE db_two') backend.sessionValues.a = { database: 'db_two', schema: 'next_schema' }
+    return {
+      kind: 'rows',
+      result: {
+        ...page(0, 1),
+        cursorId: `connection:a|cursor:statement-${executions.length}`,
+        executedSql: sql
+      }
+    }
+  }
+  await wb.executeScript('SELECT 0 AS before_use')
+  const initial = wb.tabs.value.at(-1)
+  assert.equal(initial.executionContext.session.database, 'synthetic_a')
+  await wb.executeScript('SELECT 1 AS first;\nUSE db_two;\nSELECT 3 AS after_use')
+  const statements = wb.tabs.value.slice(wb.tabs.value.indexOf(initial) + 1)
+  assert.deepEqual(statements.map((tab) => [tab.sql, tab.executionContext.connectionId, tab.executionContext.session.database]), [
+    ['SELECT 1 AS first', 'a', 'synthetic_a'],
+    ['USE db_two', 'a', 'synthetic_a'],
+    ['SELECT 3 AS after_use', 'a', 'db_two']
+  ])
+  assert.deepEqual(statements.map((tab) => tab.executionContext.session.schema), ['public_a', 'public_a', 'next_schema'])
+  assert.equal(initial.executionContext.session.database, 'synthetic_a')
+  assert.equal(initial.executionContext.session.schema, 'public_a')
+  assert.equal(wb.connectionTarget('a').session.database, 'db_two')
+  assert.equal(wb.connectionTarget('b').session.status, 'unknown')
+  assert.equal(executions.length, 4)
+  assert.equal(calls.queries.length, 0)
+  assert.equal(initial.contextStale, true)
+  const fetchesBefore = calls.fetches.length
+  await assert.rejects(wb.pageTab(initial, 1), /会话目标已变化/)
+  await assert.rejects(wb.changePageSize(initial, 100), /会话目标已变化/)
+  await assert.rejects(wb.transformTab(initial), /会话目标已变化/)
+  assert.equal(calls.fetches.length, fetchesBefore)
+  const pagesBeforeSettlement = calls.queries.length
+  await wb.settleTransaction('a', true)
+  assert.equal(initial.executionContext.session.database, 'synthetic_a')
+  assert.equal(initial.contextStale, true)
+  assert.ok(calls.queries.length >= pagesBeforeSettlement)
+  await wb.reloadTab(initial)
+  assert.equal(initial.executionContext.session.database, 'db_two')
+  assert.equal(initial.contextStale, false)
+})
+
+await check('same_named_objects_use_connection_targets_and_successful_reload_updates_only_its_snapshot', async () => {
+  const { wb, backend, calls } = fixture()
+  backend.describeTable = async () => ({
+    hasUniqueKey: true,
+    columns: [{ name: 'id', primaryKeyOrdinal: 1 }, { name: 'body', primaryKeyOrdinal: null }]
+  })
+  backend.tableSelectSql = async () => 'SELECT id, body FROM same_named'
+  await wb.openTable({ id: 'connection:a|table:public.same_named', name: 'same_named', kind: 'table' })
+  const aTab = wb.tabs.value.at(-1)
+  await wb.openTable({ id: 'connection:b|table:public.same_named', name: 'same_named', kind: 'table' })
+  const bTab = wb.tabs.value.at(-1)
+  assert.equal(aTab.table.name, bTab.table.name)
+  assert.deepEqual([aTab.connectionId, aTab.executionContext.connectionId, aTab.executionContext.session.database], ['a', 'a', 'synthetic_a'])
+  assert.deepEqual([bTab.connectionId, bTab.executionContext.connectionId, bTab.executionContext.session.database], ['b', 'b', 'synthetic_b'])
+  const bBefore = { ...bTab.executionContext, session: { ...bTab.executionContext.session } }
+  backend.sessionValues.a = { database: 'reloaded_a', schema: 'reloaded_schema' }
+  await wb.reloadTab(aTab)
+  assert.deepEqual(aTab.executionContext.session, { status: 'ready', database: 'reloaded_a', schema: 'reloaded_schema' })
+  assert.deepEqual(bTab.executionContext, bBefore)
+
+  const lastContext = { ...aTab.executionContext, session: { ...aTab.executionContext.session } }
+  const originalQuery = backend.runQuery
+  backend.runQuery = async (node, sql, options) => {
+    if (sessionProbeKind(sql)) return originalQuery(node, sql, options)
+    throw new Error('SYNTHETIC_RELOAD_FAILED')
+  }
+  await assert.rejects(wb.reloadTab(aTab), /SYNTHETIC_RELOAD_FAILED/)
+  assert.deepEqual(aTab.executionContext, lastContext)
+  assert.equal(calls.queries.filter(({ sql }) => sql === 'SELECT id, body FROM same_named').length, 3)
+})
+
+await check('probe_failure_marks_error_without_turning_a_successful_sql_into_failure', async () => {
+  const { wb, backend } = fixture()
+  backend.sessionErrors = { a: new Error('SYNTHETIC_PROBE_FAILED') }
+  const executed = []
+  backend.executeStatement = async (node, sql) => {
+    executed.push([node, sql])
+    return { kind: 'affected', affected: 1, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  await wb.executeScript('UPDATE synthetic SET body=1')
+  assert.deepEqual(executed, [['connection:a', 'UPDATE synthetic SET body=1']])
+  assert.equal(wb.tabs.value.at(-1).executionFailed, undefined)
+  assert.deepEqual(sessionContext(wb, 'a'), {
+    status: 'error', database: null, schema: null, error: 'SYNTHETIC_PROBE_FAILED'
+  })
+  assert.equal(wb.tabs.value.at(-1).executionContext.session.status, 'error')
+})
+
+await check('ready_target_rejects_when_probe_cannot_confirm_and_a_new_capture_can_run', async () => {
+  const { wb, backend } = fixture()
+  await wb.refreshSessionContext('a')
+  const stale = wb.captureEditorExecution('SELECT stale_target')
+  assert.equal(stale.target.session.status, 'ready')
+  backend.sessionErrors = { a: new Error('SYNTHETIC_PROBE_FAILED') }
+  const executed = []
+  backend.executeStatement = async (_node, sql) => {
+    executed.push(sql)
+    return { kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  const tabCount = wb.tabs.value.length
+  await assert.rejects(
+    wb.executeEditorRequest(stale),
+    /会话库已变化或无法确认，请核对执行目标后重新执行/
+  )
+  assert.equal(wb.tabs.value.length, tabCount)
+  assert.deepEqual(executed, [])
+  assert.equal(sessionContext(wb, 'a').status, 'error')
+
+  delete backend.sessionErrors.a
+  const fresh = wb.captureEditorExecution('SELECT fresh_target')
+  assert.equal(fresh.target.session.status, 'error')
+  await wb.executeEditorRequest(fresh)
+  assert.deepEqual(executed, ['SELECT fresh_target'])
+})
+
+await check('cancel_during_preflight_probe_prevents_user_sql_and_clears_execution_state', async () => {
+  const { wb, backend, calls } = fixture()
+  const probeGate = deferred()
+  const cancellations = []
+  const statements = []
+  backend.sessionProbe = async (_node, sql) => {
+    await probeGate.promise
+    return sessionProbeResult(sql, 'synthetic_a', 'public_a')
+  }
+  backend.executeStatement = async (_node, sql) => {
+    statements.push(sql)
+    return { kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  backend.cancelQuery = async (...args) => {
+    cancellations.push(args)
+    return true
+  }
+  const tabCount = wb.tabs.value.length
+  const pending = wb.executeScript('SELECT must_not_execute')
+  for (let turn = 0; turn < 100 && calls.sessionQueries.length < 1; turn++) await Promise.resolve()
+  assert.equal(calls.sessionQueries.length, 1)
+  assert.equal(typeof calls.sessionQueries[0].options.signalId, 'string')
+  assert.equal(wb.executing.value, true)
+  await wb.cancelExecution()
+  assert.equal(cancellations.length, 1)
+  assert.equal(cancellations[0][0], 'connection:a')
+  assert.equal(cancellations[0][1], calls.sessionQueries[0].options.signalId)
+  assert.equal(wb.status.value, '已请求取消执行')
+  probeGate.resolve()
+  await assert.rejects(pending, /已取消执行，未发送后续 SQL/)
+  assert.deepEqual(statements, [])
+  assert.equal(wb.tabs.value.length, tabCount)
+  assert.equal(wb.executing.value, false)
+  assert.equal(wb.executionConnectionId.value, '')
+  assert.equal(wb.locks.has('a'), false)
+})
+
+await check('cancel_during_post_statement_probe_rejects_the_next_statement', async () => {
+  const { wb, backend, calls } = fixture()
+  const betweenStatements = deferred()
+  const cancellations = []
+  const statements = []
+  let probes = 0
+  backend.sessionProbe = async (_node, sql) => {
+    probes++
+    if (probes === 2) await betweenStatements.promise
+    return sessionProbeResult(sql, 'synthetic_a', 'public_a')
+  }
+  backend.executeStatement = async (_node, sql) => {
+    statements.push(sql)
+    return { kind: 'affected', affected: 1, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  backend.cancelQuery = async (...args) => {
+    cancellations.push(args)
+    return true
+  }
+  const pending = wb.executeScript('SELECT 1 AS first; SELECT 2 AS second')
+  for (let turn = 0; turn < 100 && calls.sessionQueries.length < 2; turn++) await Promise.resolve()
+  assert.equal(calls.sessionQueries.length, 2)
+  assert.deepEqual(statements, ['SELECT 1 AS first'])
+  await wb.cancelExecution()
+  assert.equal(cancellations.length, 1)
+  assert.equal(cancellations[0][0], 'connection:a')
+  assert.equal(cancellations[0][1], calls.sessionQueries[1].options.signalId)
+  assert.equal(wb.status.value, '已请求取消执行')
+  betweenStatements.resolve()
+  await assert.rejects(pending, /已取消执行，未发送后续 SQL/)
+  assert.deepEqual(statements, ['SELECT 1 AS first'])
+  assert.equal(wb.executing.value, false)
+  assert.equal(wb.executionConnectionId.value, '')
+  assert.equal(wb.locks.has('a'), false)
+})
+
+await check('session_version_rejects_old_parameter_confirmation_after_another_sql_on_the_same_connection', async () => {
+  const { wb, backend } = fixture()
+  const pending = wb.captureEditorExecution('SELECT ? AS old_parameter')
+  const executed = []
+  backend.executeStatement = async (node, sql) => {
+    executed.push([node, sql])
+    return { kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  await wb.executeScript('SELECT 200 AS newer_sql')
+  await assert.rejects(
+    wb.executeEditorRequest(pending, [{ statementIndex: 0, name: '?1', value: 'late-value' }]),
+    /同连接已执行其他 SQL，会话可能已变化，请重新发起执行/
+  )
+  assert.deepEqual(executed, [['connection:a', 'SELECT 200 AS newer_sql']])
+})
+
+await check('parameter_results_and_targets_stay_with_their_originating_connections', async () => {
+  const { wb, backend } = fixture()
+  wb.connections.value[0].dialectId = 'mysql'
+  wb.dialects.value.push({ id: 'mysql', quoting: { open: '`', close: '`', escape: 'double' } })
+  wb.sql.value = 'SELECT ? AS from_a'
+  const requestA = wb.captureEditorExecution(wb.sql.value)
+  const editorB = wb.openEditorTab('b', 'SELECT $1 AS from_b')
+  const requestB = wb.captureEditorExecution(wb.sql.value)
+  const calls = []
+  backend.executeStatement = async (node, sql, options) => {
+    calls.push({ node, sql, parameters: options.parameters })
+    return { kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  await wb.executeEditorRequest(requestA, [{ statementIndex: 0, name: '?1', value: 'value-a' }])
+  await wb.executeEditorRequest(requestB, [{ statementIndex: 0, name: '$1', value: 'value-b' }])
+  assert.deepEqual(calls, [
+    { node: 'connection:a', sql: 'SELECT ? AS from_a', parameters: [{ name: '?1', value: 'value-a' }] },
+    { node: 'connection:b', sql: 'SELECT $1 AS from_b', parameters: [{ name: '$1', value: 'value-b' }] }
+  ])
+  const resultA = wb.tabs.value.find((tab) => tab.editorTabId === requestA.editorTabId && tab.sql === 'SELECT ? AS from_a')
+  const resultB = wb.tabs.value.find((tab) => tab.editorTabId === editorB && tab.sql === 'SELECT $1 AS from_b')
+  assert.deepEqual(resultA.parameters, [{ name: '?1', value: 'value-a' }])
+  assert.deepEqual(resultB.parameters, [{ name: '$1', value: 'value-b' }])
+  assert.equal(resultA.executionContext.connectionId, 'a')
+  assert.equal(resultB.executionContext.connectionId, 'b')
+  assert.equal(resultA.executionContext.session.database, 'synthetic_a')
+  assert.equal(resultB.executionContext.session.database, 'synthetic_b')
+})
+
+await check('late_session_probe_is_discarded_after_connection_loss', async () => {
+  const { wb, backend, calls } = fixture()
+  const gate = deferred()
+  backend.sessionProbe = async (_node, sql) => {
+    await gate.promise
+    return sessionProbeResult(sql, 'stale_database', 'stale_schema')
+  }
+  const pending = wb.refreshSessionContext('a')
+  for (let turn = 0; turn < 100 && calls.sessionQueries.length < 1; turn++) await Promise.resolve()
+  assert.equal(calls.sessionQueries.length, 1)
+  assert.equal(sessionContext(wb, 'a').status, 'loading')
+  const disconnected = wb.connections.value.map((connection) => connection.id === 'a'
+    ? { ...connection, connected: false }
+    : connection)
+  backend.listConnections = async () => disconnected
+  backend.listChildren = async () => []
+  await wb.refreshConnections()
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'unknown', database: null, schema: null })
+  gate.resolve()
+  await pending
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'unknown', database: null, schema: null })
+  assert.equal(wb.connectionTarget('a').connected, false)
+  assert.deepEqual(wb.connectionTarget('a').session, { status: 'unknown', database: null, schema: null })
+})
+
+await check('disconnect_and_reconnect_forget_ready_context', async () => {
+  const { wb, backend } = fixture()
+  await wb.refreshSessionContext('a')
+  assert.equal(sessionContext(wb, 'a').status, 'ready')
+  const connected = { a: true, b: true }
+  backend.disconnectConnection = async (id) => { connected[id] = false }
+  backend.connectConnection = async (id) => { connected[id] = true }
+  backend.listConnections = async () => wb.connections.value.map((connection) => ({
+    ...connection, connected: connected[connection.id]
+  }))
+  backend.listChildren = async () => []
+  await wb.disconnect('a')
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'unknown', database: null, schema: null })
+  assert.equal(wb.connectionTarget('a').connected, false)
+  await wb.connect('a')
+  assert.deepEqual(sessionContext(wb, 'a'), { status: 'unknown', database: null, schema: null })
+  assert.equal(wb.connectionTarget('a').connected, true)
+})
 
 await check('sql_editor_tabs_restore_independent_drafts_on_the_same_connection', () => {
   const { wb } = fixture()
@@ -464,9 +893,15 @@ for (const cancelled of [false, true]) {
     const { wb, backend, page } = fixture()
     const execution = deferred()
     const cancellation = []
-    backend.executeStatement = () => execution.promise
+    let started = false
+    backend.executeStatement = () => {
+      started = true
+      return execution.promise
+    }
     backend.cancelQuery = async (...args) => { cancellation.push(args); return cancelled }
     const pending = wb.executeScript('SELECT 1')
+    for (let turn = 0; turn < 100 && !started; turn++) await Promise.resolve()
+    assert.equal(started, true, 'preflight must finish and the user SQL must start before cancellation')
     wb.selectConnection('b')
     try {
       await wb.cancelExecution()
