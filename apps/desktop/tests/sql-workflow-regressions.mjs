@@ -10,8 +10,7 @@ import { build } from 'vite'
 
 process.umask(0o077)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
-const outputParent = process.env.DBSTUDIO_SQL_WORKFLOW_TMP ||
-  (process.platform === 'win32' ? 'E:\\dbstudio-cache\\connection-context-tests' : tmpdir())
+const outputParent = process.env.DBSTUDIO_SQL_WORKFLOW_TMP || tmpdir()
 mkdirSync(outputParent, { recursive: true })
 const output = mkdtempSync(join(outputParent, 'dbstudio-sql-workflow-'))
 const source = (name) => join(root, 'apps/desktop/src', name)
