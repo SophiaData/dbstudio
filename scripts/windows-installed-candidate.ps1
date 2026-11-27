@@ -220,6 +220,14 @@ function Select-MySql($Window) {
 }
 
 function Invoke-ControlDoubleClick($App, $Control) {
+    if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'GRID_WINDOW_NOT_FOCUSED' }
+    # Chromium may expose a text child; focus its keyboard-accessible cell so
+    # the application's own focus handler scrolls it clear of sticky headers.
+    $focusTarget = $Control
+    for ($depth = 0; $focusTarget -and $depth -lt 6; $depth++) {
+        if ($focusTarget.Current.IsKeyboardFocusable) { $focusTarget.SetFocus(); break }
+        $focusTarget = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($focusTarget)
+    }
     $deadline = [datetime]::UtcNow.AddSeconds(3)
     do {
         $point = [Windows.Point]::new(0, 0)
@@ -234,6 +242,9 @@ function Invoke-ControlDoubleClick($App, $Control) {
         if ($target.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) { $scroll.ScrollIntoView() }
         Start-Sleep -Milliseconds 100
     } while ([datetime]::UtcNow -lt $deadline)
+    $bounds = $Control.Current.BoundingRectangle
+    $report.controlClickProbe = @{ type = $Control.Current.ControlType.ProgrammaticName;
+        offscreen = $Control.Current.IsOffscreen; x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height }
     Stop-Acceptance 'UI_CONTROL_NOT_CLICKABLE'
 }
 
