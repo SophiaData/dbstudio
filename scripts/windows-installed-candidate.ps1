@@ -80,7 +80,7 @@ function Close-App($App) {
     if ($App.Process.ExitCode -ne 0) { Stop-Acceptance 'APP_EXIT_NONZERO' }
 }
 
-function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel, [switch]$AllowOffscreen) {
+function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [switch]$FieldLabel, [switch]$AllowOffscreen, [int]$TimeoutSeconds = 25) {
     $typeConditions = [Windows.Automation.Condition[]]@(
         foreach ($controlType in @($Type)) {
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, $controlType)
@@ -92,7 +92,7 @@ function Find-Control($Scope, $Type, [string]$Name, [switch]$ContainsName, [swit
         $condition = [Windows.Automation.AndCondition]::new($condition,
             [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name))
     }
-    $deadline = [datetime]::UtcNow.AddSeconds(25)
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         try {
             foreach ($control in $Scope.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
@@ -135,6 +135,16 @@ function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
     Stop-Acceptance 'EDITOR_TAB_NOT_SELECTED'
 }
 
+function Find-FocusedControl($App, $Type, [string]$Name) {
+    $control = Find-Control $App.Window $Type $Name -AllowOffscreen
+    if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'APP_WINDOW_NOT_FOCUSED' }
+    $scroll = $null
+    if ($control.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) { $scroll.ScrollIntoView() }
+    $control.SetFocus()
+    # Still require visibility after the native focus/scroll operation.
+    return Find-Control $App.Window $Type $Name
+}
+
 function Set-EditText($Edit, [string]$Value) {
     $pattern = $null
     if ($Edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {
@@ -171,7 +181,7 @@ function Wait-SqlEditorText($Editor, [string]$Expected) {
 
 function Set-SqlEditorText($App, [string]$Value) {
     $types = @([Windows.Automation.ControlType]::Edit, [Windows.Automation.ControlType]::Document)
-    $editor = Find-Control $App.Window $types 'SQL 编辑器'
+    $editor = Find-FocusedControl $App $types 'SQL 编辑器'
     if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'SQL_EDITOR_WINDOW_NOT_FOCUSED' }
     $script:action = 'focus_sql_editor'
     $editor.SetFocus()
@@ -220,6 +230,14 @@ function Select-MySql($Window) {
 }
 
 function Invoke-ControlDoubleClick($App, $Control) {
+    if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'GRID_WINDOW_NOT_FOCUSED' }
+    # Chromium may expose a text child; focus its keyboard-accessible cell so
+    # the application's own focus handler scrolls it clear of sticky headers.
+    $focusTarget = $Control
+    for ($depth = 0; $focusTarget -and $depth -lt 6; $depth++) {
+        if ($focusTarget.Current.IsKeyboardFocusable) { $focusTarget.SetFocus(); break }
+        $focusTarget = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($focusTarget)
+    }
     $deadline = [datetime]::UtcNow.AddSeconds(3)
     do {
         $point = [Windows.Point]::new(0, 0)
@@ -234,6 +252,9 @@ function Invoke-ControlDoubleClick($App, $Control) {
         if ($target.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) { $scroll.ScrollIntoView() }
         Start-Sleep -Milliseconds 100
     } while ([datetime]::UtcNow -lt $deadline)
+    $bounds = $Control.Current.BoundingRectangle
+    $report.controlClickProbe = @{ type = $Control.Current.ControlType.ProgrammaticName;
+        offscreen = $Control.Current.IsOffscreen; x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height }
     Stop-Acceptance 'UI_CONTROL_NOT_CLICKABLE'
 }
 
@@ -434,6 +455,9 @@ public static class AcceptanceDesktop {
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct GuiThreadInfo {
         public uint Size, Flags;
@@ -541,6 +565,26 @@ public static class AcceptanceDesktop {
     $env:DBSTUDIO_NATIVE_SMOKE_ROOT = $null
     $app = Open-App $binary
 
+    # Hosted desktops can be smaller than the app's default outer window.
+    # Keep a normal window inside the work area; do not maximize or bypass UI clicks.
+    $workArea = [Windows.Forms.Screen]::FromHandle($app.Process.MainWindowHandle).WorkingArea
+    $windowBounds = $app.Window.Current.BoundingRectangle
+    if ($workArea.Width -lt 820 -or $workArea.Height -lt 520 -or $windowBounds.Width -le 0 -or $windowBounds.Height -le 0) {
+        Stop-Acceptance 'BLOCKED_DESKTOP_TOO_SMALL'
+    }
+    $windowWidth = [Math]::Min([int]$windowBounds.Width, $workArea.Width)
+    $windowHeight = [Math]::Min([int]$windowBounds.Height, $workArea.Height)
+    if (-not [AcceptanceDesktop]::SetWindowPos($app.Process.MainWindowHandle, [IntPtr]::Zero,
+        $workArea.X, $workArea.Y, $windowWidth, $windowHeight, 0x0014)) { Stop-Acceptance 'WINDOW_FIT_FAILED' }
+    $actualBounds = $app.Window.Current.BoundingRectangle
+    $report.windowSize = @{ width = $actualBounds.Width; height = $actualBounds.Height }
+    if (-not [AcceptanceDesktop]::FocusDialog($app.Process.MainWindowHandle)) { Stop-Acceptance 'APP_WINDOW_NOT_FOCUSED' }
+    $script:action = 'wait_application_ready'
+    $startup = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $null = Find-Control $app.Window ([Windows.Automation.ControlType]::Button) '新建连接' -ContainsName -AllowOffscreen -TimeoutSeconds 90
+    } finally { $startup.Stop(); $report.readyWaitMs = $startup.ElapsedMilliseconds }
+    $report.checks.applicationReady = $true
     $script:action = 'open_connection_form'
     Invoke-Button $app.Window '新建连接' -ContainsName
     $script:action = 'select_mysql'
@@ -588,8 +632,9 @@ public static class AcceptanceDesktop {
     $script:action = 'failed_sql_navigation'
     $failureSql = "SELECT 1;`nSELECT dbstudio_missing_column;`nSELECT 3;"
     $sqlEditor = Set-SqlEditorText $app $failureSql
+    $script:action = 'failed_sql_navigation'
     [Windows.Forms.SendKeys]::SendWait('+{ENTER}')
-    $locate = Find-Control $app.Window $button '定位执行语句'
+    $locate = Find-FocusedControl $app $button '定位执行语句'
     Invoke-Button $app.Window '定位执行语句'
     $pattern = $sqlEditor.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern)
     $deadline = [datetime]::UtcNow.AddSeconds(10)
@@ -617,7 +662,7 @@ public static class AcceptanceDesktop {
     $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) 'items' -ContainsName
     Invoke-ControlDoubleClick $app $table
     # A table result, unlike the earlier SQL query, exposes the import action.
-    $null = Find-Control $app.Window $button '导入 CSV…'
+    $null = Find-FocusedControl $app $button '导入 CSV…'
 
     $script:action = 'edit_and_preview'
     Edit-GridValue $app 'row-1' 'candidate-committed'
@@ -628,6 +673,7 @@ public static class AcceptanceDesktop {
         Stop-Acceptance 'PREVIEW_WROTE_DATA'
     }
     Invoke-Button $app.Window '应用修改'
+    $null = Find-FocusedControl $app $button '提交'
     $null = Find-Control $app.Window $cell '未提交 · 1 行'
     if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'row-1') {
         Stop-Acceptance 'UNCOMMITTED_DATA_VISIBLE'
@@ -643,6 +689,27 @@ public static class AcceptanceDesktop {
         Stop-Acceptance 'COMMIT_READBACK_MISMATCH'
     }
     $report.checks.editPreviewAndCommit = $true
+
+    $script:action = 'edit_and_rollback'
+    Edit-GridValue $app 'candidate-committed' 'candidate-rolled-back'
+    Invoke-Button $app.Window '应用修改 (1)'
+    $null = Find-Control $app.Window $cell '更新 SQL 预览' -AllowOffscreen
+    Invoke-Button $app.Window '应用修改'
+    $null = Find-FocusedControl $app $button '回滚'
+    $null = Find-Control $app.Window $cell '未提交 · 1 行'
+    $null = Find-Control $app.Window $cell 'candidate-rolled-back' -AllowOffscreen
+    if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
+        Stop-Acceptance 'ROLLBACK_UNCOMMITTED_DATA_VISIBLE'
+    }
+    Invoke-Button $app.Window '回滚'
+    $null = Find-Control $app.Window $cell '回滚当前连接' -AllowOffscreen
+    Invoke-Button $app.Window '确认'
+    $null = Find-Control $app.Window $cell '已回滚当前连接事务' -AllowOffscreen
+    $null = Find-Control $app.Window $cell 'candidate-committed' -AllowOffscreen
+    if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
+        Stop-Acceptance 'ROLLBACK_READBACK_MISMATCH'
+    }
+    $report.checks.editRollbackAndReadback = $true
 
     $script:action = 'export_csv'
     $csvPath = Join-Path $root 'candidate.csv'
@@ -673,6 +740,23 @@ public static class AcceptanceDesktop {
     $report.status = 'passed'
     Write-Output 'Installed Windows candidate: MySQL query, update preview, commit and 405-row CSV verified.'
 } finally {
+    if ($report.status -ne 'passed') {
+        try {
+            $failedApp = Get-Variable -Name app -ValueOnly -ErrorAction SilentlyContinue
+            if ($failedApp -and -not $failedApp.Process.HasExited) {
+                Add-Type -AssemblyName System.Drawing
+                $bounds = $failedApp.Window.Current.BoundingRectangle
+                $screen = [Windows.Forms.SystemInformation]::VirtualScreen
+                $region = [Drawing.Rectangle]::Intersect($screen, [Drawing.Rectangle]::new([int]$bounds.X, [int]$bounds.Y, [int]$bounds.Width, [int]$bounds.Height))
+                $bitmap = [Drawing.Bitmap]::new($region.Width, $region.Height)
+                $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                try {
+                    $graphics.CopyFromScreen($region.Location, [Drawing.Point]::Empty, $region.Size)
+                    $bitmap.Save((Join-Path $PWD 'candidate-window.png'), [Drawing.Imaging.ImageFormat]::Png)
+                } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            }
+        } catch { $report.screenshotUnavailable = $true }
+    }
     foreach ($child in $script:children) {
         if (-not $child.HasExited) {
             $child.Kill()

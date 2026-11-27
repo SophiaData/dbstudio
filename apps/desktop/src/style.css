@@ -19,7 +19,12 @@ textarea { resize:vertical; padding:10px; font-family:var(--mono); }
 .tree-row { min-height:27px; display:flex; align-items:center; gap:5px; padding:2px 9px; cursor:pointer; white-space:nowrap; }
 .tree-row:hover { background:#292d34; }
 .tree-row.is-selected { background:#263d5c; }
-.editor-pane { display:flex; flex-direction:column; min-height:0; min-width:0; }
+.editor-pane { display:flex; flex-direction:column; min-height:0; min-width:0; overflow:auto; }
+/* Wrapped controls must not consume the entire data viewport in a small window. */
+.editor-pane > * { flex-shrink:0; }
+.editor-pane > .result-grid { flex:1 0 auto; }
+.editor-pane > .result-grid > .grid-scroll { flex-basis:180px; height:180px; min-height:180px; }
+.editor-pane > .pane-toolbar,.editor-pane .page-bar { flex-wrap:wrap; }
 .welcome { margin:auto; text-align:center; }
 .empty { padding:20px 12px; }
 .status-bar { border-top:1px solid var(--border); border-bottom:0; min-height:29px; font-size:12px; }
