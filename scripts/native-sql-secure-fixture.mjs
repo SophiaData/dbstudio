@@ -236,7 +236,10 @@ function nativeTest(name, env) {
   } catch (error) {
     // Retain only known source-defined stage names, never native error/log/data text.
     const allowed = new Set(['positive_connect', 'transport_attestation', 'transaction', 'wrong_ca',
-      'system_roots', 'hostname_reachability', 'hostname_rejection', 'cancellation', 'missing_pin', 'wrong_pin'])
+      'system_roots', 'hostname_reachability', 'hostname_rejection', 'cancellation', 'missing_pin', 'wrong_pin',
+      'cancellation_connect', 'cancellation_identity', 'cancellation_observer', 'cancellation_observe',
+      'cancellation_observer_close', 'cancellation_request', 'cancellation_wait', 'cancellation_observed_check',
+      'cancellation_request_check', 'cancellation_result', 'cancellation_deadline'])
     const stages = [...String(error.stdout ?? '').matchAll(/NATIVE_SECURE_STAGE=([a-z_]+)/g)]
       .map((match) => match[1]).filter((stage) => allowed.has(stage))
     throw new FixtureFailure(`NATIVE_SECURE_TEST_FAILED${stages.length ? `_${stages.at(-1).toUpperCase()}` : ''}`)

@@ -3,6 +3,12 @@ name: native-verify
 on:
   # PRs and main pushes enter through verify.yml; releases reuse the full suite.
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Full native checks or database-only diagnosis'
+        type: choice
+        options: [all, databases]
+        default: all
   workflow_call:
 
 permissions:
@@ -21,6 +27,7 @@ env:
 
 jobs:
   desktop-macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'databases'
     name: macOS native desktop and production build
     runs-on: macos-15
     timeout-minutes: 120
@@ -78,6 +85,7 @@ jobs:
   native-databases:
     name: Dedicated real database and TLS fixtures
     needs: desktop-macos
+    if: ${{ !cancelled() && (needs.desktop-macos.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'databases')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -99,7 +107,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential pkg-config libssl-dev libssh2-1-dev openssl openssh-client
+            build-essential pkg-config libssl-dev libssh2-1-dev openssl openssh-client fonts-noto-cjk
       - name: Require Docker engine
         run: docker info --format '{{.ServerVersion}}'
       - name: Install locked frontend dependencies for real page rendering
