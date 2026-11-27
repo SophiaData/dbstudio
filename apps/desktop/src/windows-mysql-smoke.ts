@@ -486,6 +486,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     const observerTargetBefore = await wb.connectionTarget(observer.id)
     const initialEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库'])
     const initialResultTarget = await waitForTargetText('result-target', [name, '配置默认库', database, '执行时会话库', '该连接当前状态', '最近核实会话库'])
+    const transactionBeforeUse = await wb.readTransaction(id)
     try {
       const restoreEditorId = wb.openEditorTab(id, `USE ${restoreDatabase}`)
       const beforeUseResult = wb.tabs.value.length
@@ -494,6 +495,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
       const useResult = wb.activeTab.value!
       await wb.refreshSessionContext(id)
       const switchedTarget = await wb.connectionTarget(id)
+      const transactionAfterUse = await wb.readTransaction(id)
       const switchedEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库', restoreDatabase])
 
       wb.activateEditorTab(restoreEditorId)
@@ -520,6 +522,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
       const failedUseResult = wb.activeTab.value!
       await wb.refreshSessionContext(id)
       const afterFailedUse = await wb.connectionTarget(id)
+      const transactionAfterFailedUse = await wb.readTransaction(id)
       const failedEditorTarget = await waitForTargetText('editor-target', [name, restoreDatabase, '最近核实会话库'])
       const failedResultTarget = await waitForTargetText('result-target', [name, restoreDatabase, '执行时会话库', '该连接当前状态'])
 
@@ -565,7 +568,10 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         && switchedTarget.session.status === 'ready'
         && switchedTarget.session.database === restoreDatabase
         && switchedEditorTarget.includes(name) && switchedEditorTarget.includes(restoreDatabase)
-        && useResult.executionContext?.session.database === restoreDatabase
+        && useResult.executionContext?.session.database === database
+        && transactionBeforeUse.active === false && transactionBeforeUse.pendingAffected === 0
+        && transactionAfterUse.active === false && transactionAfterUse.pendingAffected === 0
+        && transactionAfterFailedUse.active === false && transactionAfterFailedUse.pendingAffected === 0
         && isolatedResultTarget.includes(database) && isolatedResultTarget.includes(restoreDatabase)
         && resultSnapshotRetained
         && observerTargetAfter.configuredDatabase === database

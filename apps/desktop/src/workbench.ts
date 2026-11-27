@@ -486,6 +486,9 @@ export function useWorkbench() {
       sessionVersions.set(connection.id, (sessionVersions.get(connection.id) ?? 0) + 1)
       for (const statement of statements) {
         if (executionCancelled) throw new Error('已取消执行，未发送后续 SQL')
+        if (statement.index > 0 && contextQuery(connection.dialectId) && connectionTarget(connection.id).session.status !== 'ready') {
+          throw new Error('前序语句已执行，但会话目标无法确认；后续 SQL 未发送，请核对后重新执行')
+        }
         const supplied = scopedParametersForStatement(parameters, statement.index)
         const tab = newTab(connection.id, `SQL ${statement.index + 1}`, statement.sql, null, null, request.editorTabId)
         tab.parameters = supplied

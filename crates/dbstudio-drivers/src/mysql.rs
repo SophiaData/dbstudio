@@ -965,12 +965,12 @@ impl Driver for MysqlDriver {
             "executeStatement"=>{
                 let original=string_argument(&args,0,"sql")?;let options=args.get(1).unwrap_or(&Value::Null);let(sql,values)=n::bind_named(original,options,false)?;let started=Instant::now();
                 if management_statement(&sql)?{return Ok(json!({"kind":"rows","result":self.management_query(sql,values,options,started)?}));}
-                // Session timezone offsets do not begin or end the managed transaction.
-                if values.is_empty()&&is_session_timezone_offset_statement(&sql){
+                let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                // Session database/timezone changes use COM_QUERY and preserve the managed transaction.
+                if values.is_empty()&&(keyword=="use"||is_session_timezone_offset_statement(&sql)){
                     let affected=self.execute(&sql,&values)?;
                     return Ok(json!({"kind":"affected","affected":affected,"inTransaction":self.active,"transactionState":n::transaction_state(self.active,self.pending),"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64}));
                 }
-                let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
                 // 部分 MySQL 语句（例如 CREATE/DROP EVENT）不支持预处理语句协议（错误 1295）。
                 // 这类语句直接走文本协议，不再用 prep 做列探测。
                 // CREATE/DROP EVENT 与 CREATE/DROP TRIGGER 都不支持预处理语句协议

@@ -10,15 +10,33 @@ import '../../src/style.css'
 const calls: unknown[] = []
 const copied: string[] = []
 const unexpectedCalls: string[] = []
+const sessionProbes: { connectionId: string; dialectId: 'mysql' | 'postgresql'; sql: string }[] = []
 const nativeReplies: { method: 'fetchCellValue' | 'fetchResultPage' | 'runQuery' | 'closeCursor'; args: unknown[]; reply: () => unknown }[] = []
 let deferredCell: { requested: boolean; settled: boolean; resolve: (value: CellValue) => void; reject: (error: Error) => void } | null = null
 let countReply: { tableId: string; connectionId: string; signal: string | null; settled: boolean; result: Promise<number>;
   resolve: (value: number) => void; reject: (error: unknown) => void } | null = null
 let cancelReply: { result: Promise<boolean>; resolve: (value: boolean) => void; reject: (error: unknown) => void; requested: boolean } | null = null
 Object.assign(window, { gridNativeCall: (...args: unknown[]) => {
-  calls.push(args)
   const expected = nativeReplies[0]
   const payload = args[1] as { method?: string; args?: unknown[] } | undefined
+  if (args[0] === 'backend_call' && payload?.method === 'runQuery' && payload.args?.length === 3) {
+    const [connection, sql, options] = payload.args
+    const dialectId = sql === 'SELECT DATABASE() AS dbstudio_database' ? 'mysql'
+      : sql === 'SELECT current_database() AS dbstudio_database, current_schema() AS dbstudio_schema' ? 'postgresql'
+        : null
+    if (dialectId && typeof connection === 'string' && connection.startsWith('connection:') &&
+      JSON.stringify(options) === JSON.stringify({ limit: 1, keepCursor: false })) {
+      const connectionId = connection.slice('connection:'.length)
+      sessionProbes.push({ connectionId, dialectId, sql })
+      const columns = [{ name: 'dbstudio_database', type: 'text' }, ...(dialectId === 'postgresql'
+        ? [{ name: 'dbstudio_schema', type: 'text' }] : [])]
+      const cells: CellValue[] = [{ kind: 'text', text: 'synthetic_database' }, ...(dialectId === 'postgresql'
+        ? [{ kind: 'text' as const, text: 'public' }] : [])]
+      return Promise.resolve({ columns, rows: [{ index: 0, cells }], offset: 0, returned: 1,
+        hasMore: false, elapsedMs: 0, executedSql: sql })
+    }
+  }
+  calls.push(args)
   if (args[0] === 'backend_call' && countReply) {
     if (payload?.method === 'countRows' && !countReply.signal && payload.args?.length === 2 && payload.args[0] === countReply.tableId) {
       const options = payload.args[1] as { signalId?: string }
@@ -119,6 +137,7 @@ let paginationSequence = 0
 let paginationQuerySequence = 0
 let paginationTotal = 1203
 let paginationCallStart = 0
+let paginationProbeStart = 0
 let deferredPage: { requested: boolean; settled: boolean; finish: () => void } | null = null
 type PageOutcome = 'success' | 'failure'
 function paginationPage(cursorId: string | undefined, offset: number, limit: number, executedSql = 'SELECT synthetic_pagination') {
@@ -152,6 +171,7 @@ function preparePagination(options: { size?: number; offset?: number; total?: nu
   paginationSequence++
   paginationTotal = options.total ?? 1203
   paginationCallStart = calls.length
+  paginationProbeStart = sessionProbes.length
   wb.setStatus('合成分页就绪')
   wb.dialects.value = [{ id: 'mysql', quoting: { open: '`', close: '`', escape: 'double' } }] as typeof wb.dialects.value
   for (const [index, connectionId] of ['A', 'B'].entries()) {
@@ -266,7 +286,8 @@ Object.assign(window, { gridFixture: {
       dirty: [...tab.dirty.entries()], selectedRows: [...tab.selectedRows], busy: tab.busy,
       locked: wb.locks.has(tab.connectionId), pendingEditor: wb.pendingEditors.has(tab.id),
       decision: decision.value?.title ?? null, status: wb.status.value, statusError: wb.statusError.value,
-      calls: calls.slice(paginationCallStart), pending: deferredPage ? { requested: deferredPage.requested, settled: deferredPage.settled } : null }
+      calls: calls.slice(paginationCallStart), sessionProbes: sessionProbes.slice(paginationProbeStart),
+      pending: deferredPage ? { requested: deferredPage.requested, settled: deferredPage.settled } : null }
   },
   queuePaginationPage: (offset: number, limit: number, outcome: PageOutcome = 'success', deferred = false) => {
     const tab = wb.activeTab.value!
@@ -291,6 +312,7 @@ Object.assign(window, { gridFixture: {
   },
   rangeState: () => ({ busy: wb.activeTab.value!.busy, offset: wb.activeTab.value!.page!.offset }),
   nativeState: () => ({ calls: [...calls], unexpected: [...unexpectedCalls], queued: nativeReplies.length,
+    sessionProbes: [...sessionProbes],
     pending: deferredCell ? { requested: deferredCell.requested, settled: deferredCell.settled } : null }),
   deferredFullCell: (row: number, column: number) => {
     if (deferredCell && !deferredCell.settled) throw new Error('Full cell request is already pending')

@@ -926,6 +926,8 @@ try {
     await movePage(1, 500, 500)
     await queueQuery('SELECT synthetic_pagination', 500)
     await refresh().click(); await idlePagination(); await assertPage(0, 500, 500)
+    assert.deepEqual((await paginationState()).sessionProbes, [{ connectionId: 'A', dialectId: 'mysql',
+      sql: 'SELECT DATABASE() AS dbstudio_database' }])
     await movePage(1, 500, 500); await assertPage(500, 500, 500)
     assert.deepEqual((await paginationState()).calls.map(call => call[1].method), ['fetchResultPage', 'fetchResultPage', 'runQuery', 'closeCursor', 'fetchResultPage'])
   })

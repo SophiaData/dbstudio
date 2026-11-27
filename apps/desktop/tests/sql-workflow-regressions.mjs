@@ -1986,6 +1986,20 @@ await check('mysql_aggregate_commit_refresh_failure_reports_already_committed', 
   assert.equal(f.second.dirty.size, 0)
 })
 
+await check('failed_between_statement_probe_stops_later_writes_without_relabeling_success', async () => {
+  const { wb, backend } = fixture()
+  const sent = []
+  backend.executeStatement = async (_node, sql) => {
+    sent.push(sql)
+    backend.sessionErrors = { a: new Error('SYNTHETIC_AFTER_FIRST_PROBE_FAILED') }
+    return { kind: 'affected', affected: 0, elapsedMs: 0, transactionState: { active: false, pendingAffected: 0 } }
+  }
+  await assert.rejects(wb.executeScript('SELECT 1; UPDATE synthetic SET body=2'), /前序语句已执行.*后续 SQL 未发送/)
+  assert.deepEqual(sent, ['SELECT 1'])
+  assert.equal(wb.tabs.value.at(-1).executionFailed, undefined)
+  assert.equal(wb.executing.value, false)
+})
+
 const failed = outcomes.filter((item) => !item.passed).length
 writeFileSync(join(output, 'results.json'), JSON.stringify({ scope: 'real-workbench-pure-memory-ipc', native_or_gui_pass: false, outcomes }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
 console.log(`SQL workflow regression checks: ${outcomes.length - failed} passed, ${failed} failed`)
