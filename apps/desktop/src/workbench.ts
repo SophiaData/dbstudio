@@ -577,30 +577,97 @@ export function useWorkbench() {
     if (!(await guardLocal(tab, '排序或筛选'))) return
     await reloadTab(tab, false, 0, { querySql, order, appliedFilter })
   }
-  async function reviewAndApplyTab(tab: ResultTab) {
-    if (!tab.table || !tab.dirty.size) return
-    if (tab.busy || tab.invalidated || pendingEditors.has(tab.id)) throw new Error('请先结束当前单元格编辑')
-    const connection = connections.value.find((item) => item.id === tab.connectionId)
-    if (connection?.dialectId !== 'mysql') return applyTab(tab)
-
-    const table = tab.table
-    const generation = tab.generation
-    const snapshot = JSON.stringify([...tab.dirty.values()])
-    const updates: RowUpdate[] = JSON.parse(snapshot)
-    const plan = await backend.previewRowUpdates(table.id, updates)
-    const detail = plan.statements.map(({ sql, parameters }) =>
-      `${sql}\n参数（按占位符顺序） ${JSON.stringify(parameters)}`
-    ).join('\n\n')
-    const choice = await askDecision('更新 SQL 预览',
-      `连接「${connection.name}」，目标表「${table.name}」。计划更新 ${updates.length} 行，应用后仍需提交事务。`,
-      [{ value: 'apply', label: '应用修改' }, { value: 'cancel', label: '取消' }],
-      detail)
-    if (choice !== 'apply') return
-    if (tab.invalidated || tab.generation !== generation || tab.table?.id !== table.id ||
-        JSON.stringify([...tab.dirty.values()]) !== snapshot) {
-      throw new Error('结果或草稿已变化，请重新预览')
+  function assertNoPendingEditors(id: string) {
+    if (tabs.value.some((tab) => tab.connectionId === id && pendingEditors.has(tab.id))) {
+      throw new Error('请先保存或取消正在编辑的单元格/新增行')
     }
-    await applyTab(tab, { updates, fingerprint: plan.fingerprint })
+  }
+  async function reviewMysqlChanges(id: string, targets: ResultTab[], commit: boolean, inserting = false) {
+    const connection = connections.value.find((item) => item.id === id)
+    const revision = connectionRevisions.get(id) ?? 0
+    const reviews = targets.map((tab) => ({
+      tab, tableId: tab.table?.id, page: tab.page, result: tab.result, generation: tab.generation,
+      snapshot: JSON.stringify([...tab.dirty]),
+      updates: JSON.parse(JSON.stringify([...tab.dirty.values()])) as RowUpdate[],
+      plan: null as Awaited<ReturnType<typeof backend.previewRowUpdates>> | null
+    }))
+    function assertCurrent(remaining = reviews) {
+      const current = connections.value.find((item) => item.id === id)
+      if (!current?.connected || current.dialectId !== 'mysql' || (connectionRevisions.get(id) ?? 0) !== revision) {
+        throw new Error('连接已变化，请重新预览')
+      }
+      if (commit) assertNoPendingEditors(id)
+      if (remaining.some(({ tab, tableId, page, result, generation, snapshot }) =>
+        !tabs.value.includes(tab) || tab.connectionId !== id || !tableId || tab.table?.id !== tableId ||
+        tab.invalidated || tab.busy || tab.page !== page || tab.result !== result || tab.generation !== generation ||
+        (!inserting && pendingEditors.has(tab.id)) || JSON.stringify([...tab.dirty]) !== snapshot)) {
+        throw new Error('结果或草稿已变化，请重新预览')
+      }
+      if (commit) {
+        const dirtyTabs = tabs.value.filter((tab) => tab.connectionId === id && tab.dirty.size)
+        if (dirtyTabs.length !== remaining.length || dirtyTabs.some((tab) => !remaining.some((item) => item.tab === tab))) {
+          throw new Error('待提交的标签或草稿已变化，请重新预览')
+        }
+      }
+    }
+    assertCurrent()
+    const state = await readTransaction(id)
+    assertCurrent()
+    for (const review of reviews) {
+      review.plan = await backend.previewRowUpdates(review.tableId!, review.updates)
+      assertCurrent()
+    }
+    const existing = state.active ? `已有事务：${state.pendingAffected} 行未提交。` : '已有事务：无。'
+    const detail = reviews.map(({ tab, updates, plan }) =>
+      `表「${tab.table!.name}」（标签「${tab.title}」）：${updates.length} 行草稿\n` +
+      plan!.statements.map(({ sql, parameters }) => `${sql}\n参数（按占位符顺序） ${JSON.stringify(parameters)}`).join('\n\n')
+    ).join('\n\n') || '没有新增 UPDATE 草稿。'
+    const action = commit ? 'commit' : 'apply'
+    const choice = await askDecision(commit ? '提交当前连接' : '更新 SQL 预览',
+      `连接「${connection!.name}」。${existing}本次新增草稿：${reviews.length} 个标签、${reviews.reduce((sum, item) => sum + item.updates.length, 0)} 行。` +
+      (commit ? '确认后应用以上草稿，并提交此连接全部未提交修改（包括此前的插入、删除或 SQL 写入）。' : '应用后仍需提交事务。'),
+      [{ value: action, label: commit ? (reviews.length ? '应用并提交' : '提交事务') : '应用修改' }, { value: 'cancel', label: '取消' }], detail)
+    if (choice !== action) return false
+    assertCurrent()
+    const confirmedState = await readTransaction(id)
+    assertCurrent()
+    if (confirmedState.active !== state.active || confirmedState.pendingAffected !== state.pendingAffected) {
+      throw new Error('事务状态已变化，请重新预览')
+    }
+    for (let index = 0; index < reviews.length; index++) {
+      assertCurrent(reviews.slice(index))
+      const review = reviews[index]!
+      try {
+        await applyTab(review.tab, { updates: review.updates, fingerprint: review.plan!.fingerprint })
+      } catch (cause) {
+        if (!commit) throw cause
+        throw new Error(`未执行提交；应用过程中发生错误，请核对当前事务。尚未应用成功的草稿已保留。${errorText(cause)}`)
+      }
+    }
+    if (commit) {
+      assertCurrent([])
+      try { transactions[id] = await backend.commitTransaction(connectionNode(id)) }
+      catch (cause) { throw new Error(`提交失败或结果未知，请核对数据库状态后再操作。${errorText(cause)}`) }
+    }
+    return true
+  }
+  async function reviewAndApplyTab(tab: ResultTab, inserting = false) {
+    if (!tab.table || !tab.dirty.size) return true
+    if (tab.busy || tab.invalidated || (!inserting && pendingEditors.has(tab.id))) throw new Error('请先结束当前单元格编辑')
+    const connection = connections.value.find((item) => item.id === tab.connectionId)
+    if (connection?.dialectId === 'mysql') return reviewMysqlChanges(tab.connectionId, [tab], false, inserting)
+    await applyTab(tab)
+    return true
+  }
+  async function reviewAndCommit(id: string) {
+    assertNoPendingEditors(id)
+    const localTabs = tabs.value.filter((tab) => tab.connectionId === id && tab.dirty.size)
+    if (connections.value.some((item) => item.id === id && item.dialectId === 'mysql')) {
+      return reviewMysqlChanges(id, localTabs, true)
+    }
+    for (const tab of localTabs) await applyTab(tab)
+    transactions[id] = await backend.commitTransaction(connectionNode(id))
+    return true
   }
   async function applyTab(tab: ResultTab, reviewed?: { updates: RowUpdate[]; fingerprint: string }) {
     if (!tab.table || !tab.dirty.size) return
@@ -636,13 +703,13 @@ export function useWorkbench() {
       setStatus(`已应用 ${result.affected} 行，尚未提交`)
     } finally { tab.busy = false }
   }
-  async function guardLocal(tab: ResultTab, action: string) {
+  async function guardLocal(tab: ResultTab, action: string, inserting = false) {
     if (!tab.dirty.size) return 'clean' as const
     const choice = await askDecision(action, `「${tab.title}」有 ${tab.dirty.size} 行尚未应用的修改。`, [
       { value: 'apply', label: '应用修改' }, { value: 'discard', label: '放弃本地修改', danger: true }, { value: 'cancel', label: '取消' }
     ])
     if (choice === 'cancel') return false
-    if (choice === 'apply') { await applyTab(tab); return 'applied' as const }
+    if (choice === 'apply') return await reviewAndApplyTab(tab, inserting) ? 'applied' as const : false
     tab.dirty.clear()
     return 'discarded' as const
   }
@@ -651,9 +718,9 @@ export function useWorkbench() {
   }
   async function settleTransaction(id: string, commit: boolean) {
     const localTabs = tabs.value.filter((tab) => tab.connectionId === id && tab.dirty.size)
+    assertNoPendingEditors(id)
     if (commit) {
-      for (const tab of localTabs) await applyTab(tab)
-      transactions[id] = await backend.commitTransaction(connectionNode(id))
+      if (!(await reviewAndCommit(id))) return false
     } else {
       const dirtyCount = localTabs.reduce((sum, tab) => sum + tab.dirty.size, 0)
       const state = await readTransaction(id)
@@ -666,6 +733,7 @@ export function useWorkbench() {
     return true
   }
   async function guardConnection(id: string, action: string) {
+    assertNoPendingEditors(id)
     const connection = connections.value.find((c) => c.id === id)
     const state = connection?.connected ? await readTransaction(id) : { active: false, pendingAffected: 0 }
     const dirty = tabs.value.filter((tab) => tab.connectionId === id).reduce((sum, tab) => sum + tab.dirty.size, 0)
@@ -675,8 +743,7 @@ export function useWorkbench() {
     ])
     if (choice === 'cancel') return false
     if (choice === 'commit') {
-      for (const tab of tabs.value.filter((tab) => tab.connectionId === id && tab.dirty.size)) await applyTab(tab)
-      transactions[id] = await backend.commitTransaction(connectionNode(id))
+      if (!(await reviewAndCommit(id))) return false
     } else {
       if (state.active) transactions[id] = await backend.rollbackTransaction(connectionNode(id))
       for (const tab of tabs.value.filter((tab) => tab.connectionId === id)) tab.dirty.clear()
@@ -729,6 +796,7 @@ export function useWorkbench() {
   }
   async function closeTab(tab: ResultTab) {
     if (tab.busy) return
+    if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
     const last = tabs.value.filter((t) => t.connectionId === tab.connectionId).length === 1
     if (last ? !(await guardConnection(tab.connectionId, '关闭最后一个结果标签')) : !(await guardLocal(tab, '关闭结果标签'))) return
     await releaseCursor(tab)
@@ -741,7 +809,7 @@ export function useWorkbench() {
   }
   async function insertRow(tab: ResultTab, values: Record<string, CellValue>): Promise<boolean> {
     if (!editableSource(tab) || tab.busy || !tab.table) throw new Error('当前表不可新增行')
-    if (!(await guardLocal(tab, '插入行'))) return false
+    if (!(await guardLocal(tab, '插入行', true))) return false
     const result = await backend.insertRow(tab.table.id, values)
     try {
       await readTransaction(tab.connectionId); await reloadTab(tab, false)
@@ -875,7 +943,7 @@ export function useWorkbench() {
     if (backgroundTasks.size) { setStatus('导入导出任务正在运行，请等待完成或先取消任务后退出', true); return false }
     if (executing.value || locks.size || tabs.value.some((tab) => tab.busy)) { setStatus('请等待当前操作完成后退出', true); return false }
     const ids = new Set([...connections.value.map((c) => c.id), ...tabs.value.map((t) => t.connectionId)])
-    for (const id of ids) if (!(await guardConnection(id, action))) return false
+    for (const id of ids) if (!(await withConnectionOperation(id, () => guardConnection(id, action)))) return false
     return true
   }
   return {
@@ -886,7 +954,7 @@ export function useWorkbench() {
     executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, stageCells, canEdit, rowKeys,
     countRows: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => countRows(tab)), cancelRowCount, ownsRowCount,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
-    applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
+    applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),
     reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),
     pageTab: (tab: ResultTab, direction: number) => withConnectionOperation(tab.connectionId, () => pageTab(tab, direction)),
     changePageSize: (tab: ResultTab, size: number) => withConnectionOperation(tab.connectionId, () => changePageSize(tab, size)),
@@ -897,7 +965,8 @@ export function useWorkbench() {
     closeTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => closeTab(tab)),
     insertRow: (tab: ResultTab, values: Record<string, CellValue>) => withConnectionOperation(tab.connectionId, () => insertRow(tab, values)),
     deleteSelected: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => deleteSelected(tab)),
-    guardConnection, guardAllConnections, readTransaction, changeSchema,
+    guardConnection: (id: string, action: string) => withConnectionOperation(id, () => guardConnection(id, action)),
+    guardAllConnections, readTransaction, changeSchema,
     partitionTable, indexTable, listSessions, killSession, listEvents, listUsers,
     searchObjects: (connectionId: string, keyword: string) => withConnectionOperation(connectionId, () => searchObjects(connectionId, keyword)),
     createDatabase: (connectionId: string, database: string) => createDatabase(connectionId, database),

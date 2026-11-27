@@ -55,7 +55,10 @@ function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) 
   wb.dialects.value = [{ id: 'postgresql', quoting: { open: '"', close: '"', escape: 'double' } }]
   wb.selectConnection('a')
   const values = new Map()
-  const calls = { state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [] }
+  const calls = {
+    state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [],
+    previews: [], applyArgs: [], commits: [], rollbacks: []
+  }
   let sequence = 0
   const page = (start, limit = 200) => {
     const rows = Array.from({ length: Math.max(0, Math.min(limit, totalRows - start)) }, (_, index) => {
@@ -98,12 +101,28 @@ function fixture(offset = 0, { preserveStorage = false, totalRows = 805 } = {}) 
       calls.fetches.push({ cursor, offset: requestedOffset, limit })
       return { ...page(requestedOffset, limit), cursorId: cursor }
     },
-    async applyEdits(_table, updates) {
+    async previewRowUpdates(tableId, updates) {
+      calls.previews.push({ tableId, updates })
+      return previewPlan(tableId, updates)
+    },
+    async applyEdits(tableId, updates, fingerprint) {
       calls.applies++
-      for (const update of updates) values.set(update.keyValues.id.value, update.changes.body.text)
+      calls.applyArgs.push({ tableId, updates, fingerprint })
+      for (const update of updates) {
+        const value = update.changes.body ?? Object.values(update.changes)[0]
+        if (value?.kind === 'text') values.set(update.keyValues.id.value, value.text)
+      }
       return { ok: true, affected: updates.length, outcomes: [] }
     },
-    async insertRow() { calls.inserts++; values.set(806, 'inserted'); return { affected: 1, keyValues: { id: number(806) } } }
+    async insertRow() { calls.inserts++; values.set(806, 'inserted'); return { affected: 1, keyValues: { id: number(806) } } },
+    async commitTransaction(node) {
+      calls.commits.push(node)
+      return { active: false, pendingAffected: 0 }
+    },
+    async rollbackTransaction(node) {
+      calls.rollbacks.push(node)
+      return { active: false, pendingAffected: 0 }
+    }
   }
   globalThis.__DBSTUDIO_SQL_WORKFLOW_BACKEND__ = backend
   return { wb, tab: active, backend, page, calls, values }
@@ -160,7 +179,60 @@ function assertIdle(wb, tab) {
   assert.equal(wb.locks.has(tab.connectionId), false)
 }
 function assertNoBackendWork(calls) {
-  assert.deepEqual(calls, { state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [] })
+  assert.deepEqual(calls, {
+    state: [], inserts: 0, applies: 0, offsets: [], fetches: [], queries: [], closed: [],
+    previews: [], applyArgs: [], commits: [], rollbacks: []
+  })
+}
+function useMysql(wb) {
+  for (const connection of wb.connections.value) connection.dialectId = 'mysql'
+  wb.dialects.value = [{ id: 'mysql', quoting: { open: '`', close: '`', escape: 'double' } }]
+}
+function previewPlan(tableId, updates, marker = tableId) {
+  return {
+    fingerprint: `fingerprint:${marker}:${JSON.stringify(updates)}`,
+    statements: updates.map((update, index) => {
+      const changes = Object.entries(update.changes)
+      return {
+        sql: `UPDATE ${tableId} SET ${changes.map(([column]) => `${column} = ?`).join(', ')} WHERE id = ?`,
+        parameters: [...changes.map(([, value]) => value), update.keyValues.id, `marker:${marker}:${index}`]
+      }
+    })
+  }
+}
+function addMysqlTable(f, tableName, size = 20) {
+  const tab = addResultTab(f, 'a', size)
+  tab.id = `synthetic-tab-a-${tableName}`
+  tab.title = tableName
+  tab.table = { ...tab.table, name: tableName, id: `connection:a|table:public.${tableName}` }
+  return tab
+}
+async function waitForDecision(title) {
+  for (let turn = 0; turn < 1000 && !decision.value; turn++) await Promise.resolve()
+  assert.ok(decision.value, `expected decision: ${title}`)
+  if (title instanceof RegExp) assert.match(decision.value.title, title)
+  else assert.equal(decision.value.title, title)
+  return decision.value
+}
+async function settleOpenDecision(pending, choice) {
+  const title = decision.value?.title
+  assert.ok(decision.value, 'decision must be open')
+  decision.value.settle(choice)
+  let outcome
+  let unexpectedTitle = ''
+  Promise.resolve(pending).then(
+    (value) => { outcome = { ok: true, value } },
+    (error) => { outcome = { ok: false, error } }
+  )
+  for (let turn = 0; turn < 5000 && !outcome; turn++) {
+    if (decision.value) {
+      unexpectedTitle = decision.value.title
+      decision.value.settle('cancel')
+    }
+    await Promise.resolve()
+  }
+  assert.ok(outcome, 'operation must settle after the synthetic decision')
+  return { title, ...outcome, unexpectedTitle }
 }
 async function rejectsWithoutDecision(action, expected) {
   // Observe rejection immediately; cancel an unexpected dialog so a regression cannot hang the suite.
@@ -186,9 +258,10 @@ async function check(name, action) {
     await action()
     outcomes.push({ name, passed: true })
     console.log(`PASS SQL workflow: ${name}`)
-  } catch {
-    outcomes.push({ name, passed: false, code: 'ASSERTION_FAILED' })
-    console.log(`FAIL SQL workflow: ${name} ASSERTION_FAILED`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    outcomes.push({ name, passed: false, code: 'ASSERTION_FAILED', message })
+    console.log(`FAIL SQL workflow: ${name} ASSERTION_FAILED ${message}`)
     // Keep subsequent cases independent if an assertion failed while a synthetic dialog was open.
     if (decision.value) decision.value.settle('cancel')
   }
@@ -1042,6 +1115,382 @@ await check('clearing_filter_commits_empty_applied_filter_and_restores_base_sql'
   assert.equal(tab.pageSize, 100)
   assert.equal(calls.queries[0].sql, tab.sql)
   assert.equal(calls.queries[0].options.limit, 100)
+})
+
+await check('mysql_public_apply_previews_once_then_cancel_or_apply_with_boolean_result', async () => {
+  const { wb, tab, calls } = fixture()
+  useMysql(wb)
+  wb.stageCell(tab, tab.page.rows[0], 'body', text('reviewed-body'))
+  const draft = JSON.stringify([...tab.dirty])
+
+  const cancelled = wb.applyTab(tab)
+  const cancelPreview = await waitForDecision('更新 SQL 预览')
+  assert.match(cancelPreview.detail, /UPDATE connection:a\|table:public\.synthetic/)
+  assert.ok(cancelPreview.detail.includes('marker:connection:a|table:public.synthetic:0'))
+  assert.equal(calls.previews.length, 1)
+  assert.equal(calls.applies, 0)
+  assert.equal(JSON.stringify([...tab.dirty]), draft)
+  const cancelledOutcome = await settleOpenDecision(cancelled, 'cancel')
+  assert.equal(cancelledOutcome.ok, true)
+  assert.equal(cancelledOutcome.value, false)
+  assert.equal(cancelledOutcome.unexpectedTitle, '')
+  assert.equal(calls.applies, 0)
+  assert.equal(JSON.stringify([...tab.dirty]), draft)
+
+  const applied = wb.applyTab(tab)
+  const applyPreview = await waitForDecision('更新 SQL 预览')
+  assert.ok(applyPreview.detail.includes('marker:connection:a|table:public.synthetic:0'))
+  const appliedOutcome = await settleOpenDecision(applied, 'apply')
+  assert.equal(appliedOutcome.ok, true)
+  assert.equal(appliedOutcome.value, true)
+  assert.equal(appliedOutcome.unexpectedTitle, '')
+  assert.equal(calls.previews.length, 2)
+  assert.equal(calls.applies, 1)
+  assert.equal(calls.applyArgs[0].fingerprint.startsWith('fingerprint:connection:a|table:public.synthetic:'), true)
+  assert.equal(tab.dirty.size, 0)
+})
+
+await check('mysql_review_and_apply_uses_the_same_preview_contract', async () => {
+  const { wb, tab, calls } = fixture()
+  useMysql(wb)
+  wb.stageCell(tab, tab.page.rows[1], 'body', text('review-button-body'))
+  const pending = wb.reviewAndApplyTab(tab)
+  const dialog = await waitForDecision('更新 SQL 预览')
+  assert.deepEqual(dialog.options.map((option) => option.value), ['apply', 'cancel'])
+  assert.equal(calls.applies, 0)
+  const outcome = await settleOpenDecision(pending, 'apply')
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.value, true)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(calls.previews.length, 1)
+  assert.equal(calls.applies, 1)
+})
+
+await check('mysql_apply_rejects_every_owned_snapshot_change_after_preview', async () => {
+  const changes = [
+    ['page', ({ tab }) => { tab.page = { ...tab.page } }],
+    ['result', ({ tab }) => { tab.result = { ...tab.result } }],
+    ['generation', ({ tab }) => { tab.generation++ }],
+    ['table', ({ tab }) => { tab.table = { ...tab.table, id: 'connection:a|table:public.changed' } }],
+    ['dirty', ({ tab }) => { tab.dirty.set(1, { keyValues: { id: number(2) }, changes: { body: text('changed-later') } }) }],
+    ['tab-connection', ({ tab }) => { tab.connectionId = 'b' }],
+    ['connection', ({ wb }) => { wb.connections.value[0].connected = false }]
+  ]
+  for (const [name, mutate] of changes) {
+    const { wb, tab, calls } = fixture()
+    useMysql(wb)
+    wb.stageCell(tab, tab.page.rows[0], 'body', text(`preview-${name}`))
+    const draft = JSON.stringify([...tab.dirty])
+    const pending = wb.reviewAndApplyTab(tab)
+    await waitForDecision('更新 SQL 预览')
+    mutate({ wb, tab })
+    const outcome = await settleOpenDecision(pending, 'apply')
+    assert.equal(outcome.ok, false, `${name} change must reject the preview`)
+    assert.match(outcome.error.message, /重新预览|已变化/)
+    assert.equal(outcome.unexpectedTitle, '')
+    assert.equal(calls.applies, 0, `${name} change must not apply`)
+    if (name !== 'dirty') assert.equal(JSON.stringify([...tab.dirty]), draft)
+  }
+})
+
+await check('mysql_guard_local_apply_repreviews_and_cancel_blocks_leave', async () => {
+  const applied = fixture()
+  useMysql(applied.wb)
+  applied.wb.stageCell(applied.tab, applied.tab.page.rows[0], 'body', text('guard-applied'))
+  const moving = applied.wb.pageTab(applied.tab, 1)
+  const guard = await waitForDecision('翻页')
+  assert.deepEqual(guard.options.map((option) => option.value), ['apply', 'discard', 'cancel'])
+  guard.settle('apply')
+  const preview = await waitForDecision('更新 SQL 预览')
+  assert.match(preview.message, /应用后仍需提交事务/)
+  assert.equal(applied.calls.applies, 0)
+  assert.deepEqual(applied.calls.fetches, [])
+  const moveOutcome = await settleOpenDecision(moving, 'apply')
+  assert.equal(moveOutcome.ok, true)
+  assert.equal(moveOutcome.unexpectedTitle, '')
+  assert.equal(applied.calls.previews.length, 1)
+  assert.equal(applied.calls.applies, 1)
+  assert.deepEqual(applied.calls.fetches.map(({ offset, limit }) => [offset, limit]), [[200, 200]])
+
+  const cancelled = fixture()
+  useMysql(cancelled.wb)
+  cancelled.wb.stageCell(cancelled.tab, cancelled.tab.page.rows[0], 'body', text('guard-cancelled'))
+  const staying = cancelled.wb.pageTab(cancelled.tab, 1)
+  const cancelGuard = await waitForDecision('翻页')
+  const cancelOutcome = await settleOpenDecision(staying, 'cancel')
+  assert.equal(cancelOutcome.ok, true)
+  assert.equal(cancelGuard.title, '翻页')
+  assert.equal(cancelled.calls.previews.length, 0)
+  assert.equal(cancelled.calls.applies, 0)
+  assert.deepEqual(cancelled.calls.fetches, [])
+  assert.equal(cancelled.tab.dirty.size, 1)
+  assert.equal(cancelled.tab.page.offset, 0)
+})
+
+await check('non_mysql_apply_keeps_direct_behavior_without_preview', async () => {
+  const { wb, tab, calls } = fixture()
+  wb.stageCell(tab, tab.page.rows[0], 'body', text('postgres-direct'))
+  const result = await wb.applyTab(tab)
+  assert.equal(result, true)
+  assert.equal(decision.value, null)
+  assert.equal(calls.previews.length, 0)
+  assert.equal(calls.applies, 1)
+  assert.equal(tab.dirty.size, 0)
+})
+
+function aggregateFixture() {
+  const f = fixture()
+  useMysql(f.wb)
+  const second = addMysqlTable(f, 'orders')
+  f.wb.stageCell(f.tab, f.tab.page.rows[0], 'body', text('customers-body'))
+  f.wb.stageCell(second, second.page.rows[0], 'body', text('orders-body'))
+  f.wb.transactions.a = { active: true, pendingAffected: 5 }
+  f.backend.transactionState = async (node) => {
+    f.calls.state.push(node)
+    return { active: true, pendingAffected: 5 + f.calls.applies }
+  }
+  f.backend.previewRowUpdates = async (tableId, updates) => {
+    f.calls.previews.push({ tableId, updates })
+    return previewPlan(tableId, updates, tableId.endsWith('.orders') ? 'SQL_ORDERS' : 'SQL_CUSTOMERS')
+  }
+  return { ...f, second }
+}
+
+await check('mysql_settle_commit_aggregates_one_preview_and_commits_after_cancel_or_success', async () => {
+  const f = aggregateFixture()
+  const firstCancel = f.wb.settleTransaction('a', true)
+  const dialog = await waitForDecision(/^提交当前连接/)
+  assert.deepEqual(dialog.options.map((option) => option.value), ['commit', 'cancel'])
+  assert.match(dialog.message, /已有事务：5 行未提交/)
+  assert.ok(dialog.detail.includes('SQL_CUSTOMERS'))
+  assert.ok(dialog.detail.includes('SQL_ORDERS'))
+  assert.ok(dialog.detail.includes('customers-body'))
+  assert.ok(dialog.detail.includes('orders-body'))
+  assert.deepEqual(f.calls.previews.map(({ tableId }) => tableId), [
+    'connection:a|table:public.synthetic', 'connection:a|table:public.orders'
+  ])
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+  const cancelOutcome = await settleOpenDecision(firstCancel, 'cancel')
+  assert.equal(cancelOutcome.ok, true)
+  assert.equal(cancelOutcome.value, false)
+  assert.equal(cancelOutcome.unexpectedTitle, '')
+  assert.equal(f.tab.dirty.size, 1)
+  assert.equal(f.second.dirty.size, 1)
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+
+  const committing = f.wb.settleTransaction('a', true)
+  await waitForDecision(/^提交当前连接/)
+  const commitOutcome = await settleOpenDecision(committing, 'commit')
+  assert.equal(commitOutcome.ok, true)
+  assert.equal(commitOutcome.value, true)
+  assert.equal(commitOutcome.unexpectedTitle, '')
+  assert.equal(f.calls.previews.length, 4)
+  assert.equal(f.calls.applies, 2)
+  assert.deepEqual(f.calls.applyArgs.map(({ tableId }) => tableId), [
+    'connection:a|table:public.synthetic', 'connection:a|table:public.orders'
+  ])
+  assert.deepEqual(f.calls.commits, ['connection:a'])
+  assert.equal(f.tab.dirty.size, 0)
+  assert.equal(f.second.dirty.size, 0)
+})
+
+await check('mysql_settle_commit_does_not_confirm_when_any_preview_fails', async () => {
+  const f = aggregateFixture()
+  const originalPreview = f.backend.previewRowUpdates
+  f.backend.previewRowUpdates = async (tableId, updates) => {
+    if (tableId.endsWith('.orders')) throw new Error('SYNTHETIC_PREVIEW_FAILED')
+    return originalPreview(tableId, updates)
+  }
+  await assert.rejects(f.wb.settleTransaction('a', true), /SYNTHETIC_PREVIEW_FAILED/)
+  assert.equal(decision.value, null)
+  assert.deepEqual(f.calls.previews.map(({ tableId }) => tableId), ['connection:a|table:public.synthetic'])
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.tab.dirty.size, 1)
+  assert.equal(f.second.dirty.size, 1)
+})
+
+await check('mysql_settle_commit_rejects_changed_dirty_tab_set_after_preview', async () => {
+  const f = aggregateFixture()
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision(/^提交当前连接/)
+  const third = addMysqlTable(f, 'late')
+  third.dirty.set(0, { keyValues: { id: number(1) }, changes: { body: text('late-tab-draft') } })
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.error.message, /重新预览|已变化/)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.tab.dirty.size, 1)
+  assert.equal(f.second.dirty.size, 1)
+  assert.equal(third.dirty.size, 1)
+})
+
+await check('mysql_settle_commit_partial_apply_failure_preserves_failed_draft_and_cannot_commit', async () => {
+  const f = aggregateFixture()
+  const originalApply = f.backend.applyEdits
+  f.backend.applyEdits = async (tableId, updates, fingerprint) => {
+    if (tableId.endsWith('.orders')) {
+      f.calls.applies++
+      f.calls.applyArgs.push({ tableId, updates, fingerprint })
+      return {
+        ok: false, affected: 0, inTransaction: true,
+        outcomes: [{ index: 0, affected: 0, error: 'SYNTHETIC_PARTIAL_FAILED' }]
+      }
+    }
+    return originalApply(tableId, updates, fingerprint)
+  }
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision(/^提交当前连接/)
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.error.message, /未执行提交；应用过程中发生错误.*SYNTHETIC_PARTIAL_FAILED/)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(f.calls.applies, 2)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.tab.dirty.size, 0)
+  assert.equal(f.second.dirty.size, 1)
+  assert.equal(f.second.dirty.get(0).changes.body.text, 'orders-body')
+})
+
+await check('mysql_settle_commit_failure_surfaces_without_claiming_success', async () => {
+  const f = aggregateFixture()
+  f.backend.commitTransaction = async (node) => {
+    f.calls.commits.push(node)
+    throw new Error('SYNTHETIC_COMMIT_FAILED')
+  }
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision(/^提交当前连接/)
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.error.message, /提交失败或结果未知.*SYNTHETIC_COMMIT_FAILED/)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(f.calls.applies, 2)
+  assert.deepEqual(f.calls.commits, ['connection:a'])
+  assert.equal(f.wb.status.value.includes('已提交当前连接事务'), false)
+})
+
+await check('mysql_commit_rejects_transaction_state_change_after_confirmation_without_apply', async () => {
+  const f = aggregateFixture()
+  let state = { active: true, pendingAffected: 5 }
+  f.backend.transactionState = async (node) => {
+    f.calls.state.push(node)
+    return state
+  }
+  const pending = f.wb.settleTransaction('a', true)
+  await waitForDecision(/^提交当前连接/)
+  state = { active: true, pendingAffected: 6 }
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.error.message, /事务状态已变化，请重新预览/)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+  assert.equal(f.tab.dirty.size, 1)
+  assert.equal(f.second.dirty.size, 1)
+  assert.equal(f.calls.state.length, 2)
+})
+
+await check('mysql_guard_connection_commit_uses_aggregate_preview_after_action_choice', async () => {
+  const f = aggregateFixture()
+  const pending = f.wb.guardConnection('a', '断开连接')
+  const actionDialog = await waitForDecision('断开连接')
+  assert.deepEqual(actionDialog.options.map((option) => option.value), ['commit', 'rollback', 'cancel'])
+  actionDialog.settle('commit')
+  const preview = await waitForDecision(/^提交当前连接/)
+  assert.match(preview.message, /已有事务：5 行未提交/)
+  assert.ok(preview.detail.includes('SQL_CUSTOMERS'))
+  assert.ok(preview.detail.includes('SQL_ORDERS'))
+  assert.equal(f.calls.applies, 0)
+  const outcome = await settleOpenDecision(pending, 'commit')
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.value, true)
+  assert.equal(outcome.unexpectedTitle, '')
+  assert.equal(f.calls.applies, 2)
+  assert.deepEqual(f.calls.commits, ['connection:a'])
+})
+
+await check('mysql_commit_preview_excludes_other_connection_drafts', async () => {
+  const f = aggregateFixture()
+  const remote = addResultTab(f, 'b', 20)
+  remote.dirty.set(0, { keyValues: { id: number(1) }, changes: { body: text('remote-draft') } })
+  const pending = f.wb.settleTransaction('a', true)
+  const dialog = await waitForDecision(/^提交当前连接/)
+  assert.ok(dialog.detail.includes('SQL_CUSTOMERS'))
+  assert.ok(dialog.detail.includes('SQL_ORDERS'))
+  assert.equal(dialog.detail.includes('remote-draft'), false)
+  assert.equal(f.calls.previews.some(({ tableId }) => tableId.startsWith('connection:b|')), false)
+  const outcome = await settleOpenDecision(pending, 'cancel')
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.value, false)
+  assert.equal(remote.dirty.size, 1)
+  assert.equal(f.calls.applies, 0)
+  assert.equal(f.calls.commits.length, 0)
+})
+
+await check('pending_editor_blocks_mysql_commit_and_last_tab_leave_before_preview', async () => {
+  const { wb, tab, calls } = fixture()
+  useMysql(wb)
+  wb.transactions.a = { active: true, pendingAffected: 4 }
+  wb.pendingEditors.add(tab.id)
+  await assert.rejects(wb.settleTransaction('a', true), /编辑|保存|取消/)
+  await assert.rejects(wb.closeTab(tab), /编辑|保存|取消/)
+  await assert.rejects(wb.guardConnection('a', '断开连接'), /编辑|保存|取消/)
+  assert.equal(await wb.guardAllConnections('退出工作台'), false)
+  assert.match(wb.status.value, /请先保存或取消正在编辑的单元格\/新增行/)
+  assert.equal(decision.value, null)
+  assert.equal(calls.previews.length, 0)
+  assert.equal(calls.applies, 0)
+  assert.equal(calls.commits.length, 0)
+  assert.equal(wb.locks.size, 0)
+  assert.equal(wb.tabs.value.includes(tab), true)
+})
+
+for (const operation of ['page', 'size', 'reload', 'filter', 'close', 'insert']) {
+  await check(`mysql_${operation}_preview_cancel_keeps_result_and_draft`, async () => {
+    const f = fixture()
+    useMysql(f.wb)
+    addMysqlTable(f, 'other')
+    f.wb.stageCell(f.tab, f.tab.page.rows[0], 'body', text('keep-draft'))
+    const before = pageSnapshot(f.tab), draft = JSON.stringify([...f.tab.dirty])
+    const actions = {
+      page: () => f.wb.pageTab(f.tab, 1), size: () => f.wb.changePageSize(f.tab, 100),
+      reload: () => f.wb.reloadTab(f.tab), filter: () => f.wb.transformTab(f.tab),
+      close: () => f.wb.closeTab(f.tab), insert: () => f.wb.insertRow(f.tab, { body: text('new') })
+    }
+    const pending = actions[operation]()
+    const guard = await waitForDecision(/./)
+    guard.settle('apply')
+    await waitForDecision('更新 SQL 预览')
+    const outcome = await settleOpenDecision(pending, 'cancel')
+    assert.equal(outcome.ok, true)
+    assert.equal(f.calls.applies, 0); assert.equal(f.calls.inserts, 0)
+    assert.equal(f.calls.queries.length, 0); assert.equal(f.calls.fetches.length, 0)
+    assert.equal(f.wb.tabs.value.includes(f.tab), true)
+    assert.equal(JSON.stringify([...f.tab.dirty]), draft)
+    assertPageSnapshot(f.tab, before)
+    assertIdle(f.wb, f.tab)
+  })
+}
+await check('mysql_existing_transaction_only_requires_confirmation_and_guard_holds_lock', async () => {
+  const f = fixture()
+  useMysql(f.wb)
+  f.backend.transactionState = async () => ({ active: true, pendingAffected: 3 })
+  const pending = f.wb.guardConnection('a', '断开连接')
+  const guard = await waitForDecision('断开连接')
+  assert.equal(f.wb.locks.has('a'), true)
+  await assert.rejects(f.wb.settleTransaction('a', true), /正在处理操作/)
+  guard.settle('commit')
+  const preview = await waitForDecision('提交当前连接')
+  assert.match(preview.message, /已有事务：3 行未提交/)
+  assert.match(preview.detail, /没有新增 UPDATE 草稿/)
+  const outcome = await settleOpenDecision(pending, 'cancel')
+  assert.equal(outcome.value, false)
+  assert.equal(f.calls.commits.length, 0)
+  assertIdle(f.wb, f.tab)
 })
 
 const failed = outcomes.filter((item) => !item.passed).length
