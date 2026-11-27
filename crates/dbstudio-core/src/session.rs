@@ -29,11 +29,27 @@ impl Session {
     }
     pub(crate) fn is_active(&self) -> bool { self.active.load(Ordering::Acquire) }
     pub(crate) fn call(&self, method: &str, args: Vec<Value>) -> Result<Value, AppError> {
+        // COUNT has its own optional argument; malformed signals must never become
+        // an unscoped operation. Validate before waiting for a busy driver.
+        let signal = if method == "countRows" {
+            if args.len() > 2 { return Err(AppError::invalid("countRows只接受表节点和可选options")) }
+            match args.get(1) {
+                None => None,
+                Some(options) => {
+                    let options = options.as_object().ok_or_else(|| AppError::invalid("countRows options必须是对象"))?;
+                    options.get("signalId").map(|value| {
+                        value.as_str().filter(|signal| !signal.trim().is_empty()).map(str::to_owned)
+                            .ok_or_else(|| AppError::invalid("signalId必须是非空字符串"))
+                    }).transpose()?
+                },
+            }
+        } else {
+            args.last().and_then(|value| value.get("signalId")).and_then(Value::as_str).map(str::to_owned)
+        };
         let mut driver = lock(&self.driver)?;
         if !self.is_active() { return Err(stale()) }
-        let query = matches!(method, "runQuery" | "query" | "executeStatement" | "explain");
+        let query = matches!(method, "runQuery" | "query" | "executeStatement" | "explain" | "countRows");
         if query {
-            let signal = args.last().and_then(|value| value.get("signalId")).and_then(Value::as_str).map(str::to_owned);
             *lock(&self.running)? = Some(signal);
         }
         let result = driver.call(method, args);

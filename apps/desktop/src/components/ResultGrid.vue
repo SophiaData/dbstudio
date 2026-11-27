@@ -63,7 +63,10 @@ function inRange(row: ResultRow, column: number) {
 const viewer = ref<{ value: CellValue; title: string } | null>(null)
 const loadedExport = ref(false)
 const loadedExportController = ref<InstanceType<typeof LoadedExportDialog> | null>(null)
-const rowCount = ref<number | null>(null)
+const countTask = computed(() => props.tab.rowCountTask)
+const countCurrent = computed(() => !!countTask.value && props.workbench.ownsRowCount(props.tab, countTask.value))
+const rowCount = computed(() => countCurrent.value ? countTask.value?.value ?? null : null)
+const canCancelCount = computed(() => props.workbench.connections.value.find(connection => connection.id === props.tab.connectionId)?.capabilities?.supportsCancel === true)
 const reading = ref(false)
 watch([
   () => props.tab, () => props.tab.result, () => props.tab.page, () => props.tab.generation,
@@ -72,7 +75,6 @@ watch([
   invalidateCellEdit()
   clearSelection()
   viewer.value = null
-  rowCount.value = null
 }, { flush: 'sync' })
 function selectCell(row: ResultRow, column: number, extend = false) {
   if (props.tab.invalidated) return
@@ -271,11 +273,8 @@ async function copyMarkedRows() {
   }
 }
 async function countRows() {
-  if (!props.tab.table || locked.value) return
-  props.tab.busy = true; error.value = ''
-  try { rowCount.value = await backend.countRows(props.tab.table.id); props.workbench.setStatus(`完整对象共 ${rowCount.value} 行（不含当前筛选）`) }
-  catch (cause) { error.value = errorText(cause) }
-  finally { props.tab.busy = false }
+  if (!props.tab.table || locked.value || props.tab.invalidated) return
+  await props.workbench.attempt(() => props.workbench.countRows(props.tab))
 }
 async function openCell(row: ResultRow, column: number) {
   if (locked.value) return
@@ -476,11 +475,13 @@ defineExpose({ readCell, buildCopyText, copyCell, copyMarkedRows, countRows, ope
       <button :disabled="locked || reading || tab.invalidated || !selectedRange" @click="copyRange(true)">复制选区（含表头）</button>
       <button :disabled="locked || reading || tab.invalidated || !tab.page || !tab.selectedRows.size" @click="copyMarkedRows">复制选中行</button>
       <button :disabled="locked || tab.invalidated || !tab.page" title="导出当前页全部结果列，包括隐藏列，使用原始列顺序" @click="openLoadedExport">导出当前页…</button>
-      <button v-if="tab.table?.kind === 'table'" :disabled="locked || tab.invalidated" @click="countRows">COUNT{{ rowCount !== null ? `: ${rowCount}` : '' }}</button>
+      <button v-if="tab.table?.kind === 'table'" :disabled="pagingLocked || tab.invalidated" @click="countRows">{{ countTask?.running ? '统计中…' : rowCount !== null ? `COUNT: ${rowCount}` : 'COUNT' }}</button>
+      <button v-if="countTask?.running" :disabled="!canCancelCount || countTask.settled || countTask.cancelling || countTask.cancelRequested" :title="canCancelCount ? '取消当前对象的统计' : '当前驱动不支持取消统计'" @click="workbench.cancelRowCount(tab)">取消统计</button>
       <span class="spacer" /><span class="transaction-state">{{ workbench.transactions[tab.connectionId]?.active ? `未提交 · ${workbench.transactions[tab.connectionId]?.pendingAffected ?? 0} 行` : '无活动事务' }}</span>
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, true))">提交</button>
       <button :disabled="locked || tab.invalidated" @click="workbench.attempt(() => workbench.settleTransaction(tab.connectionId, false))">回滚</button>
     </div>
+    <p v-if="countCurrent && countTask" class="column-hint" :class="{ 'inline-error': countTask.error }" :role="countTask.error ? 'alert' : 'status'">{{ countTask.error || countTask.message }}<span v-if="countTask.running && !canCancelCount"> · 当前驱动不支持取消统计</span></p>
     <form v-if="tab.result && !tab.invalidated" class="filter-bar" @submit.prevent="workbench.attempt(() => workbench.transformTab(tab))">
       <label class="muted" :for="`filter-${tab.id}`">服务端筛选</label>
       <input :id="`filter-${tab.id}`" v-model="tab.filter" placeholder="status = 'active' AND age >= 18" :disabled="pagingLocked" />

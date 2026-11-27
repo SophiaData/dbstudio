@@ -18,11 +18,82 @@ const fixtures = [
   { kind: 'mysql', name: `dbstudio-native-mysql-${runId}`, image: 'mysql:8.0', port: 3306,
     password: dbPassword(), rootPassword: dbPassword(), user: 'fixture', database: 'fixture', created: false, attempted: false },
 ]
-function docker(args, timeout = 30000) {
-  try { return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim() }
+function docker(args, timeout = 30000, environment = {}) {
+  try { return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout,
+    env: { ...process.env, ...environment } }).trim() }
   catch { throw new Error(`专用数据库夹具操作失败：${args[0]}`) }
 }
 const pause = (ms) => new Promise((done) => setTimeout(done, ms))
+function safeLiveDiagnostics(text, expectedNames) {
+  const clean = text.replace(/\u001b\[[0-9;]*m/g, '').replaceAll('\r\n', '\n')
+  // Whitelist only codes, repository Rust locations and the expected test names.
+  // No compiler snippets, panic values, arbitrary paths or connection error text.
+  const compilerCodes = [...new Set([...clean.matchAll(/^error(?:\[(E\d{4})\])?:/gm)]
+    .map(match => match[1] ?? 'rust-or-cargo-error'))]
+  const locations = []
+  for (const match of clean.matchAll(/^\s*(?:-->|:::)\s+([^\r\n]+\.rs):(\d+):(\d+)\s*$/gm)) {
+    const normalized = match[1].replaceAll('\\', '/')
+    const relative = normalized.startsWith(`${root.replaceAll('\\', '/')}/`)
+      ? normalized.slice(root.length + 1) : normalized
+    if (!/^crates\/dbstudio-(?:drivers|core|protocol)\/[A-Za-z0-9_./-]+\.rs$/.test(relative) ||
+        relative.split('/').some(part => part === '..' || part === '.')) continue
+    locations.push({ file: relative, line: Number(match[2]), column: Number(match[3]) })
+  }
+  const tests = expectedNames.map(name => {
+    const statuses = [...clean.matchAll(/^test ([A-Za-z0-9_:]+) \.\.\. (ok|FAILED|ignored)\s*$/gm)]
+      .filter(match => match[1] === name).map(match => match[2])
+    return { name, statuses: statuses.length ? statuses : ['not-observed'] }
+  })
+  return { compilerCodes, locations: locations.slice(0, 100), tests }
+}
+async function requiredLiveTests(crate, test, expectedNames, env, timeoutMs, features = []) {
+  // Bound each new suite including compilation. Capture private failure output rather
+  // than forwarding a panic/connection diagnostic into public logs or artifacts.
+  const started = Date.now()
+  const collected = await new Promise(done => {
+    const child = spawn('cargo', ['test', '--locked', '-p', crate, ...features, '--test', test,
+      '--', '--ignored', '--test-threads=1'],
+    { cwd: root, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+    let buffer = '', diagnostics = '', timedOut = false, forceTimer
+    const kill = signal => {
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch (error) { if (error.code !== 'ESRCH') child.kill(signal) }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      kill('SIGTERM')
+      forceTimer = setTimeout(() => kill('SIGKILL'), 5000)
+    }, timeoutMs)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => { buffer = (buffer + chunk).slice(-65536) })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-65536) })
+    child.once('error', () => {
+      clearTimeout(timer); clearTimeout(forceTimer)
+      done({ code: null, signal: null, buffer, diagnostics, timedOut, launchFailed: true })
+    })
+    child.once('close', (code, signal) => {
+      clearTimeout(timer); clearTimeout(forceTimer)
+      done({ code, signal, buffer, diagnostics, timedOut, launchFailed: false })
+    })
+  })
+  let evidencePassed = false
+  try { assertNativeTestsExecuted(collected.buffer, expectedNames); evidencePassed = true } catch { /* Public state below retains the failure. */ }
+  const passed = !collected.launchFailed && !collected.timedOut && collected.code === 0 && evidencePassed
+  const summary = { suite: test, status: passed ? 'passed' : 'failed', exitCode: collected.code,
+    signal: ['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV'].includes(collected.signal) ? collected.signal : null,
+    failure: passed ? null : collected.launchFailed ? 'launch-failed' : collected.timedOut ? 'timeout' :
+      collected.code !== 0 ? 'cargo-or-test-failed' : 'required-tests-not-executed',
+    wallMs: Date.now() - started, ...safeLiveDiagnostics(`${collected.diagnostics}\n${collected.buffer}`, expectedNames) }
+  const publicDir = resolve(env.DBSTUDIO_PAGE_PERF_DIR ?? join(root, 'out', 'page-performance'))
+  assert.equal(publicDir, resolve(root, 'out', 'page-performance'))
+  mkdirSync(publicDir, { recursive: true })
+  writeFileSync(join(publicDir, `${test}.suite.json`), `${JSON.stringify(summary, null, 2)}\n`, { flag: 'wx' })
+  console.log(JSON.stringify(summary))
+  assert.ok(passed, `${test} 失败；见公开 suite JSON 中的失败码、测试名与编译位置`)
+}
 async function ready(fixture) {
   const deadline = Date.now() + 120000
   while (Date.now() < deadline) {
@@ -37,11 +108,9 @@ let passed = false
 try {
   docker(['info', '--format', '{{.ServerVersion}}'])
   for (const fixture of fixtures) {
-    const envPath = join(evidence, `${fixture.kind}.env`)
     const values = fixture.kind === 'pg'
       ? { POSTGRES_USER: fixture.user, POSTGRES_DB: fixture.database, POSTGRES_PASSWORD: fixture.password }
       : { MYSQL_USER: fixture.user, MYSQL_DATABASE: fixture.database, MYSQL_PASSWORD: fixture.password, MYSQL_ROOT_PASSWORD: fixture.rootPassword }
-    writeFileSync(envPath, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''), { mode: 0o600, flag: 'wx' })
     // Init-only Unix sockets can answer ping before the published TCP service is ready.
     // Authenticate over TCP and run SQL; credentials stay in container environment, never argv.
     const health = fixture.kind === 'pg'
@@ -50,8 +119,8 @@ try {
     fixture.attempted = true
     docker(['run', '--detach', '--name', fixture.name, '--label', `io.dbstudio.native-fixture=${runId}`,
       '--memory', fixture.kind === 'pg' ? '512m' : '1g', '--publish', `127.0.0.1::${fixture.port}`,
-      '--env-file', envPath, '--health-cmd', health, '--health-interval', '2s', '--health-timeout', '2s',
-      '--health-start-period', '15s', '--health-retries', '50', fixture.image], 180000)
+      ...Object.keys(values).flatMap(name => ['--env', name]), '--health-cmd', health, '--health-interval', '2s', '--health-timeout', '2s',
+      '--health-start-period', '15s', '--health-retries', '50', fixture.image], 180000, values)
     fixture.created = true
     fixture.hostPort = docker(['inspect', '--format', `{{(index (index .NetworkSettings.Ports "${fixture.port}/tcp") 0).HostPort}}`, fixture.name])
     assert.match(fixture.hostPort, /^\d+$/)
@@ -77,6 +146,16 @@ try {
   })
   assert.equal(result, 0, '原生真实数据库验收失败')
   assertNativeTestsExecuted(output, ['postgresql_native_factory_lifecycle', 'mysql_native_factory_lifecycle'])
+  const pagePerformanceDir = resolve(process.env.DBSTUDIO_PAGE_PERF_DIR ?? join(root, 'out', 'page-performance'))
+  assert.equal(pagePerformanceDir, resolve(root, 'out', 'page-performance'), '分页性能产物只能写入指定公开目录')
+  const performanceEnv = { ...env, CARGO_BUILD_JOBS: '1', RUST_TEST_THREADS: '1',
+    DBSTUDIO_PAGE_PERF_DIR: pagePerformanceDir, DBSTUDIO_PAGE_PERF_FIXTURE_ID: runId }
+  await requiredLiveTests('dbstudio-drivers', 'pagination_performance_live',
+    ['postgresql_pagination_performance_live', 'mysql_pagination_performance_live'], performanceEnv, 20 * 60 * 1000)
+  // The same checked fixtures are still running. Missing/ignored COUNT tests fail the gate.
+  await requiredLiveTests('dbstudio-core', 'count_cancel_live',
+    ['postgresql_count_cancel_live', 'mysql_count_cancel_live'], env, 15 * 60 * 1000,
+    ['--features', 'fixture-memory-secrets'])
   // MySQL 管理与诊断能力必须有真库证据：这些测试在缺少 PARTITION_TEST_* 时
   // 会显式跳过，cargo 退出码 0 不能作为"已执行"的证据，所以要逐名核对并
   // 要求 ignored 为 0。
@@ -93,13 +172,13 @@ try {
   // 用户管理类测试要读 mysql.user 与 USER_PRIVILEGES，还要能建号授权；
   // 夹具默认只给库级权限，这里显式补上所需的全局权限。
   // 口令不走命令行：它会出现在进程列表里。用环境变量传入。
-  docker(['exec', '--env', `MYSQL_PWD=${mysqlFixture.rootPassword}`, mysqlFixture.name,
+  docker(['exec', '--env', 'MYSQL_PWD', mysqlFixture.name,
     'mysql', '--user=root', '--protocol=TCP', '--host=127.0.0.1', '--execute',
     `GRANT SELECT ON mysql.* TO '${mysqlFixture.user}'@'%';
      GRANT CREATE USER, GRANT OPTION, RELOAD, PROCESS, SUPER, CREATE, DROP ON *.* TO '${mysqlFixture.user}'@'%';
      -- 创建事件与触发器需要 SUPER（测试库由 log_bin 控制），
      -- 新建库需要全局 CREATE。
-     FLUSH PRIVILEGES;`], 60000)
+     FLUSH PRIVILEGES;`], 60000, { MYSQL_PWD: mysqlFixture.rootPassword })
   const managementTests = [
     'events_users_live', 'index_admin_live', 'lineage_evidence_live', 'object_source_live',
     'partition_admin_live', 'partition_metadata_live', 'partition_tree_live',
@@ -163,5 +242,5 @@ try {
   report.passed = report.testsPassed && report.cleanupPassed
   writeFileSync(join(evidence, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   if (!report.cleanupPassed) process.exitCode = 1
-  // Keep private fixture files and stopped containers; user rules forbid deletion.
+  // Keep the fixture report and stopped containers; user rules forbid deletion.
 }

@@ -137,8 +137,10 @@ fn transaction_smoke(fixture: &Fixture, driver: &mut dyn Driver, pg: bool, ssh: 
     // SQL objects, data directories and containers are retained as run evidence.
 }
 fn cancellation(fixture: &Fixture, config: &ConnectionConfig, secrets: &SecretMap, pg: bool) {
+    println!("NATIVE_SECURE_STAGE=cancellation_connect");
     let mut driver = connect(fixture, config, secrets);
     assert_eq!(driver.capabilities()["supportsCancel"], true);
+    println!("NATIVE_SECURE_STAGE=cancellation_identity");
     let identity = query_scalar(driver.as_mut(), if pg { "SELECT pg_backend_pid()" } else { "SELECT CONNECTION_ID()" }, 0);
     let identity = exact_small_integer(&identity).expect("server connection identity must be an exact small integer");
     let cancel = driver.cancel_handle();
@@ -149,26 +151,33 @@ fn cancellation(fixture: &Fixture, config: &ConnectionConfig, secrets: &SecretMa
         let sql = if pg { "SELECT 1 AS value FROM pg_sleep(20)" } else { "SELECT SLEEP(20) AS value" };
         let result: DriverResult<Value> = driver.call("runQuery", vec![json!(sql),json!({"keepCursor":false})]);
         let _ = driver.disconnect();
+        // A finished query may release its driver while KILL's control connection
+        // is still receiving its acknowledgement over the shared SSH tunnel.
+        drop(driver);
         let _ = finish_tx.send(result);
     });
     start_rx.recv_timeout(Duration::from_secs(2)).expect("native secure worker must start");
     let started = Instant::now();
     // Observe the actual server operation before cancelling. A client running flag alone
     // can race the first query packet, especially when cancellation opens a TLS channel.
+    println!("NATIVE_SECURE_STAGE=cancellation_observer");
     let mut observer = connect(fixture, config, secrets);
     let observe_sql = if pg {
         format!("SELECT COUNT(*)::integer FROM pg_stat_activity WHERE pid={identity} AND state='active' AND query LIKE '%pg_sleep(20)%'")
     } else {
         format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID={identity} AND COMMAND IN ('Query','Execute') AND INFO LIKE '%SLEEP(20)%'")
     };
+    println!("NATIVE_SECURE_STAGE=cancellation_observe");
     let mut observed = false;
     while started.elapsed() < Duration::from_secs(4) {
         let count = query_scalar(observer.as_mut(), &observe_sql, 0);
         if exact_small_integer(&count) == Some(1) { observed = true; break; }
         thread::sleep(Duration::from_millis(25));
     }
+    println!("NATIVE_SECURE_STAGE=cancellation_observer_close");
     observer.disconnect().expect("secure observer disconnect must succeed");
     drop(observer);
+    println!("NATIVE_SECURE_STAGE=cancellation_request");
     let mut requested = false;
     let mut request_failed = false;
     while observed && started.elapsed() < Duration::from_secs(8) {
@@ -178,10 +187,14 @@ fn cancellation(fixture: &Fixture, config: &ConnectionConfig, secrets: &SecretMa
             Err(error) => { fixture.safe_error(&error); request_failed = true; break; },
         }
     }
+    println!("NATIVE_SECURE_STAGE=cancellation_wait");
     let outcome = finish_rx.recv_timeout(Duration::from_secs(25)).expect("secure query worker exceeded bounded fixture deadline");
     worker.join().expect("secure query worker must not panic");
+    println!("NATIVE_SECURE_STAGE=cancellation_observed_check");
     assert!(observed, "server must attest the long operation was running before cancellation");
+    println!("NATIVE_SECURE_STAGE=cancellation_request_check");
     assert!(!request_failed && requested, "independent native cancel channel must reach the running query");
+    println!("NATIVE_SECURE_STAGE=cancellation_result");
     match outcome {
         Err(error) => { fixture.safe_error(&error); assert_eq!(error.code, "cancelled"); },
         Ok(value) => {
@@ -189,6 +202,7 @@ fn cancellation(fixture: &Fixture, config: &ConnectionConfig, secrets: &SecretMa
             assert_eq!(exact_small_integer(&scalar(&value["rows"][0]["cells"][0])), Some(1), "MySQL SLEEP must attest interruption");
         }
     }
+    println!("NATIVE_SECURE_STAGE=cancellation_deadline");
     assert!(started.elapsed() < Duration::from_secs(15), "cancel must finish before the 20-second query");
 }
 fn direct_tls(pg: bool) {

@@ -237,7 +237,7 @@ export interface DbStudioApi {
    *
    * 这是**显式动作**：大表上是全表扫描，绝不能由列目录等懒加载路径顺带触发。
    */
-  countRows(tableNodeId: string): Promise<number>
+  countRows(tableNodeId: string, options?: { signalId?: string }): Promise<number>
 
   /**
    * 取某单元格的**完整值**（结果集平时会把超长文本截断到

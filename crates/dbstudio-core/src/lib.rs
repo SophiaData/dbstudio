@@ -193,7 +193,15 @@ impl Application {
             },
             "transactionState" | "commitTransaction" | "rollbackTransaction" => self.driver_call(str_arg(&args, 0)?, method, Vec::new()),
             "createTable" | "createView" => self.driver_call(str_arg(&args, 0)?, method, args[1..].to_vec()),
-            "describeTable" | "tableSelectSql" | "previewRowUpdates" | "applyEdits" | "insertRow" | "deleteRows" | "countRows" | "dropTable" | "dropView" | "renameTable" => {
+            "countRows" => {
+                let node = str_arg(&args, 0)?;
+                let (_, raw) = parse_node(node)?;
+                let raw = raw.ok_or_else(|| AppError::invalid("请选择表或视图"))?;
+                if !raw.starts_with("table:") && !raw.starts_with("view:") { return Err(AppError::invalid("只能统计表或视图")) }
+                let mut forwarded = vec![json!(raw)]; forwarded.extend_from_slice(&args[1..]);
+                self.driver_call(node, method, forwarded)
+            },
+            "describeTable" | "tableSelectSql" | "previewRowUpdates" | "applyEdits" | "insertRow" | "deleteRows" | "dropTable" | "dropView" | "renameTable" => {
                 let node = str_arg(&args, 0)?;
                 let (_, raw) = parse_node(node)?;
                 let raw = raw.ok_or_else(|| AppError::invalid("请选择具体数据库对象"))?;

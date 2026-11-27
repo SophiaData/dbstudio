@@ -449,6 +449,115 @@ for (const navigation of ['page', 'size']) {
   }
 }
 
+await test('count_is_explicit_preserves_drafts_and_uses_a_fresh_scoped_signal', async (f) => {
+  const calls = []
+  nativeMethods.countRows = async (...args) => { calls.push(args); return 1000000 }
+  f.tab.dirty.set(0, { changes: { body: text('keep-draft') } })
+  assert.equal(calls.length, 0)
+  await f.grid.countRows()
+  assert.equal(f.grid.rowCount, 1000000)
+  assert.equal(f.tab.dirty.get(0).changes.body.text, 'keep-draft')
+  assert.equal(calls[0][0], f.tab.table.id)
+  assert.match(calls[0][1].signalId, /^[a-f0-9-]{36}$/)
+  await f.grid.countRows()
+  assert.notEqual(calls[0][1].signalId, calls[1][1].signalId)
+})
+for (const outcome of ['cancelled', 'success']) {
+  await test(`count_${outcome}_holds_connection_until_cancel_finishes`, async (f) => {
+    f.wb.connections.value[0].capabilities.supportsCancel = true
+    const result = defer(), cancel = defer(), requests = []
+    nativeMethods.countRows = (...args) => { requests.push(args); return result.promise }
+    nativeMethods.cancelQuery = (...args) => { requests.push(args); return cancel.promise }
+    const counting = f.wb.countRows(f.tab)
+    const task = f.tab.rowCountTask
+    const cancelling = f.wb.cancelRowCount(f.tab)
+    await f.wb.cancelRowCount(f.tab)
+    assert.equal(requests.length, 2, 'Repeated cancel must not dispatch twice')
+    assert.deepEqual(requests[1], ['connection:A', requests[0][1].signalId])
+    if (outcome === 'cancelled') result.reject({ code: 'cancelled', message: '操作已取消' })
+    else result.resolve(42)
+    await Promise.resolve(); await Promise.resolve()
+    assert.equal(task.settled, true)
+    assert.equal(task.running, true)
+    assert.equal(f.tab.busy, true)
+    await assert.rejects(f.wb.reloadTab(f.tab), /当前连接/)
+    cancel.resolve(true); await cancelling; await counting
+    assert.equal(task.running, false)
+    assert.equal(f.tab.busy, false)
+    assert.equal(f.wb.locks.size, 0)
+    assert.equal(f.grid.rowCount, outcome === 'success' ? 42 : null)
+    assert.match(task.message, outcome === 'success' ? /42 行/ : /统计已取消/)
+    await f.wb.cancelRowCount(f.tab)
+    assert.equal(requests.length, 2, 'A finished task must not cancel the next query')
+  })
+}
+for (const cancelOutcome of ['false', 'error', 'unsupported']) {
+  await test(`count_cancel_${cancelOutcome}_does_not_claim_the_query_stopped`, async (f) => {
+    f.wb.connections.value[0].capabilities.supportsCancel = cancelOutcome !== 'unsupported'
+    const result = defer()
+    nativeMethods.countRows = () => result.promise
+    let cancels = 0
+    nativeMethods.cancelQuery = async () => { cancels++; if (cancelOutcome === 'error') throw new Error('cancel-network-error'); return false }
+    const counting = f.wb.countRows(f.tab)
+    await f.wb.cancelRowCount(f.tab)
+    const task = f.tab.rowCountTask
+    assert.equal(task.running, true)
+    assert.equal(task.cancelRequested, false)
+    assert.equal(cancels, cancelOutcome === 'unsupported' ? 0 : 1)
+    assert.match(task.message, cancelOutcome === 'unsupported' ? /不支持/ : cancelOutcome === 'error' ? /取消失败/ : /未取消/)
+    result.resolve(5); await counting
+    assert.equal(f.grid.rowCount, 5)
+  })
+}
+for (const change of ['page', 'result', 'generation', 'invalidated', 'table', 'cursor']) {
+  await test(`late_count_does_not_replace_${change}_state`, async (f) => {
+    const result = defer()
+    nativeMethods.countRows = () => result.promise
+    const counting = f.wb.countRows(f.tab)
+    if (change === 'page') f.tab.page = f.makePage(200)
+    if (change === 'result') f.tab.result = { ...f.tab.result }
+    if (change === 'generation') f.tab.generation++
+    if (change === 'invalidated') f.tab.invalidated = true
+    if (change === 'table') f.tab.table = { ...f.tab.table, id: 'connection:A|table:other' }
+    if (change === 'cursor') f.tab.result.cursorId = 'replacement'
+    f.wb.setStatus('new-context')
+    result.resolve(17); await counting
+    assert.equal(f.grid.rowCount, null)
+    assert.equal(f.wb.status.value, 'new-context')
+    assert.equal(f.tab.busy, false)
+  })
+}
+await test('count_survives_component_unmount_and_only_updates_its_own_tab', async (f) => {
+  const result = defer()
+  nativeMethods.countRows = () => result.promise
+  const counting = f.wb.countRows(f.tab)
+  f.unmount()
+  f.wb.activeTabId.value = 'another-tab'
+  f.wb.setStatus('other-tab-status')
+  result.resolve(99); await counting
+  assert.equal(f.tab.rowCountTask.value, 99)
+  assert.equal(f.wb.status.value, 'other-tab-status')
+  assert.equal(f.tab.busy, false)
+})
+for (const value of [Number.MAX_SAFE_INTEGER + 1, -1, 1.5]) {
+  await test(`count_rejects_nonexact_value_${value}`, async (f) => {
+    nativeMethods.countRows = async () => value
+    await f.grid.countRows()
+    assert.equal(f.grid.rowCount, null)
+    assert.match(f.tab.rowCountTask.error, /精确/)
+    assert.equal(f.wb.statusError.value, true)
+  })
+}
+await test('count_failure_is_visible_and_pending_editors_are_preserved', async (f) => {
+  nativeMethods.countRows = async () => { throw new Error('count-read-failed') }
+  await f.grid.countRows()
+  assert.match(f.tab.rowCountTask.error, /count-read-failed/)
+  f.wb.pendingEditors.add(f.tab.id)
+  await assert.rejects(f.wb.countRows(f.tab), /编辑/)
+  f.wb.pendingEditors.delete(f.tab.id)
+  assert.equal(f.wb.locks.size, 0)
+})
+
 const failed = results.filter((result) => !result.passed)
 const summary = { scope: 'real-component-script-and-workbench-with-memory-ipc', mounted_gui: false, native_driver: false, total: results.length, passed: results.length - failed.length, failed: failed.length, cases: results, ipc_methods: [...new Set(ipcCalls)].sort() }
 await writeFile(path.join(output, 'results.json'), JSON.stringify(summary, null, 2) + '\n', { flag: 'wx' })

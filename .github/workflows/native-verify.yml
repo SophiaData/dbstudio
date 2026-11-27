@@ -3,6 +3,12 @@ name: native-verify
 on:
   # PRs and main pushes enter through verify.yml; releases reuse the full suite.
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Full native checks, databases or SQL security diagnosis'
+        type: choice
+        options: [all, databases, sql-security]
+        default: all
   workflow_call:
 
 permissions:
@@ -21,6 +27,7 @@ env:
 
 jobs:
   desktop-macos:
+    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'databases' && inputs.scope != 'sql-security')
     name: macOS native desktop and production build
     runs-on: macos-15
     timeout-minutes: 120
@@ -78,34 +85,60 @@ jobs:
   native-databases:
     name: Dedicated real database and TLS fixtures
     needs: desktop-macos
+    if: ${{ !cancelled() && (needs.desktop-macos.result == 'success' || (github.event_name == 'workflow_dispatch' && (inputs.scope == 'databases' || inputs.scope == 'sql-security'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # Leave capacity for database containers while compiling native clients.
       CARGO_BUILD_JOBS: '1'
+      DBSTUDIO_PAGE_PERF_DIR: ${{ github.workspace }}/out/page-performance
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native driver and fixture dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential pkg-config libssl-dev libssh2-1-dev openssl openssh-client
+            build-essential pkg-config libssl-dev libssh2-1-dev openssl openssh-client fonts-noto-cjk
       - name: Require Docker engine
         run: docker info --format '{{.ServerVersion}}'
+      - name: Install locked frontend dependencies for real page rendering
+        if: inputs.scope != 'sql-security'
+        run: pnpm install --frozen-lockfile
       - name: Compile locked native driver integration tests
         run: cargo test --locked -p dbstudio-drivers --tests --no-run
       - name: Verify real PostgreSQL and MySQL native drivers
+        if: inputs.scope != 'sql-security'
         # Creates random private fixture credentials, runs ignored live tests, then stops
         # only containers whose immutable IDs and per-run labels have been checked.
         run: node scripts/native-database-fixture.mjs
+      - name: Measure real native pages in installed GitHub Chrome
+        if: inputs.scope != 'sql-security'
+        # Native timings and already-arrived page -> UI ready timings stay separate.
+        # Uses playwright-core with channel chrome; never downloads a browser.
+        timeout-minutes: 15
+        run: node scripts/grid-page-performance.mjs
       - name: Verify real Redis TLS and Kafka TLS SASL
+        if: inputs.scope != 'sql-security'
         # Sequential with SQL fixtures to bound memory. Never use --prepare-only as a gate.
         # Private backups/, certificates, env files and container logs are not uploaded.
         run: node scripts/native-secure-fixture.mjs
       - name: Verify real SQL TLS and pinned SSH with independent cancellation
         # Includes trusted-CA hostname failures and explicit MySQL SSH verify-full limitation.
         run: node scripts/native-sql-secure-fixture.mjs
+      - name: Upload public pagination performance evidence only
+        if: always() && inputs.scope != 'sql-security'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-page-performance
+          path: out/page-performance/
+          if-no-files-found: error
+          retention-days: 14
