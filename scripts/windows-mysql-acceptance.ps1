@@ -114,6 +114,9 @@ INSERT INTO dbstudio_acceptance.items_secondary (id, payload) VALUES (1, 'second
     foreach ($name in @('mysql_editor_ime_guard', 'mysql_editor_single_statement', 'mysql_editor_text_result', 'mysql_editor_sql_source', 'mysql_editor_text_kind')) {
         Write-Output "$name=$($report.checks.$name -eq $true)"
     }
+    foreach ($name in @('mysql_context_initial', 'mysql_context_switched', 'mysql_context_observer', 'mysql_context_failed_use', 'mysql_context_crossed', 'mysql_context_labels', 'mysql_context_verified', 'mysql_context_cleanup')) {
+        Write-Output "$name=$($report.checks.$name -eq $true)"
+    }
     if (-not $exited -or $app.ExitCode -ne 0 -or $report.ok -ne $true -or @($required | Where-Object { $report.checks.$_ -ne $true }).Count) {
         throw 'Windows native MySQL acceptance failed.'
     }

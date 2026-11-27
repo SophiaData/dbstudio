@@ -1,4 +1,5 @@
 import type { ObjectRef } from '../../../src/core/model'
+import { nextTick } from 'vue'
 import { backend, type SmokeFixture } from './backend'
 import { decision } from './dialogs'
 import type { NativeToolHost } from './native-tool-smoke'
@@ -471,12 +472,19 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     checks[check] = true
 
     check = 'mysql_execution_context'
+    const runContextEditor = async () => {
+      await nextTick()
+      const current = await tools.sqlEditor()
+      if (current.editor?.state.doc.toString() !== wb.sql.value) throw new Error('Context editor has not mounted its draft')
+      current.setSelection(0)
+      document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+    }
     if (!wb.connections.value.some((item) => item.id === observer.id)) wb.connections.value.push(observer)
     let contextVerified = false
     let contextCleaned = false
     const originalEditorId = wb.openEditorTab(id, 'SELECT DATABASE() AS session_database')
     const beforeContextResult = wb.tabs.value.length
-    document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+    await runContextEditor()
     await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeContextResult + 1)
     const originalResult = wb.activeTab.value!
     const originalSnapshot = originalResult.executionContext
@@ -487,16 +495,18 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     const initialEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库'])
     const initialResultTarget = await waitForTargetText('result-target', [name, '配置默认库', database, '执行时会话库', '该连接当前状态', '最近核实会话库'])
     const transactionBeforeUse = await wb.readTransaction(id)
+    checks.mysql_context_initial = originalTarget.session.database === database && originalSnapshot?.session.database === database
     try {
       const restoreEditorId = wb.openEditorTab(id, `USE ${restoreDatabase}`)
       const beforeUseResult = wb.tabs.value.length
-      document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+      await runContextEditor()
       await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeUseResult + 1)
       const useResult = wb.activeTab.value!
       await wb.refreshSessionContext(id)
       const switchedTarget = await wb.connectionTarget(id)
       const transactionAfterUse = await wb.readTransaction(id)
       const switchedEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库', restoreDatabase])
+      checks.mysql_context_switched = !useResult.executionFailed && switchedTarget.session.database === restoreDatabase
 
       wb.activateEditorTab(restoreEditorId)
       wb.activateTab(originalResult)
@@ -506,17 +516,18 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
 
       wb.openEditorTab(observer.id, 'SELECT DATABASE() AS observer_session_database')
       const beforeObserverResult = wb.tabs.value.length
-      document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+      await runContextEditor()
       await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeObserverResult + 1)
       const observerResult = wb.activeTab.value!
       await wb.refreshSessionContext(observer.id)
       const observerTargetAfter = await wb.connectionTarget(observer.id)
       const observerEditorTarget = await waitForTargetText('editor-target', ['Acceptance observer', '配置默认库', database, '最近核实会话库'])
       const observerResultTarget = await waitForTargetText('result-target', ['Acceptance observer', '执行时会话库', database, '该连接当前状态', '最近核实会话库'])
+      checks.mysql_context_observer = observerTargetAfter.session.database === database
 
       const failedEditorId = wb.openEditorTab(id, 'USE dbstudio_context_missing')
       const beforeFailedUse = wb.tabs.value.length
-      document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+      await runContextEditor()
       await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeFailedUse + 1
         && wb.activeTab.value?.executionFailed === true)
       const failedUseResult = wb.activeTab.value!
@@ -525,6 +536,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
       const transactionAfterFailedUse = await wb.readTransaction(id)
       const failedEditorTarget = await waitForTargetText('editor-target', [name, restoreDatabase, '最近核实会话库'])
       const failedResultTarget = await waitForTargetText('result-target', [name, restoreDatabase, '执行时会话库', '该连接当前状态'])
+      checks.mysql_context_failed_use = failedUseResult.executionFailed === true && afterFailedUse.session.database === restoreDatabase
 
       wb.activateEditorTab(restoreEditorId)
       wb.activateTab(observerResult)
@@ -533,6 +545,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
       const crossedEditorTarget = await waitForTargetText('editor-target', [name, restoreDatabase, '最近核实会话库'])
       wb.activateTab(originalResult)
       const crossedBackResultTarget = await waitForTargetText('result-target', [name, database, restoreDatabase, '执行时会话库', '该连接当前状态'])
+      checks.mysql_context_crossed = resultSnapshotRetained
 
       const observerTable: ObjectRef = {
         id: `${connectionNode(observer.id)}|table:${database}.items`,
@@ -542,11 +555,13 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         hasChildren: true
       }
       await wb.openTable(observerTable)
+      await nextTick()
       const itemLabels = Array.from(document.querySelectorAll<HTMLButtonElement>('.result-tab .tab-label'))
         .map((label) => (label.textContent ?? '').trim())
         .filter((label) => label.startsWith('items'))
       const tableLabelsDisambiguated = itemLabels.some((label) => label.includes(name))
         && itemLabels.some((label) => label.includes('Acceptance observer'))
+      checks.mysql_context_labels = tableLabelsDisambiguated
 
       contextVerified = originalTarget.connectionId === id
         && originalTarget.connectionName === name
@@ -592,6 +607,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         && crossedEditorTarget.includes(restoreDatabase)
         && crossedBackResultTarget.includes(database) && crossedBackResultTarget.includes(restoreDatabase)
         && tableLabelsDisambiguated
+      checks.mysql_context_verified = contextVerified
       wb.activateEditorTab(failedEditorId)
     } finally {
       await backend.executeStatement(connectionNode(id), `USE ${database}`, {})
@@ -613,6 +629,7 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
         && observerTransaction.pendingAffected === 0
         && !restoredEditorTarget.includes(restoreDatabase)
         && !restoredResultTarget.includes(restoreDatabase)
+      checks.mysql_context_cleanup = contextCleaned
     }
     checks[check] = contextVerified && contextCleaned
   } catch {
