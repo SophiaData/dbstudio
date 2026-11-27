@@ -62,12 +62,20 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
 
     // 临时表随测试连接关闭释放；回滚后的计数可检测 USE 意外提交事务。
     driver.call("executeStatement", vec![json!("CREATE TEMPORARY TABLE context_transaction_probe (id INT PRIMARY KEY) ENGINE=InnoDB"), json!({})]).unwrap();
-    driver.call("executeStatement", vec![json!("INSERT INTO context_transaction_probe VALUES (1)"), json!({})]).unwrap();
+    let insert_sql = "INSERT INTO context_transaction_probe VALUES (:id)";
+    driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"id","value":1}]})]).unwrap();
     let active = driver.call("transactionState", vec![]).unwrap();
     assert_eq!(active["active"], true);
     assert_eq!(active["pendingAffected"], 1);
+    let count_sql = "SELECT COUNT(*) AS total FROM context_transaction_probe";
+    let pending_rows = driver.call("runQuery", vec![json!(count_sql), json!({"keepCursor":false})]).unwrap();
+    assert_eq!(pending_rows["rows"][0]["cells"][0], json!({"kind":"number","value":1}));
+    assert_eq!(pending_rows["executedSql"], count_sql);
     let switched = driver.call("executeStatement", vec![json!("USE information_schema"), json!({})]).unwrap();
     assert_eq!(switched["transactionState"], active);
+    assert!(driver.call("runQuery", vec![json!(count_sql), json!({"keepCursor":false})]).is_err(), "不能复用旧库的预处理语句读取未限定表名");
+    assert!(driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"id","value":2}]})]).is_err(), "不能复用旧库的预处理写语句");
+    assert_eq!(driver.call("transactionState", vec![]).unwrap(), active);
     assert!(driver.call("executeStatement", vec![json!("USE dbstudio_context_missing"), json!({})]).is_err());
     assert_eq!(driver.call("transactionState", vec![]).unwrap(), active);
     let after_failure = driver.call("runQuery", vec![json!("SELECT DATABASE() AS db"), json!({"keepCursor":false})]).unwrap();
@@ -75,7 +83,7 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
     let restored = driver.call("executeStatement", vec![json!(restore), json!({})]).unwrap();
     assert_eq!(restored["transactionState"], active);
     driver.call("rollbackTransaction", vec![]).unwrap();
-    let rolled_back = driver.call("runQuery", vec![json!("SELECT COUNT(*) AS total FROM context_transaction_probe"), json!({"keepCursor":false})]).unwrap();
+    let rolled_back = driver.call("runQuery", vec![json!(count_sql), json!({"keepCursor":false})]).unwrap();
     assert_eq!(rolled_back["rows"][0]["cells"][0], json!({"kind":"number","value":0}));
     assert_eq!(driver.call("transactionState", vec![]).unwrap(), idle);
 }
