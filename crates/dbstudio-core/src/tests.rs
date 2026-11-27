@@ -13,8 +13,8 @@ impl Driver for FixtureDriver {
     }
     fn call(&mut self, method: &str, args: Vec<Value>) -> DriverResult<Value> {
         match method {
-            "runQuery" => {
-                if args[0] == "BLOCK" {
+            "runQuery" | "countRows" => {
+                if args[0] == "BLOCK" || (method == "countRows" && args[0] == "table:fixture") {
                     if let Some(entered) = self.blocker.entered.lock().unwrap().take() { let _ = entered.send(()); }
                     let mut interrupted = self.blocker.interrupted.lock().unwrap();
                     while !*interrupted {
@@ -23,6 +23,10 @@ impl Driver for FixtureDriver {
                         if next.1.timed_out() { return Err(AppError::new("timeout", "synthetic-private-target")) }
                     }
                     return Err(AppError::new("cancelled", "synthetic-sensitive-query"))
+                }
+                if method == "countRows" {
+                    if args[0] == "table:error" { return Err(AppError::new("driver-error", "synthetic-private-count")) }
+                    return Ok(json!(7))
                 }
                 Ok(json!({"cursorId":"raw-native-cursor","columns":[],"rows":[],"offset":0,"returned":0,"hasMore":false,"executedSql":"SELECT 1","elapsedMs":0}))
             },
@@ -81,6 +85,98 @@ fn application_is_send_sync_and_cancel_does_not_wait_for_query_mutex() {
 }
 
 #[test]
+fn count_rows_cancellation_is_scoped_and_optional_options_are_compatible() {
+    for options in [None, Some(json!({})), Some(json!({"signalId":"count-only"}))] {
+        let (app, blocker, entered) = fixture();
+        let id = add(&app, "count"); let node = format!("connection:{id}");
+        let mut args = vec![json!(format!("{node}|table:fixture"))];
+        let scoped = options.as_ref().is_some_and(|value| value.get("signalId").is_some());
+        if let Some(options) = options { args.push(options); }
+        let running = app.clone();
+        let count = thread::spawn(move || running.call("countRows", args));
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let cancel_app = app.clone(); let cancel_node = node.clone();
+        let (sent, received) = mpsc::channel();
+        let cancellation = thread::spawn(move || {
+            // Validation must fail even while COUNT owns the driver mutex.
+            let invalid = cancel_app.call("countRows", vec![json!(format!("{cancel_node}|table:ready")), json!({"signalId":false})]);
+            let wrong = cancel_app.call("cancelQuery", vec![json!(cancel_node), json!("wrong-count")]);
+            let mut correct = vec![json!(cancel_node)];
+            if scoped { correct.push(json!("count-only")); }
+            let correct = cancel_app.call("cancelQuery", correct);
+            let _ = sent.send((invalid, wrong, correct));
+        });
+        let outcome = received.recv_timeout(Duration::from_secs(2));
+        *blocker.interrupted.lock().unwrap() = true; blocker.changed.notify_all();
+        let (invalid, wrong, correct) = outcome.unwrap();
+        assert_eq!(invalid.unwrap_err().code, "invalid-argument");
+        assert_eq!(wrong.unwrap(), false); assert_eq!(correct.unwrap(), true);
+        assert_eq!(count.join().unwrap().unwrap_err().code, "cancelled");
+        cancellation.join().unwrap();
+        assert_eq!(app.call("cancelQuery", vec![json!(node)]).unwrap(), false);
+        assert_eq!(app.call("countRows", vec![json!(format!("{node}|table:ready"))]).unwrap(), 7);
+
+        // The old COUNT signal must not interrupt a later active query.
+        *blocker.interrupted.lock().unwrap() = false;
+        let (sent, next_entered) = mpsc::channel();
+        *blocker.entered.lock().unwrap() = Some(sent);
+        let next_app = app.clone(); let next_node = node.clone();
+        let next = thread::spawn(move || next_app.call("runQuery", vec![json!(next_node), json!("BLOCK"), json!({"signalId":"next-query"})]));
+        next_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(app.call("cancelQuery", vec![json!(node), json!("count-only")]).unwrap(), false);
+        assert!(!*blocker.interrupted.lock().unwrap());
+        assert_eq!(app.call("cancelQuery", vec![json!(node), json!("next-query")]).unwrap(), true);
+        assert_eq!(next.join().unwrap().unwrap_err().code, "cancelled");
+        app.close().unwrap();
+    }
+}
+
+#[test]
+fn count_rows_validates_arguments_and_forwards_optional_signal() {
+    struct EchoCount;
+    impl Driver for EchoCount {
+        fn dialect_id(&self) -> &str { "sqlite" }
+        fn capabilities(&self) -> Value { json!({}) }
+        fn call(&mut self, method: &str, args: Vec<Value>) -> DriverResult<Value> {
+            assert_eq!(method, "countRows"); Ok(json!(args))
+        }
+    }
+    let app = Application::open_with_factory(base_dir(), Arc::new(MemorySecretStore::default()),
+        Arc::new(|_, _| Ok(Box::new(EchoCount)))).unwrap();
+    let id = add(&app, "count-arguments"); let node = format!("connection:{id}|table:fixture");
+    for options in [None, Some(json!({})), Some(json!({"signalId":"count-123"}))] {
+        let mut args = vec![json!(node)]; let mut expected = vec![json!("table:fixture")];
+        if let Some(options) = options { args.push(options.clone()); expected.push(options); }
+        assert_eq!(app.call("countRows", args).unwrap(), json!(expected));
+    }
+    for options in [json!(null), json!(true), json!(42), json!("signal"), json!([]),
+        json!({"signalId":null}), json!({"signalId":false}), json!({"signalId":42}),
+        json!({"signalId":[]}), json!({"signalId":{}}), json!({"signalId":""}), json!({"signalId":" \t\n"})] {
+        assert_eq!(app.call("countRows", vec![json!(node), options]).unwrap_err().code, "invalid-argument");
+    }
+    for args in [vec![], vec![json!(null)], vec![json!(42)], vec![json!("")],
+        vec![json!(format!("connection:{id}"))], vec![json!(format!("connection:{id}|folder:tables"))],
+        vec![json!(node), json!({}), json!({"signalId":"extra"})]] {
+        assert_eq!(app.call("countRows", args).unwrap_err().code, "invalid-argument");
+    }
+    assert_eq!(app.call("cancelQuery", vec![json!(format!("connection:{id}"))]).unwrap(), false);
+    app.close().unwrap();
+}
+
+#[test]
+fn count_rows_error_clears_running_signal() {
+    let (app, blocker, _) = fixture(); let id = add(&app, "count-error"); let node = format!("connection:{id}");
+    let error = app.call("countRows", vec![json!(format!("{node}|table:error")), json!({"signalId":"failed-count"})]).unwrap_err();
+    assert_eq!(error.code, "driver-failed"); assert!(!error.message.contains("synthetic-private"));
+    assert_eq!(app.call("cancelQuery", vec![json!(node), json!("failed-count")]).unwrap(), false);
+    assert_eq!(app.call("cancelQuery", vec![json!(node)]).unwrap(), false);
+    assert!(!*blocker.interrupted.lock().unwrap());
+    assert_eq!(app.call("countRows", vec![json!(format!("{node}|table:ready")), json!({"signalId":"new-count"})]).unwrap(), 7);
+    assert!(app.call("runQuery", vec![json!(node), json!("SELECT 1")]).is_ok());
+    app.close().unwrap();
+}
+
+#[test]
 fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
     struct DelayedCancelDriver {
         first_started: mpsc::Sender<()>,
@@ -93,7 +189,7 @@ fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
         fn capabilities(&self) -> Value { json!({"supportsCancel":true}) }
         fn cancel_handle(&self) -> CancelHandle { self.cancel.clone() }
         fn call(&mut self, _: &str, args: Vec<Value>) -> DriverResult<Value> {
-            if args[0]["signalId"] == "first" {
+            if args.last().unwrap()["signalId"] == "first" {
                 self.first_started.send(()).unwrap();
                 self.finish_first.recv_timeout(Duration::from_secs(5)).unwrap();
             } else {
@@ -103,6 +199,7 @@ fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
         }
     }
 
+    for first_method in ["runQuery", "countRows"] {
     let (first_started, wait_for_first) = mpsc::channel();
     let (finish_first, first_finished) = mpsc::channel();
     let (next_started, wait_for_next) = mpsc::channel();
@@ -122,7 +219,7 @@ fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
 
     thread::scope(|scope| {
         let queries = scope.spawn(|| {
-            session.call("runQuery", vec![json!({"signalId":"first"})]).unwrap();
+            session.call(first_method, vec![json!("table:fixture"), json!({"signalId":"first"})]).unwrap();
             session.call("runQuery", vec![json!({"signalId":"next"})]).unwrap();
         });
         wait_for_first.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -138,6 +235,7 @@ fn next_query_waits_for_in_flight_cancellation_on_the_same_session() {
             "the next query reached the driver before the previous cancellation completed");
         wait_for_next.try_recv().unwrap();
     });
+    }
 }
 
 #[test]

@@ -51,6 +51,21 @@ export interface SortKey {
   readonly column: string
   readonly direction: 'ASC' | 'DESC'
 }
+export interface RowCountTask {
+  signalId: string
+  running: boolean
+  settled: boolean
+  cancelling: boolean
+  cancelRequested: boolean
+  value: number | null
+  message: string
+  error: string
+  page: ResultPage | null
+  result: QueryResult | null
+  generation: number
+  cursorId?: string | null
+  tableId: string
+}
 export interface ResultTab {
   id: string
   connectionId: string
@@ -73,6 +88,7 @@ export interface ResultTab {
   filter: string
   appliedFilter?: string
   pageSize?: number
+  rowCountTask?: RowCountTask
   order: readonly SortKey[]
   generation: number
 }
@@ -163,6 +179,63 @@ export function useWorkbench() {
     locks.add(id)
     try { return await operation() }
     finally { locks.delete(id) }
+  }
+  const countCancellations = new Map<string, Promise<void>>()
+  function ownsRowCount(tab: ResultTab, task: RowCountTask) {
+    return tabs.value.includes(tab) && tab.rowCountTask === task && !tab.invalidated &&
+      tab.page === task.page && tab.result === task.result && tab.generation === task.generation &&
+      tab.result?.cursorId === task.cursorId && tab.table?.id === task.tableId
+  }
+  async function countRows(tab: ResultTab) {
+    if (!tab.table || tab.invalidated) throw new Error('当前对象不可统计，请重新打开结果')
+    if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
+    const task: RowCountTask = reactive({ signalId: crypto.randomUUID(), running: true, settled: false,
+      cancelling: false, cancelRequested: false, value: null, message: '正在统计完整对象（不含筛选）', error: '',
+      page: tab.page, result: tab.result, generation: tab.generation, cursorId: tab.result?.cursorId, tableId: tab.table.id })
+    tab.rowCountTask = task
+    tab.busy = true
+    try {
+      const value = await backend.countRows(task.tableId, { signalId: task.signalId })
+      if (!ownsRowCount(tab, task)) return
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error('统计值超出可精确显示的范围')
+      task.value = value
+      task.message = `完整对象共 ${value} 行（不含当前筛选）`
+    } catch (cause) {
+      if (ownsRowCount(tab, task)) {
+        const cancelled = typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'cancelled'
+        task.error = cancelled ? '' : `统计失败：${errorText(cause)}`
+        task.message = cancelled ? '统计已取消' : ''
+      }
+    } finally {
+      task.settled = true
+      // Keep the connection occupied until an in-flight cancel returns; it must not reach the next query.
+      await countCancellations.get(task.signalId)
+      task.running = false
+      tab.busy = false
+      if (ownsRowCount(tab, task) && activeTab.value === tab) setStatus(task.error || task.message, !!task.error)
+    }
+  }
+  async function cancelRowCount(tab: ResultTab) {
+    const task = tab.rowCountTask
+    if (!task?.running || task.settled || task.cancelling || task.cancelRequested) return
+    if (!connections.value.find(connection => connection.id === tab.connectionId)?.capabilities?.supportsCancel) {
+      task.message = '当前驱动不支持取消统计，请等待结果'
+      return
+    }
+    task.cancelling = true
+    const pending = (async () => {
+      try {
+        const cancelled = await backend.cancelQuery(connectionNode(tab.connectionId), task.signalId)
+        if (!task.settled) {
+          task.cancelRequested = cancelled
+          task.message = cancelled ? '已请求取消，等待统计结束' : '未取消：统计尚未开始或已经结束，可重试'
+        }
+      } catch (cause) {
+        if (!task.settled) task.message = `取消失败：${errorText(cause)}；可重试`
+      } finally { task.cancelling = false }
+    })()
+    countCancellations.set(task.signalId, pending)
+    try { await pending } finally { countCancellations.delete(task.signalId) }
   }
   const makeNode = (node: ObjectRef): TreeNode => ({ ref: node, children: [], expanded: false, loaded: false, loading: false, error: '' })
   async function refreshConnections() {
@@ -811,6 +884,7 @@ export function useWorkbench() {
     setStatus, attempt, boot, refreshConnections, selectConnection, activateTab, selectNode, toggleNode, placeholders, parameterSlots,
     editorTabs, activeEditorTabId, editorStorageWarning, openEditorTab, activateEditorTab, closeEditorTab,
     executeScript, captureEditorExecution, executeEditorRequest, cancelExecution, stageCell, stageCells, canEdit, rowKeys,
+    countRows: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => countRows(tab)), cancelRowCount, ownsRowCount,
     openTable: (node: ObjectRef) => withConnectionOperation(connectionOf(node.id), () => openTable(node)),
     applyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => applyTab(tab)),
     reviewAndApplyTab: (tab: ResultTab) => withConnectionOperation(tab.connectionId, () => reviewAndApplyTab(tab)),

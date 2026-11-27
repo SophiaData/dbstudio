@@ -12,10 +12,27 @@ const copied: string[] = []
 const unexpectedCalls: string[] = []
 const nativeReplies: { method: 'fetchCellValue' | 'fetchResultPage' | 'runQuery' | 'closeCursor'; args: unknown[]; reply: () => unknown }[] = []
 let deferredCell: { requested: boolean; settled: boolean; resolve: (value: CellValue) => void; reject: (error: Error) => void } | null = null
+let countReply: { tableId: string; connectionId: string; signal: string | null; settled: boolean; result: Promise<number>;
+  resolve: (value: number) => void; reject: (error: unknown) => void } | null = null
+let cancelReply: { result: Promise<boolean>; resolve: (value: boolean) => void; reject: (error: unknown) => void; requested: boolean } | null = null
 Object.assign(window, { gridNativeCall: (...args: unknown[]) => {
   calls.push(args)
   const expected = nativeReplies[0]
   const payload = args[1] as { method?: string; args?: unknown[] } | undefined
+  if (args[0] === 'backend_call' && countReply) {
+    if (payload?.method === 'countRows' && !countReply.signal && payload.args?.length === 2 && payload.args[0] === countReply.tableId) {
+      const options = payload.args[1] as { signalId?: string }
+      if (Object.keys(options).join(',') === 'signalId' && typeof options.signalId === 'string' && /^[a-f0-9-]{36}$/.test(options.signalId)) {
+        countReply.signal = options.signalId
+        return countReply.result
+      }
+    }
+    if (payload?.method === 'cancelQuery' && cancelReply && !cancelReply.requested && countReply.signal &&
+      JSON.stringify(payload.args) === JSON.stringify([`connection:${countReply.connectionId}`, countReply.signal])) {
+      cancelReply.requested = true
+      return cancelReply.result
+    }
+  }
   if (expected && args.length === 2 && args[0] === 'backend_call' && payload?.method === expected.method &&
     JSON.stringify(payload.args) === JSON.stringify(expected.args)) {
     nativeReplies.shift()
@@ -214,6 +231,34 @@ Object.assign(window, { gridFixture: {
   clearEdits: () => wb.activeTab.value!.dirty.clear(),
   prepareRange,
   preparePagination,
+  armCount: (supportsCancel = true) => {
+    if (countReply && !countReply.settled) throw new Error('Count is already pending')
+    const tab = wb.activeTab.value!
+    const connection = wb.connections.value.find(item => item.id === tab.connectionId)!
+    connection.capabilities = { ...connection.capabilities!, supportsCancel }
+    let resolve!: (value: number) => void, reject!: (error: unknown) => void
+    const result = new Promise<number>((yes, no) => { resolve = yes; reject = no })
+    countReply = { tableId: tab.table!.id, connectionId: tab.connectionId, signal: null, settled: false, result, resolve, reject }
+    cancelReply = null
+  },
+  finishCount: (outcome: 'success' | 'failure' | 'cancelled', value = 1000000) => {
+    if (!countReply?.signal || countReply.settled) throw new Error('No running count')
+    countReply.settled = true
+    if (outcome === 'success') countReply.resolve(value)
+    else countReply.reject({ code: outcome === 'cancelled' ? 'cancelled' : 'driver-error', message: outcome === 'cancelled' ? '操作已取消' : '合成统计失败' })
+  },
+  armCountCancel: () => {
+    let resolve!: (value: boolean) => void, reject!: (error: unknown) => void
+    const result = new Promise<boolean>((yes, no) => { resolve = yes; reject = no })
+    cancelReply = { result, resolve, reject, requested: false }
+  },
+  finishCountCancel: (outcome: 'true' | 'false' | 'failure') => {
+    if (!cancelReply?.requested) throw new Error('Cancel was not requested')
+    if (outcome === 'failure') cancelReply.reject(new Error('合成取消失败'))
+    else cancelReply.resolve(outcome === 'true')
+  },
+  countState: () => ({ requested: !!countReply?.signal, cancelRequested: !!cancelReply?.requested,
+    activeRunning: wb.activeTab.value?.rowCountTask?.running ?? false, signal: countReply?.signal }),
   paginationState: () => {
     const tab = wb.activeTab.value!
     return { size: tab.pageSize ?? 200, explicitSize: tab.pageSize ?? null,
