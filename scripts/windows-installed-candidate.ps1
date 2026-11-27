@@ -644,6 +644,26 @@ public static class AcceptanceDesktop {
     }
     $report.checks.editPreviewAndCommit = $true
 
+    $script:action = 'edit_and_rollback'
+    Edit-GridValue $app 'candidate-committed' 'candidate-rolled-back'
+    Invoke-Button $app.Window '应用修改 (1)'
+    $null = Find-Control $app.Window $cell '更新 SQL 预览' -AllowOffscreen
+    Invoke-Button $app.Window '应用修改'
+    $null = Find-Control $app.Window $cell '未提交 · 1 行'
+    $null = Find-Control $app.Window $cell 'candidate-rolled-back' -AllowOffscreen
+    if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
+        Stop-Acceptance 'ROLLBACK_UNCOMMITTED_DATA_VISIBLE'
+    }
+    Invoke-Button $app.Window '回滚'
+    $null = Find-Control $app.Window $cell '回滚当前连接' -AllowOffscreen
+    Invoke-Button $app.Window '确认'
+    $null = Find-Control $app.Window $cell '已回滚当前连接事务' -AllowOffscreen
+    $null = Find-Control $app.Window $cell 'candidate-committed' -AllowOffscreen
+    if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
+        Stop-Acceptance 'ROLLBACK_READBACK_MISMATCH'
+    }
+    $report.checks.editRollbackAndReadback = $true
+
     $script:action = 'export_csv'
     $csvPath = Join-Path $root 'candidate.csv'
     Invoke-Button $app.Window '导出完整来源…'
