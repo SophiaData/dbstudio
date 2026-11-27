@@ -62,8 +62,8 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
 
     // 临时表随测试连接关闭释放；回滚后的计数可检测 USE 意外提交事务。
     driver.call("executeStatement", vec![json!("CREATE TEMPORARY TABLE context_transaction_probe (id INT PRIMARY KEY) ENGINE=InnoDB"), json!({})]).unwrap();
-    let insert_sql = "INSERT INTO context_transaction_probe VALUES (:id)";
-    driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"id","value":1}]})]).unwrap();
+    let insert_sql = "INSERT INTO context_transaction_probe VALUES (?)";
+    driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"?1","value":1}]})]).unwrap();
     let active = driver.call("transactionState", vec![]).unwrap();
     assert_eq!(active["active"], true);
     assert_eq!(active["pendingAffected"], 1);
@@ -74,7 +74,7 @@ fn use_changes_only_session_database_and_preserves_managed_transaction() {
     let switched = driver.call("executeStatement", vec![json!("USE information_schema"), json!({})]).unwrap();
     assert_eq!(switched["transactionState"], active);
     assert!(driver.call("runQuery", vec![json!(count_sql), json!({"keepCursor":false})]).is_err(), "不能复用旧库的预处理语句读取未限定表名");
-    assert!(driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"id","value":2}]})]).is_err(), "不能复用旧库的预处理写语句");
+    assert!(driver.call("executeStatement", vec![json!(insert_sql), json!({"parameters":[{"name":"?1","value":2}]})]).is_err(), "不能复用旧库的预处理写语句");
     assert_eq!(driver.call("transactionState", vec![]).unwrap(), active);
     assert!(driver.call("executeStatement", vec![json!("USE dbstudio_context_missing"), json!({})]).is_err());
     assert_eq!(driver.call("transactionState", vec![]).unwrap(), active);
