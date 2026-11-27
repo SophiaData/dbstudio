@@ -20,8 +20,12 @@ export function textValue(cell: CellValue): string | null {
 }
 export async function fullCell(tab: ResultTab, row: number, column: number, cell: CellValue): Promise<CellValue> {
   if ((cell.kind === 'text' || cell.kind === 'blob') && cell.truncated) {
+    if (tab.contextStale) throw new Error('会话目标已变化或未确认，请先刷新结果再读取完整字段')
     if (!tab.result?.cursorId || tab.invalidated) throw new Error('游标不可用，无法获取完整字段')
-    return complete(await backend.fetchCellValue(tab.result.cursorId, row, column))
+    const contextRevision = tab.contextRevision
+    const value = await backend.fetchCellValue(tab.result.cursorId, row, column)
+    if (tab.contextStale || tab.contextRevision !== contextRevision) throw new Error('读取期间会话目标已变化，请先刷新结果')
+    return complete(value)
   }
   return complete(cell)
 }

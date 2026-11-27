@@ -73,6 +73,7 @@ CREATE TABLE dbstudio_acceptance.items_secondary (
 CREATE TABLE dbstudio_restore.items LIKE dbstudio_acceptance.items;
 CREATE USER 'acceptance'@'127.0.0.1';
 GRANT SELECT, UPDATE ON dbstudio_acceptance.* TO 'acceptance'@'127.0.0.1';
+GRANT SELECT ON dbstudio_restore.* TO 'acceptance'@'127.0.0.1';
 INSERT INTO dbstudio_acceptance.items (id, group_id, payload, note) VALUES $values;
 INSERT INTO dbstudio_acceptance.items_secondary (id, payload) VALUES (1, 'secondary-row-1'), (2, 'secondary-row-2');
 "@
@@ -101,7 +102,7 @@ INSERT INTO dbstudio_acceptance.items_secondary (id, payload) VALUES (1, 'second
         throw "The native WebView produced no acceptance report (exited=$exited, exitCode=$($app.ExitCode))."
     }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_codemirror_execution', 'mysql_editor_daily_tools', 'mysql_editor_error_navigation', 'mysql_editor_large_drafts', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_grid_batch_paste', 'mysql_guard_local_apply_preview', 'mysql_connection_draft_aggregate', 'mysql_generated_column_export')
+    $required = @('isolated_fixture', 'mysql_connection', 'mysql_alias_completion', 'mysql_codemirror_execution', 'mysql_editor_daily_tools', 'mysql_editor_error_navigation', 'mysql_editor_large_drafts', 'mysql_multi_sort_pages', 'mysql_cancel_then_query', 'mysql_transaction', 'mysql_update_preview', 'mysql_grid_batch_paste', 'mysql_guard_local_apply_preview', 'mysql_connection_draft_aggregate', 'mysql_generated_column_export', 'mysql_execution_context')
     if ($report.editorPerformance) {
         @{ sha = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID; metrics = $report.editorPerformance } | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $PWD 'editor-performance.json') -Encoding utf8NoBOM
@@ -111,6 +112,9 @@ INSERT INTO dbstudio_acceptance.items_secondary (id, payload) VALUES (1, 'second
         Write-Output "$name=$passed"
     }
     foreach ($name in @('mysql_editor_ime_guard', 'mysql_editor_single_statement', 'mysql_editor_text_result', 'mysql_editor_sql_source', 'mysql_editor_text_kind')) {
+        Write-Output "$name=$($report.checks.$name -eq $true)"
+    }
+    foreach ($name in @('mysql_context_initial', 'mysql_context_switched', 'mysql_context_observer', 'mysql_context_failed_use', 'mysql_context_crossed', 'mysql_context_labels', 'mysql_context_verified', 'mysql_context_cleanup')) {
         Write-Output "$name=$($report.checks.$name -eq $true)"
     }
     if (-not $exited -or $app.ExitCode -ne 0 -or $report.ok -ne $true -or @($required | Where-Object { $report.checks.$_ -ne $true }).Count) {

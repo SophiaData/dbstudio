@@ -243,7 +243,7 @@ fn edit_result(total:u64,outcomes:Vec<Value>,in_transaction:bool)->Value{
     let ok=outcomes.iter().all(|outcome|outcome["error"].is_null());
     json!({"affected":total,"ok":ok,"outcomes":outcomes,"inTransaction":in_transaction})
 }
-pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<Arc<SshTunnel>>,database:String}
+pub struct MysqlDriver {conn:Conn,cursors:HashMap<String,Cursor>,sequence:u64,session_epoch:u64,active:bool,pending:u64,import_active:bool,import_failed:bool,import_next:u64,import_target:Option<String>,running:Arc<AtomicBool>,cancel:CancelHandle,_tunnel:Option<Arc<SshTunnel>>,database:String}
 pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dyn Driver>>{
     let host=n::option(config,"host","127.0.0.1");let port=n::port(config,"port",3306)?;
     let database=n::option(config,"database","");if database.is_empty(){return Err(DriverError::invalid("缺少数据库名"));}
@@ -269,9 +269,12 @@ pub fn connect(config:&ConnectionConfig,secrets:&SecretMap)->DriverResult<Box<dy
         let mut control=connect_options(&opts).map_err(error)?;
         control.query_drop(format!("KILL QUERY {id}")).map_err(error)?;Ok(true)
     });
-    Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel,database:database.clone()}))
+    Ok(Box::new(MysqlDriver{conn,cursors:HashMap::new(),sequence:0,session_epoch:0,active:false,pending:0,import_active:false,import_failed:false,import_next:0,import_target:None,running,cancel,_tunnel:tunnel,database:database.clone()}))
 }
 impl MysqlDriver {
+    // Prepared statements retain their prepare-time database. Give the bounded
+    // client cache a new key after USE, without resetting the connection/transaction.
+    fn session_sql(&self,sql:&str)->String{format!("/*dbstudio-session-{}*/ {sql}",self.session_epoch)}
     /// Single error→transaction-state mapping shared by every MySQL execution
     /// path, so a server-side deadlock rollback cannot leave a stale
     /// `active`/`pending` pair behind.
@@ -282,20 +285,21 @@ impl MysqlDriver {
         }
     }
     fn query(&mut self,sql:&str,values:&[Value])->DriverResult<Vec<Row>>{
-        let params=params(values)?;self.running.store(true,Ordering::SeqCst);let result=self.conn.exec(sql,params);self.running.store(false,Ordering::SeqCst);self.note_mysql_error(&result);result.map_err(error)
+        let params=params(values)?;let sql=self.session_sql(sql);self.running.store(true,Ordering::SeqCst);let result=self.conn.exec(sql,params);self.running.store(false,Ordering::SeqCst);self.note_mysql_error(&result);result.map_err(error)
     }
     fn execute(&mut self,sql:&str,values:&[Value])->DriverResult<u64>{
         let params=params(values)?;self.running.store(true,Ordering::SeqCst);
         // COM_STMT_PREPARE does not support all transaction/savepoint control statements.
         // Values remain bound with exec_drop; static/control SQL uses COM_QUERY.
-        let result=if values.is_empty(){self.conn.query_drop(sql)}else{self.conn.exec_drop(sql,params)};
+        let prepared_sql=self.session_sql(sql);
+        let result=if values.is_empty(){self.conn.query_drop(sql)}else{self.conn.exec_drop(prepared_sql,params)};
         self.running.store(false,Ordering::SeqCst);
         self.note_mysql_error(&result);
         result.map_err(error)?;Ok(self.conn.affected_rows())
     }
     fn begin(&mut self)->DriverResult<()>{if !self.active{self.execute("START TRANSACTION",&[])?;self.active=true;self.pending=0;}Ok(())}
     fn page(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<Value>{
-        let stmt=self.conn.prep(sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let columns=stmt.columns().to_vec();let args=params(values)?;
+        let prepared_sql=self.session_sql(sql);let stmt=self.conn.prep(prepared_sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let columns=stmt.columns().to_vec();let args=params(values)?;
         self.running.store(true,Ordering::SeqCst);
         // Original column names may repeat: a derived-table wrapper would reject valid SQL.
         // Keep only a page in memory; QueryResult drains the remaining wire rows on drop.
@@ -314,7 +318,7 @@ impl MysqlDriver {
     /// rows in a bounded snapshot. A rejected row releases the snapshot so later pages and full-value
     /// reads keep the existing live re-query path.
     fn page_with_snapshot(&mut self,sql:&str,values:&[Value],offset:usize,limit:usize)->DriverResult<(Value,Option<Snapshot>)>{
-        let stmt=self.conn.prep(sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let columns=stmt.columns().to_vec();let args=params(values)?;
+        let prepared_sql=self.session_sql(sql);let stmt=self.conn.prep(prepared_sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let columns=stmt.columns().to_vec();let args=params(values)?;
         self.running.store(true,Ordering::SeqCst);
         // Original column names may repeat: a derived-table wrapper would reject valid SQL.
         let result=(||->mysql::Result<(Vec<DriverResult<Vec<Value>>>,Option<Vec<Vec<MValue>>>,usize)>{
@@ -346,7 +350,7 @@ impl MysqlDriver {
         self.running.store(true,Ordering::SeqCst);
         let snapshot=(||{
             if values.is_empty(){management_snapshot(self.conn.query_iter(&sql).map_err(error)?)}
-            else{management_snapshot(self.conn.exec_iter(&sql,params(&values)?).map_err(error)?)}
+            else{let prepared_sql=self.session_sql(&sql);management_snapshot(self.conn.exec_iter(prepared_sql,params(&values)?).map_err(error)?)}
         })();
         self.running.store(false,Ordering::SeqCst);let snapshot=snapshot?;
         if keep{management_retention(count,retained,snapshot.bytes)?;}
@@ -950,7 +954,7 @@ impl Driver for MysqlDriver {
                 let row=args.get(1).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("行下标无效"))?;let column=args.get(2).and_then(Value::as_u64).ok_or_else(||DriverError::invalid("列下标无效"))? as usize;
                 let(sql,values)=match c{Cursor::Management(snapshot)=>return snapshot.full_cell(usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column),Cursor::Query{sql,values,snapshot}=>{if let Some(snapshot)=snapshot{return snapshot_full_cell(snapshot,usize::try_from(row).map_err(|_|DriverError::invalid("行下标无效"))?,column);}(sql.clone(),values.clone())}};
                 self.running.store(true,Ordering::SeqCst);
-                let result=(||->DriverResult<Value>{let args=params(&values)?;let stmt=self.conn.prep(&sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let mut stream=self.conn.exec_iter(&stmt,args).map_err(error)?;
+                let result=(||->DriverResult<Value>{let args=params(&values)?;let prepared_sql=self.session_sql(&sql);let stmt=self.conn.prep(prepared_sql).map_err(error)?;if stmt.columns().is_empty(){return Err(DriverError::unsupported("分页查询只接受有返回列的查询语句"));}let mut stream=self.conn.exec_iter(&stmt,args).map_err(error)?;
                     for _ in 0..row{match stream.next(){Some(row)=>{row.map_err(error)?;},None=>return Err(DriverError::new("not-found","行不存在"))}}
                     let r=stream.next().ok_or_else(||DriverError::new("not-found","行不存在"))?.map_err(error)?;
                     if column>=r.len(){return Err(DriverError::invalid("列下标越界"));}cell(r.as_ref(column).unwrap(),&r.columns_ref()[column],true)
@@ -965,19 +969,21 @@ impl Driver for MysqlDriver {
             "executeStatement"=>{
                 let original=string_argument(&args,0,"sql")?;let options=args.get(1).unwrap_or(&Value::Null);let(sql,values)=n::bind_named(original,options,false)?;let started=Instant::now();
                 if management_statement(&sql)?{return Ok(json!({"kind":"rows","result":self.management_query(sql,values,options,started)?}));}
-                // Session timezone offsets do not begin or end the managed transaction.
-                if values.is_empty()&&is_session_timezone_offset_statement(&sql){
+                let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                // Session database/timezone changes use COM_QUERY and preserve the managed transaction.
+                if values.is_empty()&&(keyword=="use"||is_session_timezone_offset_statement(&sql)){
+                    let next_epoch=self.session_epoch.checked_add(u64::from(keyword=="use")).ok_or_else(||DriverError::invalid("会话版本已耗尽，请重新连接"))?;
                     let affected=self.execute(&sql,&values)?;
+                    self.session_epoch=next_epoch;
                     return Ok(json!({"kind":"affected","affected":affected,"inTransaction":self.active,"transactionState":n::transaction_state(self.active,self.pending),"executedSql":sql,"elapsedMs":started.elapsed().as_millis()as u64}));
                 }
-                let keyword=sql.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
                 // 部分 MySQL 语句（例如 CREATE/DROP EVENT）不支持预处理语句协议（错误 1295）。
                 // 这类语句直接走文本协议，不再用 prep 做列探测。
                 // CREATE/DROP EVENT 与 CREATE/DROP TRIGGER 都不支持预处理语句协议
                 // （错误 1295），这类语句必须走文本协议。
                 let text_protocol_only=["event","trigger","procedure","function"];let second=sql.split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();let text_only=text_protocol_only.contains(&second.as_str())||text_protocol_only.contains(&keyword.as_str());
                 if !text_only{
-                    let stmt=self.conn.prep(&sql).map_err(error)?;
+                    let prepared_sql=self.session_sql(&sql);let stmt=self.conn.prep(prepared_sql).map_err(error)?;
                     if !stmt.columns().is_empty(){return Ok(json!({"kind":"rows","result":self.run_query(original,options)?}));}
                 }
                 if ["begin","start","commit","rollback","savepoint","release","set"].contains(&keyword.as_str()){return Err(DriverError::unsupported("请使用事务API控制事务"));}

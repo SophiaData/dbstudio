@@ -1,4 +1,5 @@
 import type { ObjectRef } from '../../../src/core/model'
+import { nextTick } from 'vue'
 import { backend, type SmokeFixture } from './backend'
 import { decision } from './dialogs'
 import type { NativeToolHost } from './native-tool-smoke'
@@ -7,6 +8,7 @@ import { ensureSyntaxTree, foldedRanges } from '@codemirror/language'
 import { measureEditorPerformance } from './editor-performance-smoke'
 
 const database = 'dbstudio_acceptance'
+const restoreDatabase = 'dbstudio_restore'
 const options = { host: '127.0.0.1', port: 13306, database, user: 'acceptance', sslmode: 'disable' }
 
 async function waitFor(check: () => boolean | Promise<boolean>) {
@@ -16,6 +18,19 @@ async function waitFor(check: () => boolean | Promise<boolean>) {
     await new Promise((resolve) => setTimeout(resolve, 100))
   } while (Date.now() < end)
   throw new Error('The acceptance condition did not become ready')
+}
+
+function targetText(testId: 'editor-target' | 'result-target') {
+  return document.querySelector<HTMLElement>(`[data-testid="${testId}"]`)?.textContent ?? ''
+}
+
+async function waitForTargetText(testId: 'editor-target' | 'result-target', expected: readonly string[]) {
+  let text = ''
+  await waitFor(() => {
+    text = targetText(testId)
+    return expected.every((value) => text.includes(value))
+  })
+  return text
 }
 
 async function chooseDecision(
@@ -455,6 +470,168 @@ export async function runWindowsMysqlSmoke(wb: Workbench, tools: NativeToolHost,
     check = 'mysql_editor_large_drafts'
     editorPerformance = await measureEditorPerformance(wb, tools)
     checks[check] = true
+
+    check = 'mysql_execution_context'
+    const runContextEditor = async () => {
+      await nextTick()
+      const current = await tools.sqlEditor()
+      if (current.editor?.state.doc.toString() !== wb.sql.value) throw new Error('Context editor has not mounted its draft')
+      current.setSelection(0)
+      document.querySelector<HTMLButtonElement>('#btn-run-sql')!.click()
+    }
+    if (!wb.connections.value.some((item) => item.id === observer.id)) wb.connections.value.push(observer)
+    let contextVerified = false
+    let contextCleaned = false
+    const originalEditorId = wb.openEditorTab(id, 'SELECT DATABASE() AS session_database')
+    const beforeContextResult = wb.tabs.value.length
+    await runContextEditor()
+    await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeContextResult + 1)
+    const originalResult = wb.activeTab.value!
+    const originalSnapshot = originalResult.executionContext
+    await wb.refreshSessionContext(id)
+    await wb.refreshSessionContext(observer.id)
+    const originalTarget = await wb.connectionTarget(id)
+    const observerTargetBefore = await wb.connectionTarget(observer.id)
+    const initialEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库'])
+    const initialResultTarget = await waitForTargetText('result-target', [name, '配置默认库', database, '执行时会话库', '该连接当前状态', '最近核实会话库'])
+    const transactionBeforeUse = await wb.readTransaction(id)
+    checks.mysql_context_initial = originalTarget.session.database === database && originalSnapshot?.session.database === database
+    try {
+      const restoreEditorId = wb.openEditorTab(id, `USE ${restoreDatabase}`)
+      const beforeUseResult = wb.tabs.value.length
+      await runContextEditor()
+      await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeUseResult + 1)
+      const useResult = wb.activeTab.value!
+      await wb.refreshSessionContext(id)
+      const switchedTarget = await wb.connectionTarget(id)
+      const transactionAfterUse = await wb.readTransaction(id)
+      const switchedEditorTarget = await waitForTargetText('editor-target', [name, '配置默认库', database, '最近核实会话库', restoreDatabase])
+      checks.mysql_context_switched = !useResult.executionFailed && switchedTarget.session.database === restoreDatabase
+
+      wb.activateEditorTab(restoreEditorId)
+      wb.activateTab(originalResult)
+      const isolatedResultTarget = await waitForTargetText('result-target', [name, '执行时会话库', database, '该连接当前状态', '最近核实会话库', restoreDatabase])
+      const resultSnapshotRetained = originalResult.executionContext?.session.database === database
+        && originalResult.executionContext?.configuredDatabase === database
+
+      wb.openEditorTab(observer.id, 'SELECT DATABASE() AS observer_session_database')
+      const beforeObserverResult = wb.tabs.value.length
+      await runContextEditor()
+      await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeObserverResult + 1)
+      const observerResult = wb.activeTab.value!
+      await wb.refreshSessionContext(observer.id)
+      const observerTargetAfter = await wb.connectionTarget(observer.id)
+      const observerEditorTarget = await waitForTargetText('editor-target', ['Acceptance observer', '配置默认库', database, '最近核实会话库'])
+      const observerResultTarget = await waitForTargetText('result-target', ['Acceptance observer', '执行时会话库', database, '该连接当前状态', '最近核实会话库'])
+      checks.mysql_context_observer = observerTargetAfter.session.database === database
+
+      const failedEditorId = wb.openEditorTab(id, 'USE dbstudio_context_missing')
+      const beforeFailedUse = wb.tabs.value.length
+      await runContextEditor()
+      await waitFor(() => !wb.executing.value && wb.tabs.value.length === beforeFailedUse + 1
+        && wb.activeTab.value?.executionFailed === true)
+      const failedUseResult = wb.activeTab.value!
+      await wb.refreshSessionContext(id)
+      const afterFailedUse = await wb.connectionTarget(id)
+      const transactionAfterFailedUse = await wb.readTransaction(id)
+      const failedEditorTarget = await waitForTargetText('editor-target', [name, restoreDatabase, '最近核实会话库'])
+      const failedResultTarget = await waitForTargetText('result-target', [name, restoreDatabase, '执行时会话库', '该连接当前状态'])
+      checks.mysql_context_failed_use = failedUseResult.executionFailed === true && afterFailedUse.session.database === restoreDatabase
+
+      wb.activateEditorTab(restoreEditorId)
+      wb.activateTab(observerResult)
+      const crossedResultTarget = await waitForTargetText('result-target', ['Acceptance observer', database, '执行时会话库', '该连接当前状态'])
+      wb.activateEditorTab(originalEditorId)
+      const crossedEditorTarget = await waitForTargetText('editor-target', [name, restoreDatabase, '最近核实会话库'])
+      wb.activateTab(originalResult)
+      const crossedBackResultTarget = await waitForTargetText('result-target', [name, database, restoreDatabase, '执行时会话库', '该连接当前状态'])
+      checks.mysql_context_crossed = resultSnapshotRetained
+
+      const observerTable: ObjectRef = {
+        id: `${connectionNode(observer.id)}|table:${database}.items`,
+        name: 'items',
+        kind: 'table',
+        parentId: connectionNode(observer.id),
+        hasChildren: true
+      }
+      await wb.openTable(observerTable)
+      await nextTick()
+      const itemLabels = Array.from(document.querySelectorAll<HTMLButtonElement>('.result-tab .tab-label'))
+        .map((label) => (label.textContent ?? '').trim())
+        .filter((label) => label.startsWith('items'))
+      const tableLabelsDisambiguated = itemLabels.some((label) => label.includes(name))
+        && itemLabels.some((label) => label.includes('Acceptance observer'))
+      checks.mysql_context_labels = tableLabelsDisambiguated
+
+      contextVerified = originalTarget.connectionId === id
+        && originalTarget.connectionName === name
+        && originalTarget.dialectId === 'mysql'
+        && originalTarget.configuredDatabase === database
+        && originalTarget.connected === true
+        && originalTarget.session.status === 'ready'
+        && originalTarget.session.database === database
+        && observerTargetBefore.configuredDatabase === database
+        && observerTargetBefore.session.status === 'ready'
+        && observerTargetBefore.session.database === database
+        && originalSnapshot?.connectionId === id
+        && originalSnapshot.connectionName === name
+        && originalSnapshot.configuredDatabase === database
+        && originalSnapshot.session.database === database
+        && initialEditorTarget.includes('配置默认库') && initialEditorTarget.includes('最近核实会话库')
+        && initialResultTarget.includes('执行时会话库') && initialResultTarget.includes('该连接当前状态')
+        && switchedTarget.configuredDatabase === database
+        && switchedTarget.session.status === 'ready'
+        && switchedTarget.session.database === restoreDatabase
+        && switchedEditorTarget.includes(name) && switchedEditorTarget.includes(restoreDatabase)
+        && useResult.executionContext?.session.database === database
+        && transactionBeforeUse.active === false && transactionBeforeUse.pendingAffected === 0
+        && transactionAfterUse.active === false && transactionAfterUse.pendingAffected === 0
+        && transactionAfterFailedUse.active === false && transactionAfterFailedUse.pendingAffected === 0
+        && isolatedResultTarget.includes(database) && isolatedResultTarget.includes(restoreDatabase)
+        && resultSnapshotRetained
+        && observerTargetAfter.configuredDatabase === database
+        && observerTargetAfter.session.status === 'ready'
+        && observerTargetAfter.session.database === database
+        && observerResult.executionContext?.session.database === database
+        && observerEditorTarget.includes(database)
+        && observerResultTarget.includes(database)
+        && afterFailedUse.configuredDatabase === database
+        && afterFailedUse.session.status === 'ready'
+        && afterFailedUse.session.database === restoreDatabase
+        && failedUseResult.executionContext?.session.database === restoreDatabase
+        && failedEditorTarget.includes(restoreDatabase)
+        && !failedEditorTarget.includes('dbstudio_context_missing')
+        && failedResultTarget.includes(restoreDatabase)
+        && !failedResultTarget.includes('dbstudio_context_missing')
+        && crossedResultTarget.includes(database)
+        && crossedEditorTarget.includes(restoreDatabase)
+        && crossedBackResultTarget.includes(database) && crossedBackResultTarget.includes(restoreDatabase)
+        && tableLabelsDisambiguated
+      checks.mysql_context_verified = contextVerified
+      wb.activateEditorTab(failedEditorId)
+    } finally {
+      await backend.executeStatement(connectionNode(id), `USE ${database}`, {})
+      await backend.rollbackTransaction(connectionNode(id))
+      await wb.refreshSessionContext(id)
+      wb.activateEditorTab(originalEditorId)
+      wb.activateTab(originalResult)
+      const restoredTarget = await wb.connectionTarget(id)
+      const transaction = await wb.readTransaction(id)
+      const observerTransaction = await wb.readTransaction(observer.id)
+      const restoredEditorTarget = await waitForTargetText('editor-target', [name, database])
+      const restoredResultTarget = await waitForTargetText('result-target', [name, database])
+      contextCleaned = restoredTarget.configuredDatabase === database
+        && restoredTarget.session.status === 'ready'
+        && restoredTarget.session.database === database
+        && transaction.active === false
+        && transaction.pendingAffected === 0
+        && observerTransaction.active === false
+        && observerTransaction.pendingAffected === 0
+        && !restoredEditorTarget.includes(restoreDatabase)
+        && !restoredResultTarget.includes(restoreDatabase)
+      checks.mysql_context_cleanup = contextCleaned
+    }
+    checks[check] = contextVerified && contextCleaned
   } catch {
     checks[check] = false
   }

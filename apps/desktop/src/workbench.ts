@@ -12,6 +12,7 @@ import { extractSqlParameters, bindSqlParameters, type SqlParameterDialect } fro
 import { parseFilter, buildFilteredSql } from '../../../src/core/filter-sql'
 import { backend, errorText, migrationStatus } from './backend'
 import { askDecision, confirmAction } from './dialogs'
+import { connectionTarget as makeConnectionTarget, contextQuery, readSessionContext, sameSession, unknownSession, type ConnectionTarget, type SessionContext } from './connection-context'
 import {
   createEditorTabStore,
   parseNumericCell,
@@ -35,6 +36,8 @@ export interface EditorExecution {
   readonly editorTabId: string
   readonly connectionId: string
   readonly connectionRevision: number
+  readonly sessionVersion?: number
+  readonly target?: ConnectionTarget
   readonly sql: string
   readonly source?: SqlSourceRange
 }
@@ -70,6 +73,9 @@ export interface ResultTab {
   id: string
   connectionId: string
   editorTabId?: string
+  executionContext?: ConnectionTarget
+  contextStale?: boolean
+  contextRevision?: number
   executionFailed?: boolean
   failure?: SqlExecutionFailure
   title: string
@@ -137,6 +143,43 @@ export function useWorkbench() {
   const currentConnectionId = computed(() => activeEditorTab.value?.connectionId ?? '')
   const editorStorageWarning = ref(editorStore.warning)
   const connectionRevisions = new Map<string, number>()
+  const sessionContexts = reactive<Record<string, SessionContext>>({})
+  const sessionVersions = new Map<string, number>()
+  function updateSessionContext(id: string, value: SessionContext) {
+    sessionContexts[id] = value
+    for (const tab of tabs.value) {
+      const origin = tab.executionContext
+      if (tab.connectionId === id && !tab.table && origin && contextQuery(origin.dialectId)) {
+        tab.contextRevision = (tab.contextRevision ?? 0) + 1
+        tab.contextStale = origin.session.status !== 'ready' || value.status !== 'ready' || !sameSession(origin.session, value)
+      }
+    }
+  }
+  function connectionTarget(id: string) {
+    const connection = connections.value.find(item => item.id === id)
+    return makeConnectionTarget(connection, id, connection?.connected ? sessionContexts[id] ?? unknownSession() : unknownSession())
+  }
+  function forgetSession(id: string) {
+    updateSessionContext(id, unknownSession())
+    sessionVersions.set(id, (sessionVersions.get(id) ?? 0) + 1)
+  }
+  async function refreshSessionContext(id: string, signalId?: string) {
+    const connection = connections.value.find(item => item.id === id)
+    const query = contextQuery(connection?.dialectId ?? '')
+    if (!connection?.connected || !query) { updateSessionContext(id, unknownSession()); return }
+    const revision = connectionRevisions.get(id) ?? 0
+    const marker: SessionContext = reactive({ status: 'loading', database: null, schema: null })
+    updateSessionContext(id, marker)
+    const owns = () => sessionContexts[id] === marker && (connectionRevisions.get(id) ?? 0) === revision &&
+      connections.value.some(item => item.id === id && item.connected && item.dialectId === connection.dialectId)
+    try {
+      const result = await backend.runQuery(connectionNode(id), query, { limit: 1, keepCursor: false, ...(signalId ? { signalId } : {}) })
+      const value = readSessionContext(result, connection.dialectId)
+      if (owns()) updateSessionContext(id, value)
+    } catch (cause) {
+      if (owns()) updateSessionContext(id, { status: 'error', database: null, schema: null, error: errorText(cause) })
+    }
+  }
   let legacyDraftsRestored = editorStore.restored?.legacyDraftsRestored === true
   const persistEditorTabs = () => {
     editorStorageWarning.value = editorStore.write(activeEditorTabId.value, editorTabs.value, legacyDraftsRestored)
@@ -161,6 +204,7 @@ export function useWorkbench() {
   const metadataReady = ref(false)
   const executing = ref(false)
   const activeSignal = ref('')
+  let executionCancelled = false
   const executionConnectionId = ref('')
   const executionConnection = computed(() => connections.value.find((connection) => connection.id === executionConnectionId.value) ?? null)
   const migrationWarning = ref('')
@@ -241,6 +285,9 @@ export function useWorkbench() {
   async function refreshConnections() {
     const [list, nodes] = await Promise.all([backend.listConnections(), backend.listChildren(null)])
     connections.value = list
+    for (const id of Object.keys(sessionContexts)) {
+      if (!list.some(item => item.id === id && item.connected)) forgetSession(id)
+    }
     roots.value = nodes.map(makeNode)
     metadataReady.value = true
     if (selected.value?.kind === 'connection') selected.value = nodes.find((node) => node.id === selected.value?.id) ?? null
@@ -344,6 +391,7 @@ export function useWorkbench() {
   function newTab(connectionId: string, title: string, sqlText: string, table: ObjectRef | null = null, description: TableDescription | null = null, editorTabId?: string): ResultTab {
     const tab: ResultTab = reactive({
       id: crypto.randomUUID(), connectionId, editorTabId, title, table, description, sql: sqlText, querySql: sqlText,
+      executionContext: connectionTarget(connectionId),
       parameters: [], result: null, page: null, message: '', busy: false, invalidated: false,
       dirty: new Map(), selectedRows: new Set(), filter: '', appliedFilter: '', pageSize: PAGE_SIZE, order: [], generation: 0
     })
@@ -358,6 +406,7 @@ export function useWorkbench() {
   }
   async function openTable(node: ObjectRef) {
     selectNode(node)
+    await refreshSessionContext(connectionOf(node.id))
     const desc = await backend.describeTable(node.id)
     const sqlText = await backend.tableSelectSql(node.id)
     const tab = newTab(connectionOf(node.id), node.name, sqlText, node, desc)
@@ -388,12 +437,16 @@ export function useWorkbench() {
       throw new Error('SQL 草稿或选区已变化，请重新发起执行')
     }
     const origin = source ? { ...source } : script === tab.sql ? { document: tab.sql, from: 0, to: script.length } : undefined
-    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0, sql: script, source: origin }
+    return { editorTabId: tab.id, connectionId: tab.connectionId, connectionRevision: connectionRevisions.get(tab.connectionId) ?? 0,
+      sessionVersion: sessionVersions.get(tab.connectionId) ?? 0, target: connectionTarget(tab.connectionId), sql: script, source: origin }
   }
   async function executeEditorRequest(request: EditorExecution, parameters: ScopedSqlParameter[] = []) {
     const tab = editorTabs.value.find((item) => item.id === request.editorTabId)
     if (!tab || tab.connectionId !== request.connectionId || (connectionRevisions.get(request.connectionId) ?? 0) !== request.connectionRevision) {
       throw new Error('原 SQL 标签已关闭或连接已变化，请重新发起执行')
+    }
+    if (request.sessionVersion !== undefined && request.sessionVersion !== (sessionVersions.get(request.connectionId) ?? 0)) {
+      throw new Error('同连接已执行其他 SQL，会话可能已变化，请重新发起执行')
     }
     return executeTarget(request, parameters)
   }
@@ -420,11 +473,22 @@ export function useWorkbench() {
       )
     }
     executing.value = true
+    executionCancelled = false
     executionConnectionId.value = connection.id
     activeSignal.value = crypto.randomUUID()
     let historyWarning = ''
     try {
+      await refreshSessionContext(connection.id, activeSignal.value)
+      if (executionCancelled) throw new Error('已取消执行，未发送后续 SQL')
+      if (request.target?.session.status === 'ready' && !sameSession(request.target.session, connectionTarget(connection.id).session)) {
+        throw new Error('会话库已变化或无法确认，请核对执行目标后重新执行')
+      }
+      sessionVersions.set(connection.id, (sessionVersions.get(connection.id) ?? 0) + 1)
       for (const statement of statements) {
+        if (executionCancelled) throw new Error('已取消执行，未发送后续 SQL')
+        if (statement.index > 0 && contextQuery(connection.dialectId) && connectionTarget(connection.id).session.status !== 'ready') {
+          throw new Error('前序语句已执行，但会话目标无法确认；后续 SQL 未发送，请核对后重新执行')
+        }
         const supplied = scopedParametersForStatement(parameters, statement.index)
         const tab = newTab(connection.id, `SQL ${statement.index + 1}`, statement.sql, null, null, request.editorTabId)
         tab.parameters = supplied
@@ -457,7 +521,7 @@ export function useWorkbench() {
           tab.message = `${connection.name} · ${location}：${executed ? '语句已执行，后续处理失败；请先核对结果。' : ''}${errorText(cause)}`
           throw new Error(tab.message)
         }
-        finally { tab.busy = false }
+        finally { await refreshSessionContext(connection.id, activeSignal.value); tab.busy = false }
       }
       setStatus(`已执行 ${statements.length} 条语句${historyWarning ? ` · ${historyWarning}` : ''}`, Boolean(historyWarning))
     } finally { executing.value = false; activeSignal.value = ''; executionConnectionId.value = '' }
@@ -467,6 +531,7 @@ export function useWorkbench() {
     const signal = activeSignal.value
     if (!executing.value || !id || !signal) throw new Error('当前没有正在执行的查询')
     if (!executionConnection.value?.capabilities?.supportsCancel) throw new Error('当前执行查询的驱动不支持取消')
+    executionCancelled = true
     const cancelled = await backend.cancelQuery(connectionNode(id), signal)
     setStatus(cancelled ? '已请求取消执行' : '未取消：当前没有正在执行的查询或驱动无法取消', !cancelled)
   }
@@ -522,13 +587,18 @@ export function useWorkbench() {
     tab.busy = true
     const generation = ++tab.generation
     try {
+      await refreshSessionContext(tab.connectionId)
+      const executionContext = connectionTarget(tab.connectionId)
       const result = await backend.runQuery(connectionNode(tab.connectionId), transform?.querySql ?? tab.querySql, { limit: tab.pageSize ?? PAGE_SIZE, offset, keepCursor: true, parameters: tab.parameters })
       if (generation !== tab.generation || tab.invalidated || !tabs.value.includes(tab)) { if (result.cursorId) await backend.closeCursor(result.cursorId); return }
       if (transform) { tab.querySql = transform.querySql; tab.order = transform.order; tab.appliedFilter = transform.appliedFilter }
+      tab.executionContext = executionContext
+      tab.contextStale = !tab.table && Boolean(contextQuery(executionContext.dialectId)) && executionContext.session.status !== 'ready'
       await setResult(tab, result)
     } finally { tab.busy = false }
   }
   async function fetchTabPage(tab: ResultTab, offset: number, size: number) {
+    if (tab.contextStale) throw new Error('会话目标已变化或未确认，请先刷新结果再翻页')
     const result = tab.result, page = tab.page, cursor = result?.cursorId, generation = tab.generation
     const previousSize = tab.pageSize ?? PAGE_SIZE
     if (!cursor || !page || tab.invalidated || !tabs.value.includes(tab)) return
@@ -560,6 +630,7 @@ export function useWorkbench() {
     await fetchTabPage(tab, 0, size)
   }
   async function transformTab(tab: ResultTab, order = tab.order) {
+    if (tab.contextStale) throw new Error('会话目标已变化或未确认，请先刷新结果再排序或筛选')
     if (pendingEditors.has(tab.id)) throw new Error('请先保存或取消正在编辑的单元格/新增行')
     if (tab.invalidated) throw new Error('连接已关闭或更新，请重新打开结果')
     const appliedFilter = tab.filter
@@ -728,7 +799,7 @@ export function useWorkbench() {
     return 'discarded' as const
   }
   async function refreshConnectionTabs(id: string) {
-    for (const tab of tabs.value.filter((t) => t.connectionId === id && t.result && !t.invalidated)) await reloadTab(tab, false)
+    for (const tab of tabs.value.filter((t) => t.connectionId === id && t.result && !t.invalidated && !t.contextStale)) await reloadTab(tab, false)
   }
   async function settleTransaction(id: string, commit: boolean) {
     const localTabs = tabs.value.filter((tab) => tab.connectionId === id && tab.dirty.size)
@@ -769,6 +840,7 @@ export function useWorkbench() {
   }
   async function invalidateConnection(id: string) {
     connectionRevisions.set(id, (connectionRevisions.get(id) ?? 0) + 1)
+    forgetSession(id)
     for (const tab of tabs.value.filter((t) => t.connectionId === id)) {
       tab.invalidated = true; tab.generation++; tab.dirty.clear(); tab.selectedRows.clear()
       await releaseCursor(tab)
@@ -802,6 +874,7 @@ export function useWorkbench() {
     try {
       await backend.connectConnection(id)
       connectionRevisions.set(id, (connectionRevisions.get(id) ?? 0) + 1)
+      forgetSession(id)
       await refreshConnections()
     } finally { locks.delete(id) }
   }
@@ -964,6 +1037,7 @@ export function useWorkbench() {
   }
   return {
     connections, dialects, roots, selected, currentConnectionId, currentConnection, sql, tabs, activeTabId, activeTab, activeContext,
+    sessionContexts, connectionTarget, refreshSessionContext: (id: string) => withConnectionOperation(id, () => refreshSessionContext(id)),
     transactions, locks, backgroundTasks, pendingEditors, status, statusError, booting, metadataReady, executing, executionConnectionId, executionConnection, migrationWarning,
     setStatus, attempt, boot, refreshConnections, selectConnection, activateTab, selectNode, toggleNode, placeholders, parameterSlots,
     editorTabs, activeEditorTabId, editorStorageWarning, openEditorTab, activateEditorTab, closeEditorTab,
