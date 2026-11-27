@@ -11,7 +11,8 @@ export async function checkWorkbenchLayout({ page, baseUrl, check, output }) {
       await page.getByText('已打开 items', { exact: false }).waitFor()
       const grid = page.locator('.grid-scroll')
       // A real scroll viewport must remain even when the toolbars wrap.
-      assert.ok(await grid.evaluate(el => el.clientHeight) >= 160, 'grid collapsed below an operable height')
+      const gridHeight = await grid.evaluate(el => el.clientHeight)
+      assert.ok(gridHeight >= 160 && gridHeight <= height, 'grid collapsed below an operable height or expanded to all rows')
       const first = page.locator('tbody td[data-column-index="1"]').first()
       await first.scrollIntoViewIfNeeded()
       assert.equal(await first.evaluate(el => {
@@ -30,6 +31,14 @@ export async function checkWorkbenchLayout({ page, baseUrl, check, output }) {
       await editor.scrollIntoViewIfNeeded()
       await editor.click()
       assert.equal(await editor.evaluate(el => el.contains(document.activeElement)), true)
+      await page.getByLabel('本页搜索', { exact: true }).fill('row-200')
+      await page.getByRole('button', { name: '下一个匹配', exact: true }).click()
+      const match = page.locator('tbody td[data-column-index="1"]').last()
+      assert.equal(await match.evaluate(el => {
+        const r = el.getBoundingClientRect()
+        return el === document.activeElement && r.top >= 0 && r.bottom <= innerHeight &&
+          el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))
+      }), true, 'search focus must reveal the match through both scroll containers')
       assert.deepEqual(await page.evaluate(() => window.workbenchLayout.unexpected), [])
       await first.scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(output, `workbench-${width}x${height}.png`) })

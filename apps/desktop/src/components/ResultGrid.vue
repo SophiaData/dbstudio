@@ -90,6 +90,8 @@ function revealCell(row: ResultRow, column: number) {
   const scroller = viewport.value
   const element = cellElement(row, column)
   if (!scroller || !element) return
+  // The workbench itself can scroll when its toolbars exceed the window height.
+  scroller.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   const box = element.getBoundingClientRect()
   const view = scroller.getBoundingClientRect()
   const top = scroller.querySelector('thead th')?.getBoundingClientRect().bottom ?? view.top + scroller.clientTop

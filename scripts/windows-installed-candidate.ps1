@@ -559,11 +559,15 @@ public static class AcceptanceDesktop {
     # Keep a normal window inside the work area; do not maximize or bypass UI clicks.
     $workArea = [Windows.Forms.Screen]::FromHandle($app.Process.MainWindowHandle).WorkingArea
     $windowBounds = $app.Window.Current.BoundingRectangle
+    if ($workArea.Width -lt 820 -or $workArea.Height -lt 520 -or $windowBounds.Width -le 0 -or $windowBounds.Height -le 0) {
+        Stop-Acceptance 'BLOCKED_DESKTOP_TOO_SMALL'
+    }
     $windowWidth = [Math]::Min([int]$windowBounds.Width, $workArea.Width)
     $windowHeight = [Math]::Min([int]$windowBounds.Height, $workArea.Height)
     if (-not [AcceptanceDesktop]::SetWindowPos($app.Process.MainWindowHandle, [IntPtr]::Zero,
         $workArea.X, $workArea.Y, $windowWidth, $windowHeight, 0x0014)) { Stop-Acceptance 'WINDOW_FIT_FAILED' }
-    $report.windowSize = @{ width = $windowWidth; height = $windowHeight }
+    $actualBounds = $app.Window.Current.BoundingRectangle
+    $report.windowSize = @{ width = $actualBounds.Width; height = $actualBounds.Height }
     if (-not [AcceptanceDesktop]::FocusDialog($app.Process.MainWindowHandle)) { Stop-Acceptance 'APP_WINDOW_NOT_FOCUSED' }
     $script:action = 'wait_application_ready'
     $startup = [Diagnostics.Stopwatch]::StartNew()
