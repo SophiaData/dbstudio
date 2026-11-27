@@ -135,6 +135,16 @@ function Invoke-Button($Window, [string]$Name, [switch]$ContainsName) {
     Stop-Acceptance 'EDITOR_TAB_NOT_SELECTED'
 }
 
+function Find-FocusedControl($App, $Type, [string]$Name) {
+    $control = Find-Control $App.Window $Type $Name -AllowOffscreen
+    if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'APP_WINDOW_NOT_FOCUSED' }
+    $scroll = $null
+    if ($control.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) { $scroll.ScrollIntoView() }
+    $control.SetFocus()
+    # Still require visibility after the native focus/scroll operation.
+    return Find-Control $App.Window $Type $Name
+}
+
 function Set-EditText($Edit, [string]$Value) {
     $pattern = $null
     if ($Edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {
@@ -171,7 +181,7 @@ function Wait-SqlEditorText($Editor, [string]$Expected) {
 
 function Set-SqlEditorText($App, [string]$Value) {
     $types = @([Windows.Automation.ControlType]::Edit, [Windows.Automation.ControlType]::Document)
-    $editor = Find-Control $App.Window $types 'SQL 编辑器'
+    $editor = Find-FocusedControl $App $types 'SQL 编辑器'
     if (-not [AcceptanceDesktop]::FocusDialog($App.Process.MainWindowHandle)) { Stop-Acceptance 'SQL_EDITOR_WINDOW_NOT_FOCUSED' }
     $script:action = 'focus_sql_editor'
     $editor.SetFocus()
@@ -622,8 +632,9 @@ public static class AcceptanceDesktop {
     $script:action = 'failed_sql_navigation'
     $failureSql = "SELECT 1;`nSELECT dbstudio_missing_column;`nSELECT 3;"
     $sqlEditor = Set-SqlEditorText $app $failureSql
+    $script:action = 'failed_sql_navigation'
     [Windows.Forms.SendKeys]::SendWait('+{ENTER}')
-    $locate = Find-Control $app.Window $button '定位执行语句'
+    $locate = Find-FocusedControl $app $button '定位执行语句'
     Invoke-Button $app.Window '定位执行语句'
     $pattern = $sqlEditor.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern)
     $deadline = [datetime]::UtcNow.AddSeconds(10)
@@ -651,7 +662,7 @@ public static class AcceptanceDesktop {
     $table = Find-Control $tree ([Windows.Automation.ControlType]::TreeItem) 'items' -ContainsName
     Invoke-ControlDoubleClick $app $table
     # A table result, unlike the earlier SQL query, exposes the import action.
-    $null = Find-Control $app.Window $button '导入 CSV…'
+    $null = Find-FocusedControl $app $button '导入 CSV…'
 
     $script:action = 'edit_and_preview'
     Edit-GridValue $app 'row-1' 'candidate-committed'
@@ -662,6 +673,7 @@ public static class AcceptanceDesktop {
         Stop-Acceptance 'PREVIEW_WROTE_DATA'
     }
     Invoke-Button $app.Window '应用修改'
+    $null = Find-FocusedControl $app $button '提交'
     $null = Find-Control $app.Window $cell '未提交 · 1 行'
     if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'row-1') {
         Stop-Acceptance 'UNCOMMITTED_DATA_VISIBLE'
@@ -683,6 +695,7 @@ public static class AcceptanceDesktop {
     Invoke-Button $app.Window '应用修改 (1)'
     $null = Find-Control $app.Window $cell '更新 SQL 预览' -AllowOffscreen
     Invoke-Button $app.Window '应用修改'
+    $null = Find-FocusedControl $app $button '回滚'
     $null = Find-Control $app.Window $cell '未提交 · 1 行'
     $null = Find-Control $app.Window $cell 'candidate-rolled-back' -AllowOffscreen
     if ((& $ReadFixtureSql 'SELECT payload FROM dbstudio_acceptance.items WHERE id=1;') -cne 'candidate-committed') {
